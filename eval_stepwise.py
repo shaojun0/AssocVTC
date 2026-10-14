@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or ".")
 from data_multi import (DEFAULT_DATA_ROOT, DINO_MEAN, DINO_STD, BucketBatchSampler,
                         MultiResCollator, MultiSourceDataset, build_index)
 from model_multi import RESOS, MultiResSR
-from srdiff_runtime import Runtime
+from srdiff_runtime import Runtime, configure_sdpa
 
 ENV = os.environ.get
 STD = torch.tensor(DINO_STD, dtype=torch.float32).view(3, 1)
@@ -83,6 +83,8 @@ def main():
     ap.add_argument("--precision", default="bf16")
     ap.add_argument("--device_type", default=ENV("SRDIFF_DEVICE", "auto"))
     ap.add_argument("--attn_implementation", default="auto")
+    ap.add_argument("--sdpa_backend", default="auto",
+                    help="与训练保持一致（DCU 上融合后端崩溃时切 math）；见 train_multi")
     ap.add_argument("--out", default="", help="默认 <ckpt 目录>/eval_stepwise.json")
     args = ap.parse_args()
 
@@ -95,6 +97,9 @@ def main():
 
     def log(*a):
         print(*a, flush=True)
+
+    log(f"[eval] SDPA 后端: {configure_sdpa(args.sdpa_backend, args.device_type)}"
+        f"  ← --sdpa_backend {args.sdpa_backend}")
 
     # 注意 build_index 的 cap 是 files[:cap] ⇒ 0 会取 0 张，这里用大数表示"不截断"
     src = [(args.data_root, (".jpg", ".jpeg", ".png"), 10 ** 9)]

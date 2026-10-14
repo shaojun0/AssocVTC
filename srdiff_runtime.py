@@ -312,6 +312,54 @@ class Runtime:
                 f"n={d['device_count']}, backend={d['dist_backend']})")
 
 
+# ── SDPA 后端策略（DCU 上融合后端崩溃的逃生门）───────────────────────────────
+_SDPA_ATTRS = {"flash": "enable_flash_sdp",
+               "efficient": "enable_mem_efficient_sdp",
+               "math": "enable_math_sdp"}
+
+
+def configure_sdpa(backend: str = "auto", device_type: str = "auto") -> str:
+    """**全局**设定 `scaled_dot_product_attention` 的后端开关，返回可读的结果串。
+
+    为什么必须是全局而不是 `sdpa_kernel` 上下文管理器：解码器把整段 12 步用
+    `torch.utils.checkpoint(..., use_reentrant=False)` 包着，**重算发生在 backward**，
+    在 forward 的 `with` 块之外 ⇒ 局部上下文管不到重算那一次，仍会踩到坏后端。
+
+    为什么需要它（2026-10-14 实测）：DCU 上 `nn.MultiheadAttention`（解码器
+    self/cross-attention 的必经之路，**不受 `--attn_implementation` 影响** ——
+    那个只作用于 HF 的 DINOv2 编码器）在 bf16 下抛
+    `IndexError: select(): index 0 out of range for tensor of size [0] at dimension 0`。
+    本地把零 batch / 零 query / 零 kv / 空 memory 全喂给 math 后端**都能通过**
+    ⇒ 不是形状问题，是该平台融合后端（flash/CK 或 efficient）自身的 bug。
+
+    backend: auto | default | math | efficient | flash | math+efficient（"+"或","分隔）
+      · auto: ROCm/DCU（未实测平台）⇒ math（最稳，先跑通）；其它平台 ⇒ default（不动）
+    """
+    if backend in (None, "", "default"):
+        return "default（不改后端）"
+    if backend == "auto":
+        backend = "math" if (is_rocm() or device_type == "dcu") else "default"
+        if backend == "default":
+            return "default（不改后端）"
+    import torch
+    want = {b for b in backend.replace("+", ",").split(",") if b}
+    unknown = want - set(_SDPA_ATTRS)
+    if unknown:
+        return f"未知后端 {sorted(unknown)}（可选 {sorted(_SDPA_ATTRS)}；用 +/,- 组合）"
+    out = []
+    for name, attr in _SDPA_ATTRS.items():
+        fn = getattr(torch.backends.cuda, attr, None)
+        if fn is None:
+            out.append(f"{name}=n/a")
+            continue
+        try:
+            fn(name in want)
+            out.append(f"{name}={'on' if name in want else 'off'}")
+        except Exception as e:
+            out.append(f"{name}=ERR({type(e).__name__})")
+    return " ".join(out)
+
+
 def summarize_env() -> dict:
     """一行命令打印环境（`python srdiff_runtime.py`）。"""
     rt = Runtime("auto")

@@ -96,7 +96,7 @@ register 看到 ⇒ 只能同尺寸成批）；② 4 个解码器按「原图最
 |---|---|---|---|
 | 1 | **torch 装错版本** | DCU 必须装 dtkit + ROCm 版 torch，`torch.version.hip` 才非空。装了 CUDA 版 torch 的 DCU 机器上 `torch.cuda.is_available()` 直接 False ⇒ 会静默落到 CPU | 先跑自检；`--device_type dcu` 在非 ROCm 上会 warn |
 | 2 | **bf16 可能不可用** | 海光 Z100 级（gfx906）没有 bf16 矩阵核；K100-AI 有 | 显式 `--precision fp32`（或 fp16）；不要依赖自动降级 |
-| 3 | **SDPA 退化/报错** | gfx906/gfx928 通常没有 CK flash-attn 后端，SDPA 退 math（能跑但慢）；个别 dtkit 版本上 SDPA 直接抛错 | `auto` 在 ROCm 上已默认 `eager`；确认无误后可切 `sdpa` 提速 |
+| 3 | **SDPA 融合后端崩溃（已实测发生 ✅）** | 用户 8 卡 DCU bf16 实跑，第一个解码器 self-attention 即抛 `IndexError: select(): index 0 out of range for tensor of size [0] at dimension 0`（栈：`TransformerDecoderLayer._sa_block → nn.MultiheadAttention → F.multi_head_attention_forward → F.scaled_dot_product_attention`）。本地把零 batch / 零 query / 零 kv / 空 memory 全喂给 **math** 后端**都能通过** ⇒ **不是形状问题，是该平台融合后端的 bug** | **全局**关掉坏后端（必须全局：梯度检查点的重算在 backward，局部 `sdpa_kernel` 上下文管不到）：`--sdpa_backend math`（最稳）或 `math+efficient`（要速度）。诊断用 `tools/diag_sdpa.py`（按解码器真实形状逐后端跑，几十秒给结论） |
 | 4 | **RCCL 多卡通信** | 多卡 DDP 依赖 RCCL，DCU 上版本/拓扑问题比 CUDA 多 | 用自检的分布式项单机 `all_reduce` 先验；再上 2 卡冒烟 |
 | 5 | **显存可能不够** | ×10 解码器在 A800 上峰值 **58.9 GiB/卡**（bs 上限 6 / patch_budget 6144）；DCU 单卡常见 16–64 GB | 按显存调小 `--batch_size` / `--patch_budget`，或 `--grad_accum` 补全局 batch |
 | 6 | **性能未知** | DCU 的 bf16/fp16 吞吐与 DINOv2 24 层 + 解码器 12 步 BPTT 的实际 it/s 无任何实测 | 先 `--smoke --max_steps 3` 量 s/step，再排期 |

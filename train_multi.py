@@ -66,7 +66,7 @@ from transformers.optimization import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
-from srdiff_runtime import Runtime
+from srdiff_runtime import Runtime, configure_sdpa
 
 ENV = os.environ.get
 
@@ -90,7 +90,14 @@ def get_args():
                         "显式指定时会走更保守的注意力实现默认值；见 srdiff_runtime")
     p.add_argument("--precision", default="bf16", choices=["bf16", "fp16", "fp32"])
     p.add_argument("--attn_implementation", default="auto",
-                   choices=["auto", "sdpa", "eager", "flash_attention_2"])
+                   choices=["auto", "sdpa", "eager", "flash_attention_2"],
+                   help="只作用于 HF DINOv2 编码器；解码器的 nn.MultiheadAttention "
+                        "始终走 SDPA，要控它用 --sdpa_backend")
+    p.add_argument("--sdpa_backend", default="auto",
+                   help="SDPA 后端开关（**全局**）：auto|default|math|efficient|flash，"
+                        "可用 +/,- 组合如 math+efficient。auto = ROCm/DCU 强制 math "
+                        "（先跑通），其它平台不动。DCU 上 nn.MultiheadAttention 的 bf16 "
+                        "融合后端崩溃时，用它切到 math")
     p.add_argument("--no_pin_memory", action="store_true")
     # ── 模型 ──
     p.add_argument("--num_specials", type=int, default=144)
@@ -271,11 +278,14 @@ def main():
             print(*a, flush=True)
 
     d = runtime.describe()
+    sdpa_state = configure_sdpa(args.sdpa_backend, args.device_type)
     log(f"[env] device={d['device_type']} name={d['device_name']} "
         f"count={d['device_count']} torch={d['torch']} rocm={d['rocm_hip']} "
         f"backend={d['dist_backend']} | world={accelerator.num_processes} "
         f"rank={accelerator.process_index} | precision={precision} "
         f"grad_accum={args.grad_accum} | attn={runtime.attn_implementation(args.attn_implementation)}")
+    log(f"[env] SDPA 后端（全局, 影响前向与 backward 重算）: {sdpa_state}"
+        f"  ← --sdpa_backend {args.sdpa_backend}")
     if runtime.device_type == "cpu":
         log("[env] ⚠️ CPU：只能冒烟，DINOv2-large 在 CPU 上不可训练")
     os.makedirs(args.output_dir, exist_ok=True)
