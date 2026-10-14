@@ -62,7 +62,7 @@ register 看到 ⇒ 只能同尺寸成批）；② 4 个解码器按「原图最
 | 平台 | 设备串 | 分布式后端 | 状态 |
 |---|---|---|---|
 | NVIDIA CUDA | `cuda` | `nccl` | ✅ **本轮实测**：2× A800，`accelerate launch --multi_gpu`，bf16 + 双梯度检查点跑通 |
-| 海光 DCU（ROCm/HIP） | `cuda` | `nccl` | ⚠️ 代码路径已就位（ROCm 版 torch 的 `torch.cuda` 就是 HIP；`Runtime.is_rocm()` 可切 attn 实现），**未实测** |
+| 海光 DCU（ROCm/HIP） | `cuda`（别名 `dcu`） | `nccl`（即 RCCL） | ❌ **未适配/未实测**：只做到「代码路径就位」，从未在 DCU 真机上跑过一次。逐项风险与验收步骤见 §2.1 |
 | 昇腾 NPU | `npu` | `hccl` | ⚠️ 路径已就位（自动 `import torch_npu`；`attn_implementation` 在 `auto` 下降级 `eager`），**未实测** |
 | Intel XPU | `xpu` | `ccl` | ⚠️ 路径已就位，**未实测** |
 | CPU | `cpu` | `gloo` | ✅ 本地冒烟实测跑通（`--smoke`，fp32），**训练不可行**（DINOv2-large） |
@@ -70,6 +70,63 @@ register 看到 ⇒ 只能同尺寸成批）；② 4 个解码器按「原图最
 「就位」的确切含义：代码里不再有任何平台分支散落在训练逻辑中，全部经
 `srdiff_runtime.Runtime` 解析；未实测的平台还需要在真机上过一遍 L1/L2/L3 阶梯
 （见 §6 复现步骤），本报告不把「未实测」写成「支持」。
+
+### 2.1 海光 DCU 适配现状（用户 2026-10-14 追问后逐条核实）
+
+**结论先说：没有适配完，一次都没在 DCU 上跑过。** 目前只完成「代码路径就位」。
+核实过程中还发现文档原先夸了一句 —— `Runtime.is_rocm()` 当时是**死代码**
+（定义了但没有任何调用点）；本轮已修：`is_rocm` 变成实例属性并**真正接进
+`attn_implementation()`**，DCU/ROCm 上 `auto` 会取保守的 `eager`。
+
+**已就位（代码层，无需改代码即可在 DCU 上启动）**
+
+| 项 | 实现 |
+|---|---|
+| 设备探测 | `torch.version.hip` 非空即认 ROCm；新增 `--device_type dcu` 别名（解析成 `cuda`，并在非 ROCm 环境给出 warn） |
+| 设备可见性 | `CUDA_VISIBLE_DEVICES` **和** `HIP_VISIBLE_DEVICES` 都设（须在 `import torch` 前） |
+| 分布式后端 | 自动 `nccl`（ROCm 下即 RCCL）；`torchrun` 与 `accelerate launch` 都能起 |
+| 精度 | `bf16/fp16/fp32` 三档；`is_bf16_supported()=False` 时自动降 fp32；AMP 走设备无关 autocast |
+| 注意力 | ROCm 上 `auto` → `eager`（见下）；可显式 `--attn_implementation sdpa` |
+| 显存统计 | `Runtime.peak_memory_gib()` 走 `torch.cuda`（ROCm 同一套 API） |
+| 依赖 | **不依赖 bitsandbytes**（默认 AdamW），DCU 上没有 bnb 也不影响 |
+
+**未验证 + 预期会卡的点（按风险排序）**
+
+| # | 风险 | 事实/依据 | 处理 |
+|---|---|---|---|
+| 1 | **torch 装错版本** | DCU 必须装 dtkit + ROCm 版 torch，`torch.version.hip` 才非空。装了 CUDA 版 torch 的 DCU 机器上 `torch.cuda.is_available()` 直接 False ⇒ 会静默落到 CPU | 先跑自检；`--device_type dcu` 在非 ROCm 上会 warn |
+| 2 | **bf16 可能不可用** | 海光 Z100 级（gfx906）没有 bf16 矩阵核；K100-AI 有 | 显式 `--precision fp32`（或 fp16）；不要依赖自动降级 |
+| 3 | **SDPA 退化/报错** | gfx906/gfx928 通常没有 CK flash-attn 后端，SDPA 退 math（能跑但慢）；个别 dtkit 版本上 SDPA 直接抛错 | `auto` 在 ROCm 上已默认 `eager`；确认无误后可切 `sdpa` 提速 |
+| 4 | **RCCL 多卡通信** | 多卡 DDP 依赖 RCCL，DCU 上版本/拓扑问题比 CUDA 多 | 用自检的分布式项单机 `all_reduce` 先验；再上 2 卡冒烟 |
+| 5 | **显存可能不够** | ×10 解码器在 A800 上峰值 **58.9 GiB/卡**（bs 上限 6 / patch_budget 6144）；DCU 单卡常见 16–64 GB | 按显存调小 `--batch_size` / `--patch_budget`，或 `--grad_accum` 补全局 batch |
+| 6 | **性能未知** | DCU 的 bf16/fp16 吞吐与 DINOv2 24 层 + 解码器 12 步 BPTT 的实际 it/s 无任何实测 | 先 `--smoke --max_steps 3` 量 s/step，再排期 |
+
+**DCU 上要跑的训练验收阶梯（一条命令一步）**
+
+```bash
+# L0 平台自检（本轮新写的工具，任意机器都能跑；FAIL 项必须清零）
+python tools/check_platform.py --device_type dcu \
+    --dino_dir /root/autodl-tmp/models/dinov2-large
+#   → 逐项 PASS/FAIL：设备/显存 API/bf16/autocast/SDPA/梯度检查点/RCCL/DINOv2 前向
+
+# L1 参数量自检（不需 GPU）
+python tools/count_params.py --depth 2 --width 3072 --heads 24 --mlp_ratio 5.12
+
+# L2 建模型（确认 ×10 结构与 encoder 都建得起来）
+python train_multi.py --count_only --device_type dcu --precision fp32 \
+    --dino_dir /root/autodl-tmp/models/dinov2-large \
+    --data_root /root/autodl-tmp/data --decoder_width 3072 --heads 24 \
+    --decoder_mlp_ratio 5.12 --output_dir output/dcu_check
+
+# L3 单机单卡冒烟 → 多卡正式
+NUM_GPUS=1 DEVICE_TYPE=dcu PRECISION=fp32 LAUNCHER=python BS=2 BUDGET=2048 \
+    STEPS=6 bash run_multi_10x.sh --smoke --limit 32
+NUM_GPUS=8 DEVICE_TYPE=dcu LAUNCHER=torchrun bash run_multi_10x.sh
+```
+
+> `tools/check_platform.py` 已在本轮的两台机器上自测过：CPU（Debian/aarch64/py3.9/torch2.8）
+> 与 NVIDIA A800（torch 2.12.1+cu130）全绿。它在 DCU 机器上就是那份**判定依据** ——
+> 哪些项 PASS、哪些 FAIL，直接对应上表哪条风险落地了。
 
 ---
 
@@ -201,9 +258,11 @@ python eval_stepwise.py \
 ## 6. 复现步骤（换任意机器）
 
 ```bash
-# 0) 环境
+# 0) 环境 + 平台自检（先确认这台机器真的能用，别一上来就长时间跑）
 export PATH=/root/miniconda3/bin:$PATH
 pip install "transformers>=4.46,<5.0" accelerate pyarrow safetensors tqdm
+python tools/check_platform.py --dino_dir /root/autodl-tmp/models/dinov2-large
+#   → 全 PASS 才继续；FAIL 项见 §2.1 的风险表
 
 # 1) 数据（六源 ~64 GiB；先跑这个再做别的）
 python tools/prep_data.py --data_root /root/autodl-tmp/data \
@@ -237,7 +296,9 @@ NUM_GPUS=2 bash run_multi_10x.sh                # DEVICE_TYPE=auto
 1. **×10 与 ×1 的同机对照**：本轮只跑了 ×10 臂。要严格回答「解码器容量是不是瓶颈」，
    应在**同一台机器、同一份数据**上再跑一次 ×1（旧配方）臂，否则只能与 09-26 的
    跨机器/跨数据数字比。
-2. **DCU / NPU 真机验证**：本报告只到「代码路径就位」，需要在真机上过 L1–L3。
+2. **DCU / NPU 真机验证**：本报告只到「代码路径就位」，需要在真机上过
+   `tools/check_platform.py` → L1/L2/L3（§2.1 给了 DCU 的逐条风险与命令）。
+   DCU 上还差一件事：`--precision fp32` 底下的 s/step 实测（决定 2 epoch 要跑几天）。
 3. **Vimeo-90K 补齐**：拿到 91,701 版本的 triplet 后可重建索引，把六源配比对齐 09-26。
 4. 后段 80 个 token 只买到 0.20 px 的问题（09-26 §6 的「最该做的一件事」）本轮未动
    ——×10 解码器恰好是检验「是解码器容量不够，还是 K=144 的信息已被前 48 个 token 吃干」

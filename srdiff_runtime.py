@@ -40,7 +40,11 @@ import contextlib
 import os
 from typing import Optional
 
-DEVICE_TYPES = ("cuda", "npu", "xpu", "mps", "cpu")
+DEVICE_TYPES = ("cuda", "npu", "xpu", "mps", "cpu", "dcu")
+
+# "dcu" 是**别名**：海光 DCU 用的是 ROCm/HIP 版 torch，设备串与后端都是 `cuda`/`nccl`，
+# 单独给一个名字只为让调用方/日志能显式区分「我跑在 DCU 上」，并据此取更保守的默认值。
+_ALIASES = {"dcu": "cuda"}
 
 _VISIBLE_ENV = {
     "cuda": "CUDA_VISIBLE_DEVICES",       # NVIDIA 与 DCU(ROCm) 都用这个
@@ -100,7 +104,13 @@ def mps_available() -> bool:
 
 
 def detect_device_type(prefer: Optional[str] = "auto") -> str:
-    """auto 时按 npu → cuda(DCU/ROCm 也在内) → xpu → mps → cpu 顺序探测。"""
+    """auto 时按 npu → cuda(DCU/ROCm 也在内) → xpu → mps → cpu 顺序探测。
+
+    别名（如 "dcu"）在这里就解析成真实设备串（"cuda"），保证任何调用方拿到的是
+    torch 能直接用的名字；原始请求名由 `Runtime.requested` 保留供日志/分支使用。
+    """
+    if prefer in _ALIASES:
+        prefer = _ALIASES[prefer]
     if prefer and prefer != "auto":
         if prefer not in DEVICE_TYPES:
             raise ValueError(f"未知 device_type={prefer}，可选 {DEVICE_TYPES} 或 auto")
@@ -129,13 +139,22 @@ class Runtime:
     """设备无关运行时。构造时自动 import torch_npu（若在 NPU 上）。"""
 
     def __init__(self, device_type: str = "auto", index: int = 0):
+        requested = device_type
+        if requested in _ALIASES:                     # dcu → cuda（ROCm/HIP）
+            device_type = _ALIASES[requested]
         self.device_type = detect_device_type(device_type)
         if self.device_type == "npu":
             import torch_npu  # noqa: F401  （导入即注册 torch.npu）
         import torch
         self.torch = torch
         self.index = int(index)
-        self.backend = (torch.version.hip is not None) if self.device_type == "cuda" else False
+        self.requested = requested
+        # ROCm/HIP（海光 DCU、AMD GPU）：torch.version.hip 非空，设备串仍是 "cuda"
+        self.is_rocm = bool(getattr(torch.version, "hip", None))
+        if requested == "dcu" and not self.is_rocm:
+            print("[warn] --device_type dcu 但本机 torch 不是 ROCm/HIP 版"
+                  f"（torch.version.hip={getattr(torch.version, 'hip', None)}）"
+                  "，按 device_type=cuda 继续；请确认装的是 DCU 版 torch/dtkit")
 
     # 设备
     def device(self, index: Optional[int] = None):
@@ -202,14 +221,21 @@ class Runtime:
 
     # 注意力实现
     def attn_implementation(self, requested: str = "auto") -> str:
-        """sdpa 在 NPU/旧 ROCm 上可能不被 torch_npu/ROCm 支持 ⇒ auto 时按平台给。
+        """按平台给注意力实现。`auto` 的规则（保守优先「先跑通」）：
 
-        `flash_attention_2` 需要 flash-attn 且对 NPU 无官方后端，故只在 CUDA 上按需启用。
+        · NPU / XPU → `eager`（torch_npu / IPEX 的 SDPA 融合算子版本差异大）；
+        · **ROCm/HIP（海光 DCU）→ `eager`**。DCU 的 gfx 目标（gfx906/gfx928 等）
+          通常没有 CK flash-attn 后端，SDPA 会退化成 math 实现 —— 能跑但不快，
+          且个别 dtkit 版本上会直接报错；未实测平台先取最保守的路径，
+          确认无误后可用 `--attn_implementation sdpa` 打开；
+        · NVIDIA CUDA → `sdpa`（transformers 默认，实测可用）。
+
+        `flash_attention_2` 需要 flash-attn，DCU/NPU 上没有官方后端 ⇒ 只能显式传。
         """
         if requested and requested != "auto":
             return requested
-        if self.device_type in ("npu", "xpu"):
-            return "eager"          # NPU 上 sdpa 走 torch_npu 融合算子，版本差异大，保守起步
+        if self.device_type in ("npu", "xpu") or self.is_rocm:
+            return "eager"
         return "sdpa"
 
     # 显存
@@ -265,10 +291,12 @@ class Runtime:
         import platform
         t = self.torch
         return {
+            "requested": self.requested,
             "device_type": self.device_type,
             "device_name": self.device_name(),
             "device_count": self.device_count(),
             "rocm_hip": getattr(t.version, "hip", None),
+            "is_dcu_alias": self.requested == "dcu",
             "cuda": getattr(t.version, "cuda", None),
             "torch": t.__version__,
             "python": platform.python_version(),

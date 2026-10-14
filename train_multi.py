@@ -85,7 +85,9 @@ def get_args():
     p.add_argument("--long_side_cap", type=int, default=1280)
     # ── 设备 / 精度（设备无关）──
     p.add_argument("--device_type", default=ENV("SRDIFF_DEVICE", "auto"),
-                   choices=["auto", "cuda", "npu", "xpu", "mps", "cpu"])
+                   choices=["auto", "cuda", "dcu", "npu", "xpu", "mps", "cpu"],
+                   help="dcu 是别名（海光 DCU 用 ROCm 版 torch，设备串仍是 cuda），"
+                        "显式指定时会走更保守的注意力实现默认值；见 srdiff_runtime")
     p.add_argument("--precision", default="bf16", choices=["bf16", "fp16", "fp32"])
     p.add_argument("--attn_implementation", default="auto",
                    choices=["auto", "sdpa", "eager", "flash_attention_2"])
