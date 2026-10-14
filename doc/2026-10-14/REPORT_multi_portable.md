@@ -24,8 +24,8 @@
    `torch.cuda.*` / lr 曲线**全部删除**。
 3. **新机器上已实跑验证**：2 卡 DDP + bf16 + 双梯度检查点，×10 解码器
    单卡峰值 **58.9 GiB / 80 GiB**，混合桶 **≈2.7 s/step**。
-   **正式 run = 2 epoch / 77,402 步/卡**（索引 259,641 ⇒ 38,701 步/epoch），
-   已启动并确认 loss 下降；按实测步速 **ETA ≈ 57 h ≈ 2.4 天**。
+   正式 run 按 **2 epoch / 77,402 步/卡**（索引 259,641 ⇒ 38,701 步/epoch）启动，
+   跑到 **step 4240（loss 0.869）** 后按用户要求停止并关机（内网 DCU 接棒，见 §5.5）。
 
 ---
 
@@ -252,6 +252,25 @@ python eval_stepwise.py \
   --data_root /root/autodl-tmp/data/coco/val2017 \
   --out /root/autodl-tmp/output/multires_10x/eval_stepwise_cocoval.json
 ```
+
+### 5.5 停止记录（2026-10-14 14:44，用户要求）
+
+用户在内网用 DCU 同步训练 ⇒ 外网这台不再消耗余额，**主动停止并关机**。
+（重启路径、数据资产清单写在数据盘的 `output/multires_10x/SHUTDOWN.md`。）
+
+| 项 | 停机时实测 |
+|---|---|
+| 最后优化步 | **4240 / 77402**（1 epoch = 38701 步 ⇒ 约 0.11 epoch） |
+| loss | 0.86921（20 步滑动均值），per_decoder [0.841,0.844,0.842,0.852]（四档同步、无塌缩） |
+| 步速 / 峰值 | 2.565 s/step；58.93 GiB / 80 GiB |
+| 产出 | `ckpt_2000.pt`、`ckpt_4000.pt`（各 20.56 GB，共 39 GB）—— ×10 解码器真实训过的权重 |
+| 日志归档 | `doc/2026-10-14/run_logs_multires_10x/{launch.log,train_log.jsonl,SHUTDOWN.md}`（212 条逐步记录） |
+| 未受影响 | ×10 参数表、显存/吞吐、可移植性证据、代码与文档全部在停机前完成并已推 GitHub |
+
+⚠️ **因此本轮没有「跑完的 ×10 臂」**：4240 步的 loss 曲线只能说明「训得动、四档不塌缩」，
+**不能**用来回答 09-26 §6 的逐步精炼问题。那件事要么在外网重开实例跑完 2 epoch，
+要么直接在内网 DCU 上跑（`run_multi_10x.sh` 已设备无关，`tools/prep_data.py --verify`
+可直接验收数据布局）。
 
 ---
 
