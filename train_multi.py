@@ -366,11 +366,15 @@ def main():
             step += 1
             running += float(out["loss"].detach())
             running_n += 1
+            # 记录当前 batch 的 (N, bs)：OOM 时「哪个桶/多大的批」是唯一有用的定位信息
+            # （峰值几乎总是由最大 N 桶或最大 bs 桶决定，混桶跑时看平均值会被误导）
+            cur_N = int((px.shape[-1] // 14) * (px.shape[-2] // 14))
+            cur_bs = int(px.shape[0])
             if step % args.log_every == 0:
                 peak = runtime.peak_memory_gib()
                 lrs = {g.get("name", str(i)): round(g["lr"], 8)
                        for i, g in enumerate(opt.param_groups)}
-                rec = {"step": step, "epoch": epoch,
+                rec = {"step": step, "epoch": epoch, "N": cur_N, "bs": cur_bs,
                        "loss": round(running / max(1, running_n), 5),
                        "recon": round(float(out["recon"].detach()), 5),
                        "per_decoder": [round(float(x), 5) for x in out["per_decoder"]],
@@ -381,7 +385,8 @@ def main():
                 if is_main:
                     jsonl.write(json.dumps(rec) + "\n")
                     jsonl.flush()
-                    log(f"[{step}/{max_steps}] loss={rec['loss']} recon={rec['recon']} "
+                    log(f"[{step}/{max_steps}] N={cur_N} bs={cur_bs} loss={rec['loss']} "
+                        f"recon={rec['recon']} "
                         f"dec={rec['per_decoder']} gnorm={rec['grad_norm']} "
                         f"peak={rec['peak_gib']}GiB {rec['sec_per_step']}s/step")
                 running, running_n = 0.0, 0

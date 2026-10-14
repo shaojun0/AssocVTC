@@ -62,6 +62,11 @@ LOG_EVERY="${LOG_EVERY:-20}"
 # 解释器可配（有些集群只有 python3，没有 python）
 PYTHON="${PYTHON:-$(command -v python || command -v python3 || echo python)}"
 
+# 分配器：315 种桶形状 + 变长 batch ⇒ 极易碎片化 OOM。旧脚本一直有这条，
+# 可移植版一开始漏了（用户 2026-10-14 调大 batch 后 OOM 才暴露）。可用同名环境变量覆盖。
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_HIP_ALLOC_CONF="${PYTORCH_HIP_ALLOC_CONF:-$PYTORCH_CUDA_ALLOC_CONF}"
+
 LOG="${LOG:-$OUTPUT_DIR/launch.log}"
 mkdir -p "$OUTPUT_DIR"
 
