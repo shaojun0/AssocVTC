@@ -12,7 +12,7 @@
 |---|---|---|
 | **外网 A800** | `ssh -p 15990 root@connect.nma1.seetacloud.com`（2×A800 80GB） | **已停止并关机**（用户要求，省余额）。停机在 step **4240/77402**，loss 0.869，产出 `ckpt_2000.pt` / `ckpt_4000.pt`（各 20.56 GB）留在实例数据盘；数据/索引/权重都还在数据盘，重启即可续 |
 | **内网 DCU** | `/data/srdiff-20260926/SR-Diffusion-v3-main/`，8 卡 × 144 GB | **在跑**。已跑通 → 调 batch OOM → 已定策（不死磕 batch，改 `math+efficient` + 把显存给关重算）。**没有跑完的 ×10 臂** |
-| 代码 / 文档 | GitHub `shaojun0/SR-Diffusion-v3` @ **`ccdc1c1`** | 已同步，工作树干净 |
+| 代码 / 文档 | GitHub `shaojun0/SR-Diffusion-v3` **main**（代码最后改动 = `dab16a7`，其后为本轮文档提交） | 已同步，工作树干净 |
 
 **结论优先级**：解码器 ×10 的**参数量与可移植性**都已验证并入库；**「×10 是否改变逐步精炼结论」尚未回答** —— 需要内网把 2 epoch 跑完 + 出留出集曲线 + 建议同机补一条 ×1 臂。
 
@@ -84,7 +84,8 @@ EPOCHS STEPS SAVE_EVERY KEEP_CKPTS LOG_EVERY NUM_WORKERS EXTRA_ARGS
 
 ```bash
 # 0) 先确认代码是最新的（内网那份 train_multi.py 实测比 main 少几行，必须重拉）
-cd <code>/SR-Diffusion-v3 && git pull && git log --oneline -1   # 期望 ccdc1c1
+cd <code>/SR-Diffusion-v3 && git pull && git log --oneline -1
+#   期望日志里能看到 dab16a7（代码最后改动）；比它旧就说明没拉到最新的 OOM/SDPA 修复
 
 # 1) 平台自检（FAIL 清零再走）+ 参数量自检
 python tools/check_platform.py --device_type dcu --dino_dir <DINO> --bench
