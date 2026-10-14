@@ -46,6 +46,10 @@ def main():
     ap.add_argument("--dino_dir", default=os.environ.get("SRDIFF_DINO_DIR", ""))
     ap.add_argument("--json", default="")
     ap.add_argument("--skip_dist", action="store_true", help="跳过分布式后端自检")
+    ap.add_argument("--bench", action="store_true",
+                    help="加测 fp32/fp16/bf16 的 matmul 实测 TFLOPS（决定 --precision 选哪个）")
+    ap.add_argument("--bench_size", type=int, default=8192, help="matmul 方阵边长")
+    ap.add_argument("--bench_iters", type=int, default=20)
     args = ap.parse_args()
 
     from srdiff_runtime import Runtime, is_rocm, detect_device_type
@@ -182,7 +186,53 @@ def main():
 
         check(f"分布式后端 {rt.dist_backend()}", _dist)
 
-    # 8) 模型加载（可选：给了 dino_dir 才测，验证 DINOv2 + 注意力实现真能建起来）
+    # 8) 精度吞吐实测（可选 --bench）：直接决定 --precision 选哪个
+    #    为什么必须实测：不同卡上 bf16/fp16 的相对速率差别巨大（有的卡 bf16 是
+    #    原生同速，有的代际把 bf16 退化成 fp32 速率 ⇒ 差 8 倍）；厂商纸面只给
+    #    fp16 数字时更不能猜。方形 matmul 是显存带宽不敏感的纯算力探针。
+    bench_rows = []
+
+    def _bench_one(dtype, name):
+        d = rt.device()
+        n = args.bench_size
+        a = torch.randn(n, n, device=d, dtype=dtype)
+        b = torch.randn(n, n, device=d, dtype=dtype)
+        for _ in range(3):
+            a @ b
+        rt.synchronize()
+        import time as _t
+        t0 = _t.perf_counter()
+        for _ in range(args.bench_iters):
+            a @ b
+        rt.synchronize()
+        dt = (_t.perf_counter() - t0) / args.bench_iters
+        del a, b
+        rt.empty_cache()
+        return 2.0 * n ** 3 / dt / 1e12
+
+    if args.bench and rt.device_type != "cpu":
+        print("\n[精度吞吐] %d×%d matmul, %d 次平均（纯算力, 不含数据/通信）"
+              % (args.bench_size, args.bench_size, args.bench_iters))
+        for dt, name, flag in ((torch.float32, "fp32", "fp32"),
+                               (torch.float16, "fp16", "fp16"),
+                               (torch.bfloat16, "bf16", "bf16")):
+            try:
+                tf = _bench_one(dt, name)
+                bench_rows.append((name, flag, tf))
+                print(f"    {name:<5} {tf:8.1f} TFLOPS")
+            except Exception as e:
+                print(f"    {name:<5} 不可用（{type(e).__name__}: {str(e)[:60]}）")
+        if bench_rows:
+            best = max(bench_rows, key=lambda r: r[2])
+            baseline = bench_rows[0]
+            print(f"    ⇒ 最快 = {best[0]} ({best[2]:.1f} TFLOPS)；"
+                  f"建议 --precision {best[1]}"
+                  + (f"（比 fp32 快 {best[2] / baseline[2]:.1f}×）"
+                     if baseline[2] > 0 else ""))
+    elif args.bench:
+        print("\n[精度吞吐] CPU：跳过（本项只在加速卡上有意义）")
+
+    # 9) 模型加载（可选：给了 dino_dir 才测，验证 DINOv2 + 注意力实现真能建起来）
     if args.dino_dir:
         def _dino():
             from transformers.models.dinov2 import Dinov2Model
