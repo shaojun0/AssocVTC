@@ -66,6 +66,13 @@ REGISTRY = {
 }
 ALL = list(REGISTRY)
 
+# 2026-09-26 六源 run 的实得张数（校验时的参照；vimeo 的 91,701 来自已回收实例的
+# 公共数据盘，HF 镜像源只有 73,191 ⇒ 低于参照会 WARN，属已知偏差不是放错）
+REFERENCE = {"imagenet": 50000, "coco": 118000, "vimeo": 91701,
+             "div2k": 800, "flickr2k": 2650, "openimages": 15000}
+# 校验时实际要数的目录（coco 的 out 含 train+val，训练只吃 train2017）
+VERIFY_DIR = {"coco": "coco/train2017"}
+
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
 
@@ -284,6 +291,83 @@ def count_dir(d):
                if f.lower().endswith(IMG_EXTS))
 
 
+def verify_layout(data_root: str, build_index: bool = False,
+                  bs: int = 6, budget: int = 6144, world: int = 2,
+                  long_side_cap: int = 1280) -> int:
+    """校验并打印「代码实际要求的布局」，可选建索引 + 算每 epoch 步数。
+
+    这一步是给**摆渡/内网**用的：数据搬进去之后，先确认每个源落在代码认的
+    相对路径上、张数够不够，再决定 --max_steps。返回 FAIL 数（0 = 可以开训）。
+    """
+    print("=" * 78)
+    print(f"数据布局校验  data_root = {os.path.abspath(data_root)}")
+    print("=" * 78)
+    order = ["imagenet", "coco", "vimeo", "div2k", "flickr2k", "openimages"]
+    print(f"{'相对路径（代码认的）':<30}{'张数':>9}{'参照':>8}  状态")
+    print("-" * 78)
+    fails, total = 0, 0
+    for s in order:
+        spec = REGISTRY[s]
+        rel = VERIFY_DIR.get(s, spec["out"])
+        d = os.path.join(data_root, rel)
+        n = count_dir(d) if os.path.isdir(d) else 0
+        ref = REFERENCE[s]
+        if n == 0:
+            status = "FAIL — 目录为空或不存在 ⇒ 该源会被跳过（索引里少一整个源）"
+            fails += 1
+        elif n < ref * 0.9:
+            hint = ("已知：HF 镜像 vimeo90k_triplet 只有 73,191 clip（官方 91,701），"
+                    "如需对齐 09-26 得另找源" if s == "vimeo"
+                    else "可能少下了 shard，确认后仍可开训（索引会按实得张数走）")
+            status = f"WARN — 比 09-26 的 {ref:,} 少（{hint}）"
+        else:
+            status = "PASS"
+        total += n
+        print(f"{rel:<30}{n:>9,}{ref:>8,}  {status}")
+    print("-" * 78)
+    print(f"{'合计（磁盘实有, 不含 coco/val2017）':<30}{total:>9,}")
+    if build_index:
+        print("  ↑ 索引会按各源上限截断（本机实测 259,641 = 278,151 − vimeo 缺口），见下面 [index] 行")
+    free = shutil.disk_usage(data_root).free / 2 ** 30 if os.path.isdir(data_root) else 0
+    print(f"剩余磁盘 {free:.1f} GiB")
+    print("""
+代码侧就两件事（其余全靠 <data_root>）：
+  python train_multi.py --data_root %s ...        # 训练
+  python eval_stepwise.py --data_root %s/coco/val2017 ...   # 留出集评测
+⚠️ index_cache.json 里存的是**绝对路径** ⇒ 换机/换挂载点必须在目标机上重建：
+     rm -f %s/index_cache.json && python train_multi.py --data_root %s ...
+   （rank0 建一次即可, 其余 rank 等文件；259,641 条实测约 3–4 分钟）"""
+          % (data_root, data_root, data_root, data_root))
+
+    if build_index:
+        print("-" * 78)
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        try:
+            from data_multi import BucketBatchSampler, build_index, build_sources
+            cache = os.path.join(data_root, "index_cache.json")
+            if os.path.exists(cache):
+                print(f"[index] 已存在 {cache}（换过挂载点请先删掉再跑）")
+                idx = json.load(open(cache))
+            else:
+                print("[index] 扫描建索引（约 3–4 分钟）…")
+                idx = build_index(build_sources(data_root), cache, long_side_cap)
+            shapes = [(bh, bw) for (_, bw, bh, _) in idx]
+            st = BucketBatchSampler(shapes, bs, shuffle=True, drop_last=True,
+                                    rank=0, world_size=world, patch_budget=budget)
+            print(f"[index] 样本 {len(idx):,} | 桶 {len(set(shapes))} 种 | "
+                  f"每 epoch {len(st):,} 步/卡（bs≤{bs}, budget {budget}, world {world}）")
+            print(f"[index] 2 epoch ⇒ --max_steps {len(st) * 2:,}")
+            print(f"[index] 任意 epoch 数可用: EPOCHS=N bash run_multi_10x.sh（自动算 max_steps）")
+        except Exception as e:
+            print(f"[index] 建索引失败: {type(e).__name__}: {e}")
+            fails += 1
+
+    print("=" * 78)
+    print("结论：可以开训 ✅" if fails == 0 else f"结论：{fails} 项 FAIL ❌ —— 先补齐再开训")
+    print("=" * 78)
+    return fails
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -291,6 +375,13 @@ def main():
                                                           "/root/autodl-tmp/data"))
     ap.add_argument("--sources", nargs="+", default=["all"],
                     help=f"要准备的源，all 或 {' '.join(ALL)}")
+    ap.add_argument("--verify", action="store_true",
+                    help="只校验已有数据的布局与张数（不下载），可配 --build_index")
+    ap.add_argument("--build_index", action="store_true",
+                    help="校验后顺便建/检查索引并打印每 epoch 步数与 2 epoch 的 max_steps")
+    ap.add_argument("--steps_bs", type=int, default=6)
+    ap.add_argument("--steps_budget", type=int, default=6144)
+    ap.add_argument("--steps_world", type=int, default=2)
     ap.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT",
                                                          "https://hf-mirror.com"))
     ap.add_argument("--raw", default="", help="原始 parquet/zip 暂存目录（默认 <data_root>/_raw）")
@@ -304,6 +395,11 @@ def main():
 
     args.data_root = os.path.abspath(args.data_root)
     args.raw = args.raw or os.path.join(args.data_root, "_raw")
+
+    if args.verify:                     # 只校验：内网摆渡后第一步就该跑这个
+        return verify_layout(args.data_root, args.build_index,
+                             args.steps_bs, args.steps_budget, args.steps_world)
+
     srcs = ALL if "all" in args.sources else args.sources
     for s in srcs:
         if s not in REGISTRY:
