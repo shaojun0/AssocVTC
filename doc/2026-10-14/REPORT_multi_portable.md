@@ -22,10 +22,17 @@
    调度器/续训全部交给 **HuggingFace Accelerate**（Trainer 内部同款），
    手写 `DistributedDataParallel` / `init_process_group("nccl")` / `autocast("cuda")` /
    `torch.cuda.*` / lr 曲线**全部删除**。
-3. **新机器上已实跑验证**：2 卡 DDP + bf16 + 双梯度检查点，×10 解码器
+3. **外网新机器上已实跑验证**：2 卡 DDP + bf16 + 双梯度检查点，×10 解码器
    单卡峰值 **58.9 GiB / 80 GiB**，混合桶 **≈2.7 s/step**。
    正式 run 按 **2 epoch / 77,402 步/卡**（索引 259,641 ⇒ 38,701 步/epoch）启动，
-   跑到 **step 4240（loss 0.869）** 后按用户要求停止并关机（内网 DCU 接棒，见 §5.5）。
+   跑到 **step 4240（loss 0.869）** 后按用户要求停止并关机（内网 DCU 接棒，见 §5.3）。
+4. **内网 DCU 臂同日跑通并暴露了 3 个真问题**（§5.4）：① bf16 下解码器 SDPA 融合后端崩溃
+   ⇒ 定位为平台后端 bug（已排除形状原因），加 `--sdpa_backend` 逃生门 + `tools/diag_sdpa.py`；
+   ② `BS=12 BUDGET=12288` OOM ⇒ 根因是 `math` 后端物化 N×N、启动器漏了
+   `expandable_segments`、以及关重算的叠加；③ 拍板**不死磕 batch** —— 墙钟由
+   精度×卡数决定，batch 只动 MFU ⇒ 显存花在关重算（省 ~25% 墙钟）上（§2.3 有量化表）。
+5. **给下一会话的交接**：[`HANDOFF_multi_10x_dcu.md`](HANDOFF_multi_10x_dcu.md)
+   （状态 / 坑清单 / 复现命令 / 待办）。
 
 ---
 
@@ -161,6 +168,31 @@ NUM_GPUS=8 DEVICE_TYPE=dcu LAUNCHER=torchrun bash run_multi_10x.sh
 
 ---
 
+### 2.3 内网 DCU 的算力/墙钟测算（纸面规格 + A800 实测标定，属**外推**）
+
+用户提供的内网单卡规格：**fp32 44 TFLOPS / fp16 354 TFLOPS / 144 GB**。
+**fp16 : fp32 = 8.05×** ⇒ 精度选择是这里唯一的数量级杠杆。
+
+标定方法（不是拍的）：我们这条 A800 run 实测「2 卡同配方 2 epoch = 77,402 步/卡 × 2.687 s」，
+反推出算力利用率 **μ ≈ 17.6%**（校核：2 × 312 TFLOPS × 17.6% = 110 TFLOPS 有效，
+乘 207,950 s ≈ 2.28e19 FLOP = 2 epoch 总计算量）。解码器是 12 步串行 BPTT、GEMM 偏小、
+还开着重算 ⇒ 这个偏低的 μ 是工作负载决定的，不是实现问题。
+
+| 卡数 | **fp16 (354T)** | fp32 (44T) | fp16 + 关解码器重算（−25%） |
+|---:|---:|---:|---:|
+| 1 | 101.8 h | 819.3 h | 76.4 h |
+| 2 | 50.9 h | 409.7 h | 38.2 h |
+| 4 | 25.5 h | 204.8 h | 19.1 h |
+| **8** | **12.7 h** | **102.4 h** | **9.5 h** |
+
+**敏感性（务必一起读）**：DCU 的有效利用率可能低于 A800（eager 注意力 / RCCL / dtkit 成熟度）
+⇒ 各档 **×1.43**；若该代际的 bf16 退化成 fp32 速率 ⇒ 等同 fp32 列（差 8×）。
+⇒ **真实值必须用 `--smoke` 量 s/step，上表只用于排期量级判断。**
+
+**推论（怎么跑最划算）**：墙钟 ≈ 总 FLOPs ÷ (卡数 × 单卡有效算力)，因此
+① 精度是 8× 的杠杆；② 卡数线性；③ **batch 几乎不影响墙钟**（总 FLOPs 固定，只动 MFU ±20%）。
+144 GB 显存的正确用法是 **先关 `--grad_ckpt_decoder`（省 ~25% 墙钟）**，而不是堆 batch。
+
 ## 3. 解码器参数量：基线 vs ×10
 
 `python tools/count_params.py --scale 10` 的实跑输出（meta device 建模型，只数参数量）：
@@ -228,7 +260,7 @@ pip install "transformers>=4.46,<5.0" accelerate datasets pyarrow safetensors tq
 [6/8] loss=1.74264 ... peak=56.15GiB 3.449s/step
 ```
 
-### 5.4 正式 run（2 epoch）
+### 5.2 正式 run（2 epoch）
 
 用户 2026-10-14 追加：「这次训练 2 epoch」。索引 259,641 条 ⇒ `epoch_steps.py` 实测
 **38,701 步/卡/epoch**，**2 epoch = 77,402 步/卡**（先用 40,243 步的 09-26 同预算起过一次，
@@ -261,7 +293,7 @@ EPOCHS=2 NUM_GPUS=2 LAUNCHER=accelerate OUTPUT_DIR=/root/autodl-tmp/output/multi
 | 每卡峰值显存 | **58.9 GiB / 80 GiB**（bf16 + 编码器&解码器双梯度检查点） |
 | 步速 | **2.63–2.99 s/step**（前 100 步，混合桶；09-26 同机对照见 §7） |
 | 每卡优化步预算 | 38,701 × 2 = **77,402** |
-| **ETA（按 2.67 s/step）** | **≈ 57 小时 ≈ 2.4 天**（单卡峰值 58.9 GiB，双卡 100% util） |
+| **ETA（按 2.67 s/step）** | **≈ 57 小时 ≈ 2.4 天**（单卡峰值 58.9 GiB，双卡 100% util）——*启动时的推算；实际在 step 4240 被主动停止，见 §5.3* |
 | ckpt 体积 | **20.56 GB / 个**（fp32 权重 6.9 GB + Adam 状态 13.7 GB；09-26 是 1.26 GB） |
 | ckpt 策略 | `--save_every 2000 --keep_ckpts 4` ⇒ 最多占 **82 GB**（不轮转要写 ~780 GB，盘装不下） |
 | 已知告警 | 2 条 DDP `Grad strides do not match bucket view strides`（与 09-26 同款，「This is not an error」） |
@@ -284,7 +316,7 @@ python eval_stepwise.py \
   --out /root/autodl-tmp/output/multires_10x/eval_stepwise_cocoval.json
 ```
 
-### 5.5 停止记录（2026-10-14 14:44，用户要求）
+### 5.3 停止记录（2026-10-14 14:44，用户要求）
 
 用户在内网用 DCU 同步训练 ⇒ 外网这台不再消耗余额，**主动停止并关机**。
 （重启路径、数据资产清单写在数据盘的 `output/multires_10x/SHUTDOWN.md`。）
@@ -304,6 +336,21 @@ python eval_stepwise.py \
 可直接验收数据布局）。
 
 ---
+
+### 5.4 内网 DCU 臂（同日并行进行；本报告只记事实与结论，不替它下最终数字）
+
+用户在内网用 DCU 同步跑同一条实验（不消耗外网余额）。当天进展如实记录如下：
+
+| 项 | 记录 |
+|---|---|
+| 代码 | `/data/srdiff-20260926/SR-Diffusion-v3-main/`。**实测其 `train_multi.py` 比 main 少几行**（`train_multi.py:339` 处是 `out = model(...)` 而非 `stop = True`）⇒ 需要重新拉 main；`model_multi.py:172` / `model_v2.py:580` 与 main 逐行一致 |
+| 数据 | `/data/srdiff-20260926/`；与 A800 臂同源同索引（259,641 / vimeo 73,191，见 §4.2 的偏差说明） |
+| 规模 | **8 卡**（traceback 出现在 rank7） |
+| 首次运行（bf16） | 第一个解码器 self-attention 即抛 `IndexError: select(): index 0 out of range for tensor of size [0] at dimension 0`。**本地已排除形状原因**（零 batch/零 query/零 kv/空 memory 喂 math 后端全部通过）⇒ 判定为该平台融合后端 bug；处置：`--sdpa_backend math` 后跑通（§2.1 风险表第 3 条） |
+| 调 batch | `BS=12 BUDGET=12288` ⇒ **OOM**。分析：固定开销 ≈27.4 GB（×10 解码器的 fp32 权重+梯度+Adam）+ 激活按 bs 放大 2.0–3.0× ≈ 97 GB；144 GB 本应装得下，实际被三件事顶爆：① **`math` 后端物化 (B,H,N,N)**（N=1024/B=12 时 604 MB 每层步，我们 A800 用的 flash/efficient 不物化）② 启动器**漏了 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`**（老脚本有；315 种桶形状极易碎片化）③ 若同时 `GRAD_CKPT_DECODER=0` 则解码器激活不再及时释放 |
+| 拍板结论 | **不死磕 batch**：回到已知可用配置，优先用 `math+efficient`（efficient 不物化 N×N，省几十 GB），把省下的显存花在 `GRAD_CKPT_DECODER=0`（真省 ~25% 墙钟）上 |
+| 本轮交付给它的能力 | `--sdpa_backend`、`GRAD_ACCUM`/`GRAD_CKPT_*`/`SDPA_BACKEND` 环境变量、`tools/diag_sdpa.py`（逐后端定位）、`tools/plan_batch.py`（(BS,BUDGET) 后果表）、**逐步日志新增 `N`/`bs`**（OOM 时定位哪个桶顶爆） |
+| 待办（新会话接） | ① 用 `math+efficient` 复跑并量峰值 ② 跑完 2 epoch ③ `eval_stepwise.py` 出 COCO val 留出集逐 step 曲线，与 09-26 的 **31.25 → 26.10 px** 对比 ④ 建议**同机再跑一条 ×1 臂**（跨机对照不可比） |
 
 ## 6. 复现步骤（换任意机器）
 
@@ -343,13 +390,14 @@ NUM_GPUS=2 bash run_multi_10x.sh                # DEVICE_TYPE=auto
 
 ## 7. 未做 / 下一步
 
-1. **×10 与 ×1 的同机对照**：本轮只跑了 ×10 臂。要严格回答「解码器容量是不是瓶颈」，
-   应在**同一台机器、同一份数据**上再跑一次 ×1（旧配方）臂，否则只能与 09-26 的
-   跨机器/跨数据数字比。
-2. **DCU / NPU 真机验证**：本报告只到「代码路径就位」，需要在真机上过
-   `tools/check_platform.py` → L1/L2/L3（§2.1 给了 DCU 的逐条风险与命令）。
-   DCU 上还差一件事：`--precision fp32` 底下的 s/step 实测（决定 2 epoch 要跑几天）。
-3. **Vimeo-90K 补齐**：拿到 91,701 版本的 triplet 后可重建索引，把六源配比对齐 09-26。
-4. 后段 80 个 token 只买到 0.20 px 的问题（09-26 §6 的「最该做的一件事」）本轮未动
-   ——×10 解码器恰好是检验「是解码器容量不够，还是 K=144 的信息已被前 48 个 token 吃干」
-   的对照臂。
+1. **×10 与 ×1 的同机对照**：外网那条只跑到 step 4240 就被主动停止（§5.3），内网 DCU 臂
+   仍在继续（§5.4）。要严格回答「解码器容量是不是瓶颈」，必须**在同一台机器、同一份数据**
+   上把 ×1 与 ×10 两条臂都跑完 —— 跨机器/跨数据的数字只能当趋势看。
+2. **DCU / NPU 真机验证**：DCU 已完成「跑通 → 调 batch OOM → 定策」的闭环，但**没有跑完的
+   ×10 臂**；NPU/XPU 仍只到「代码路径就位」。验收阶梯见 §2.1（L0 = `tools/check_platform.py`）。
+3. **Vimeo-90K 补齐**：HF 镜像只有 73,191 clip（官方 91,701）⇒ 索引 259,641 而非 278,151。
+   拿到完整 triplet 后重建索引即可对齐 09-26 的六源配比。
+4. 后段 80 个 token 只买到 0.20 px 的问题（09-26 §6 的「最该做的一件事」）本轮未回答
+   ——×10 解码器正是检验「是解码器容量不够，还是 K=144 的信息已被前 48 个 token 吃干」的对照臂。
+5. **给下一会话的入口**：本轮的完整状态、坑清单与复现命令收在
+   [`HANDOFF_multi_10x_dcu.md`](HANDOFF_multi_10x_dcu.md)（同目录）。
