@@ -9,6 +9,10 @@
 3. 同时产出 best_idx = 原图最适配分辨率（长宽比最接近，平手比像素数）。
 
 索引（path → 分桶尺寸 + best_idx）扫描一次后缓存 json，worker 不再重算。
+
+2026-10-14（通用性）：数据源路径改为**相对 <data_root>**，不再硬编码
+`/root/autodl-tmp`。默认 data_root 可用 `SRDIFF_DATA_ROOT` 覆盖；
+换机器只需要 `tools/prep_data.py --data_root <新位置>` 重建同样的目录名。
 """
 import glob
 import json
@@ -27,14 +31,24 @@ from model_multi import AREA_BUCKETS, PATCH, RESOS, best_fit_index
 DINO_MEAN = np.array([0.485, 0.456, 0.406], np.float32) * 255.0
 DINO_STD = np.array([0.229, 0.224, 0.225], np.float32) * 255.0
 
-DEFAULT_SOURCES = [
-    ("/root/autodl-tmp/data/imagenet_val", (".JPEG", ".jpeg", ".jpg"), 50000),
-    ("/root/autodl-tmp/data/coco/train2017", (".jpg",), 118000),
-    ("/root/autodl-tmp/data/vimeo", (".png",), 92000),
-    ("/root/autodl-tmp/data/div2k/DIV2K_train_HR", (".png",), 800),
-    ("/root/autodl-tmp/data/flickr2k", (".png", ".jpg", ".jpeg"), 2650),
-    ("/root/autodl-tmp/data/openimages", (".jpg", ".jpeg", ".png"), 15000),
+# 默认数据根目录（AutoDL 惯例路径; 任何机器都能用环境变量改）
+DEFAULT_DATA_ROOT = os.environ.get("SRDIFF_DATA_ROOT", "/root/autodl-tmp/data")
+
+# 六源（相对 data_root 的子目录, 扩展名白名单, 索引上限）
+# 上限口径 = 2026-09-26 六源 run（vimeo cap 92000 > 实际 91701 ⇒ 实得 91701,
+# 合计 278,151 条）。改上限用 `--source_caps` 或 build_sources(caps=...)。
+SOURCES = [
+    ("imagenet_val", (".JPEG", ".jpeg", ".jpg"), 50000),
+    ("coco/train2017", (".jpg",), 118000),
+    ("vimeo", (".png", ".jpg", ".jpeg"), 92000),
+    ("div2k/DIV2K_train_HR", (".png",), 800),
+    ("flickr2k", (".png", ".jpg", ".jpeg"), 2650),
+    ("openimages", (".jpg", ".jpeg", ".png"), 15000),
 ]
+
+# 向后兼容：旧代码 from data_multi import DEFAULT_SOURCES（绝对路径）
+DEFAULT_SOURCES = [(os.path.join(DEFAULT_DATA_ROOT, rel), exts, cap)
+                   for rel, exts, cap in SOURCES]
 
 
 def bucket_shape(W: int, H: int, long_side_cap: int = 1280,
@@ -52,6 +66,16 @@ def bucket_shape(W: int, H: int, long_side_cap: int = 1280,
     gw = max(1, int(round(gw0 * s)))
     gh = max(1, int(round(gh0 * s)))
     return gw * PATCH, gh * PATCH
+
+
+def build_sources(data_root: str = DEFAULT_DATA_ROOT, caps=None):
+    """相对 <data_root> 的六源清单 → [(绝对目录, 扩展名白名单, 上限), …]。
+
+    `caps` 以**相对子目录名**为键覆盖上限，例：{"openimages": 8000}。
+    """
+    caps = caps or {}
+    return [(os.path.join(data_root, rel), exts, caps.get(rel, cap))
+            for rel, exts, cap in SOURCES]
 
 
 def build_index(sources=DEFAULT_SOURCES, cache: str = "",

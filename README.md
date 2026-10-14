@@ -83,7 +83,9 @@ python infer_v2_test.py --data_dir /root/autodl-tmp/construction_site \
 
 ### 3.1 进行中
 
-- **（当前无在跑实验）** 最近一次（2026-09-26/27 六源多分辨率微调）已收工，见下。
+- **★ MultiResSR 解码器 ×10 重跑 + 代码通用化（2026-10-14）** —— 新实例 **2×A800 80GB**：把 09-26 六源实验**解码器参数量整体提升 10 倍**（`depth 2→2`、`width 1024→3072`、`heads 8→24`、`mlp_ratio 4.0→5.12` ⇒ 解码器 **140.9 M → 1409.3 M（×10.001）**，全模型 445.3 M → 1713.6 M；参数量用 `tools/count_params.py` 实测，不是估的）。同时按用户要求把 multi 代码**去 CUDA 化 + 去手写循环**：新增 `srdiff_runtime.py`（NVIDIA CUDA / 海光 DCU(ROCm) / 昇腾 NPU / XPU / CPU 的设备与后端解析）、`tools/prep_data.py`（任意机器一条命令重建六源数据布局），训练循环/DDP/AMP/梯度累积/裁剪/调度器/续训全部交给 **HuggingFace Accelerate**（手写 `DDP`/`init_process_group`/`autocast("cuda")`/`torch.cuda.*`/lr 曲线已删除）。入口 `run_multi_10x.sh`（路径/设备/启动器全可环境变量覆盖）。正式 run = **2 epoch / 77,402 步/卡**（索引 259,641 ⇒ 38,701 步/epoch），实测 2.67 s/step、峰值 58.9 GiB/卡、单 ckpt 20.6 GB（`--keep_ckpts 4` 轮转），ETA ≈ 57 h。⚠️ 数据偏差：本实例无 `/root/autodl-pub`，HF 镜像的 vimeo90k triplet 只有 **73,191** clip（09-26 是 91,701）⇒ 索引 259,641 而非 278,151。⇒ [`doc/2026-10-14/REPORT_multi_portable.md`](doc/2026-10-14/REPORT_multi_portable.md)
+
+- **（当前无其它在跑实验）** 上一轮（2026-09-26/27 六源多分辨率微调）已收工，见下。
 
 - **★ 多分辨率版 MultiResSR：六源自然图像微调（2026-09-26/27，已跑完）** —— 新实例 2×RTX 4080S 32G：编码器**不设最大尺寸**（原生尺寸 + 长边 1280 + 面积分桶）、**解码 token 固定 144（square 12 步 0~11）**、**4 个解码器** 448×252 / 252×448 / 224×224 / 448×448、L1 权重按「原图最适配分辨率」给 **2/5 + 其余各 1/5**；数据 = ImageNet val 50k + COCO2017 train 118k + Vimeo-90k 91,701 + DIV2K 800 + Flickr2K 2,650 + OpenImages 15,000 = **278,151**。1 epoch / **40,242 步 / 12h33m** / bf16 + 编码器&解码器双梯度检查点 / 峰值 **23.52 GiB**（显存够；不用解码器检查点时最大桶 bs=4 OOM）。**逐 step 精炼 = 有但极度前置**：COCO2017 **val** 留出 5,000 张上 best-fit 像素 L1 **31.25 → 26.10 px**（单调、嵌套码），但**前 6 步已拿 91.7% 降幅**、第 7→11 步多花 **80 token（+127% 码率）只买到 0.20 px**、第 12 步 **+0.01 px 过冲**、早停 oracle 仅 **0.050 px** ⇒ [`doc/2026-09-26/RUN_multires_natural.md`](doc/2026-09-26/RUN_multires_natural.md)。⚠️ **边界**：留出集与训练**同域**（COCO train vs val），与历史 `construction_site` 的 16.42 px **不同域、不同 K、不同分辨率集合，不可直接比**。
 

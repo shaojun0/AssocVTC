@@ -50,6 +50,33 @@ def best_fit_index(W: int, H: int, resos=RESOS, tie_eps: float = 1e-3) -> int:
     return cand[0][2]
 
 
+def param_breakdown(model: nn.Module) -> dict:
+    """按模块统计参数量（2026-10-14 新增：为「解码器参数量 ×10」提供可验证口径）。
+
+    分组：`dinov2`（编码器，预训练）｜`special_bank`｜`decoders`（4 个
+    OutputQueryDecoder）｜`pixel_head`。`decoder_total` = 后三者之和
+    —— 这是用户 2026-10-14 要求「整体提升 10 倍」的那个「解码器参数量」。
+    """
+    groups = {"dinov2": 0, "special_bank": 0, "decoders": 0, "pixel_head": 0}
+    extra: dict = {}
+    for name, p in model.named_parameters():
+        n = p.numel()
+        head = name.split(".")[0]
+        if head in groups:
+            groups[head] += n
+        else:
+            extra[head] = extra.get(head, 0) + n
+    groups.update(extra)
+    total = sum(groups.values())
+    decoder_total = groups["special_bank"] + groups["decoders"] + groups["pixel_head"]
+    return {
+        "groups": groups,
+        "total": total,
+        "decoder_total": decoder_total,
+        "decoder_ratio_of_total": decoder_total / max(1, total),
+    }
+
+
 class MultiResSR(nn.Module):
     def __init__(self, dinov2: nn.Module, num_specials: int = 144,
                  dim: int = 1024, heads: int = 8, depth: int = 2,
@@ -59,7 +86,8 @@ class MultiResSR(nn.Module):
                  step_plan: str = "square", block: int = 12,
                  patch_px: int = PATCH * PATCH * 3,
                  decoder_dropout: float = 0.0,
-                 decoder_ckpt: bool = False):
+                 decoder_ckpt: bool = False,
+                 decoder_width: int = 0):
         super().__init__()
         self.dinov2 = dinov2
         self.num_specials = int(num_specials)
@@ -71,6 +99,14 @@ class MultiResSR(nn.Module):
         self.weight_other = float(weight_other)
         assert abs(self.weight_best + 3 * self.weight_other - 1.0) < 1e-6, \
             "4 档权重之和必须为 1（2/5 + 3×1/5）"
+        # decoder_width = 解码器 stack 的 d_model（model_v2.OutputQueryDecoder 的
+        # stack_dim）: 0/None ⇒ 与编码器 dim 相同（历史口径, 无投影）;
+        # 显式放大 ⇒ 每个解码器前后各加一层 Linear 投影（dim→w→dim），
+        # 注意力/FFN 全在 w 维上做 —— 这是「解码器参数量 ×10」的主旋钮。
+        # 与 depth 一起决定规模, 精确参数量见 tools/count_params.py。
+        self.decoder_width = int(decoder_width or 0)
+        assert self.decoder_width == 0 or self.decoder_width % heads == 0, \
+            f"decoder_width={self.decoder_width} 必须能被 heads={heads} 整除"
 
         self.special_bank = SpecialTokenBank(num_tokens=self.num_specials, dim=dim)
         self.decoders = nn.ModuleList([
@@ -79,7 +115,8 @@ class MultiResSR(nn.Module):
                                steps=decoder_steps, depth=depth,
                                num_specials=self.num_specials,
                                dropout=decoder_dropout,
-                               step_plan=step_plan, block=block)
+                               step_plan=step_plan, block=block,
+                               stack_dim=self.decoder_width or None)
             for r in self.resos])
         # 4 档共享同一个 per-patch 像素头（patch 级映射与分辨率无关）
         self.pixel_head = PixelHead(dim=dim, patch_px=patch_px)
