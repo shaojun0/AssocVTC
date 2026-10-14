@@ -248,8 +248,14 @@ def main():
     if runtime.device_type == "cpu":
         precision = "fp32"          # CPU 上 bf16 autocast 无意义
     if precision == "bf16" and runtime.device_type == "cuda" and not runtime.supports_bf16():
-        print("[warn] 本卡不支持 bf16 ⇒ 降级 fp32")
-        precision = "fp32"
+        # bf16 不可用（老卡 / 部分 DCU 代际的 bf16 无硬件支持）⇒ **退 fp16，不要退 fp32**：
+        # fp16 在这类卡上通常仍有 tensor core（快路径），而 fp32 会慢一个数量级
+        # （例：fp16 354 TFLOPS vs fp32 44 TFLOPS = 8×）。要纯 fp32 请显式 --precision fp32。
+        # 代价：fp16 需要 GradScaler 且动态范围窄（±65504），偶发溢出会跳过该次更新。
+        print("[warn] 本卡不支持 bf16 ⇒ 自动降级 **fp16**（不是 fp32：fp16 通常有 tensor core，"
+              "快一个数量级）。bf16 与 fp16 的取舍见 doc/2026-10-14/REPORT_multi_portable.md §2.2；"
+              "若要纯 fp32 请显式传 --precision fp32")
+        precision = "fp16"
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.grad_accum,
