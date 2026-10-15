@@ -39,7 +39,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", required=True)
     ap.add_argument("--out", default="curves.png")
-    ap.add_argument("--title", default="linattn (from-scratch, ImageNet-100)")
+    ap.add_argument("--title", default="linattn (from-scratch, ImageNet-100): enc 31.9M linear-attn + dec 31.2M softmax-attn, 224x224")
     a = ap.parse_args()
     tr, va = read_log(a.log)
     if not tr and not va:
@@ -52,29 +52,29 @@ def main():
         axes[0].set_yscale("log")
         axes[0].set_xlabel("step")
         axes[0].set_ylabel("train L1 (normalized)")
-        axes[0].set_title("训练损失")
+        axes[0].set_title("Training loss")
         axes[0].grid(alpha=0.3)
     if va:
         ep = [r["epoch"] for r in va]
         ps = [r["psnr"] for r in va]
-        axes[1].plot(ep, ps, "o-", color="tab:green", label="本实验版重建")
+        axes[1].plot(ep, ps, "o-", color="tab:green", label="linattn (from-scratch) recon")
         if "psnr_patch_dc_baseline" in va[0]:
             b1 = va[0]["psnr_patch_dc_baseline"]
             axes[1].axhline(b1, ls="--", color="tab:red",
-                            label=f"per-patch DC 基线 {b1:.2f}dB")
+                            label=f"per-patch DC baseline {b1:.2f}dB")
         if "psnr_mean_image_baseline" in va[0]:
             b0 = va[0]["psnr_mean_image_baseline"]
             axes[1].axhline(b0, ls=":", color="gray",
-                            label=f"常量灰基线 {b0:.2f}dB")
+                            label=f"constant-gray baseline {b0:.2f}dB")
         axes[1].set_xlabel("epoch")
         axes[1].set_ylabel("val PSNR (dB)")
-        axes[1].set_title("验证 PSNR（必须同时优于两条基线）")
+        axes[1].set_title("Val PSNR (must beat BOTH baselines)")
         axes[1].legend(fontsize=8)
         axes[1].grid(alpha=0.3)
         axes[2].plot(ep, [r["ssim"] for r in va], "s-", color="tab:purple")
         axes[2].set_xlabel("epoch")
         axes[2].set_ylabel("val SSIM")
-        axes[2].set_title("验证 SSIM")
+        axes[2].set_title("Val SSIM")
         axes[2].grid(alpha=0.3)
     fig.suptitle(a.title, fontsize=13)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
