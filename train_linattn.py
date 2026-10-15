@@ -1,0 +1,373 @@
+"""
+训练脚本 — SR-Diffusion-v3 实验版 (linattn): 无预训练编码器
+=========================================================
+
+从零训练 `model_v2_linattn.SRPhase1LinAttn`（线性注意力编码器 ~31.9M +
+普通注意力解码器 ~31.2M）在 ImageNet-100 上做 224×224 → 224×224 像素重建。
+
+    torchrun --nproc_per_node=1 train_linattn.py --output_dir out/linattn_k64
+
+单卡即可（本仓库实验版无 DDP 需求; 多卡时每卡独立跑不同配置更方便对照）。
+训练量: 121,689 train / 5,000 val（100 类 × 50 张等距抽取）;
+batch 128 时 drop_last ⇒ **950 步/epoch**, 60 epoch = 57,000 步 ≈ 5.7h @ ~357 img/s。
+
+关键超参（默认值）:
+    lr 3e-4 (AdamW, cosine + warmup 5%), wd 0.05, grad_clip 1.0, bf16 autocast,
+    L1 像素损失（归一化空间, 与主线同口径）。
+
+产出（output_dir 下）:
+    ckpt_last.pt / ckpt_best.pt   —— 含 cfg / args / 指标
+    train_log.jsonl               —— 逐步日志
+    status.json                   —— 监控用快照（step/epoch/loss/psnr/eta）
+    samples/*.png                 —— 输入 | 重建 对照网格
+    eval_val.json                 —— 最后一次验证的完整指标（含基线）
+"""
+
+import argparse
+import json
+import math
+import os
+import time
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.utils import make_grid, save_image
+
+from data_linattn import build_loaders
+from metrics_linattn import psnr, ssim, per_patch_dc_baseline
+from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
+                              SRPhase1LinAttn, patches_to_image)
+
+
+# ─────────────────────────── 工具 ───────────────────────────
+
+def param_groups(model: nn.Module, weight_decay: float):
+    decay, no_decay = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or n.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [{"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0}]
+
+
+def lr_at(step: int, total: int, warmup: int, base_lr: float, min_lr: float) -> float:
+    if step < warmup:
+        return base_lr * (step + 1) / max(1, warmup)
+    t = (step - warmup) / max(1, total - warmup)
+    return min_lr + (base_lr - min_lr) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, t)))
+
+
+def log_jsonl(path: str, obj: dict):
+    with open(path, "a") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def write_status(path: str, obj: dict):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def denorm01(pix: torch.Tensor, hw: int, patch: int) -> torch.Tensor:
+    """(B,N,3pp) 归一化像素 patch → (B,3,hw,hw) **[0,1]**。
+
+    ⚠️ 单位陷阱（踩过）: `IMAGENET_MEAN/STD` 是 **[0,1] 标度**（0.485/0.229），
+    所以 `patches_to_image` 反归一化后直接就是 [0,1]，**不能再除以 255**。
+    反之 `model_v2.patches_to_image` 的 mean/std 口径是 0-255 标度（所以那里
+    才需要 /255）。本函数用 clamp_255=False 关掉 0-255 截断，改成显式
+    clamp(0,1)（预测可能越界, 截断到有效像素范围后再算 PSNR/SSIM 才公平）。
+    """
+    img = patches_to_image(pix, hw, hw, patch, IMAGENET_MEAN, IMAGENET_STD,
+                           clamp_255=False)
+    return img.clamp(0.0, 1.0)
+
+
+def save_pair_grid(inp01: torch.Tensor, rec01: torch.Tensor, path: str, n: int = 8):
+    """上排原图 / 下排重建, 各 n 张。"""
+    n = min(n, inp01.shape[0])
+    a = make_grid(inp01[:n], nrow=n, padding=2, value_range=(0, 1))
+    b = make_grid(rec01[:n], nrow=n, padding=2, value_range=(0, 1))
+    canvas = torch.cat([a, torch.ones(3, 4, a.shape[2], device=a.device), b], dim=1)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    save_image(canvas, path)
+
+
+# ─────────────────────────── 验证 ───────────────────────────
+
+@torch.no_grad()
+def evaluate(model, loader, patch: int, img_size: int, amp: bool,
+             max_batches: int = 0, save_grid: str = "", max_images: int = 0):
+    model.eval()
+    l1s, psnrs, ssims, dcs, cst = [], [], [], [], []
+    n_img = 0
+    grid_in, grid_rec = [], []
+    const01 = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+    for bi, (x, _) in enumerate(loader):
+        if max_batches and bi >= max_batches:
+            break
+        x = x.cuda(non_blocking=True)
+        if max_images and n_img >= max_images:
+            break
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            out = model(x)
+        l1s.append(F.l1_loss(out["F_hat"].float(), out["target_pix"].float()).item())
+        rec01 = denorm01(out["F_hat"].float(), img_size, patch)
+        tgt01 = denorm01(out["target_pix"].float(), img_size, patch)
+        # ★运行时护栏: 反归一化单位口径一旦再写错（多除 255）, 目标图均值会从
+        #   ~0.45 掉到 ~0.0018, PSNR/SSIM 会整体虚高 ~48dB —— 直接报错而不是
+        #   产出一份"看着很漂亮"的错误指标（2026-10-15 独立审查 finding 3）。
+        assert 0.02 < float(tgt01.mean()) < 0.98, (
+            f"反归一化单位口径疑似错误: tgt01.mean()={float(tgt01.mean()):.6f} "
+            f"(真实图像应≈0.45)")
+        psnrs.append(psnr(rec01, tgt01).mean().item())
+        ssims.append(ssim(rec01, tgt01).mean().item())
+        dcs.append(per_patch_dc_baseline(tgt01, patch).mean().item())
+        # 常数均值图基线: 拿"ImageNet 均值图"去和**真实 val 目标**比（不是和黑图比）
+        cst.append(psnr(const01.expand_as(tgt01).to(tgt01.device),
+                        tgt01).mean().item())
+        n_img += x.shape[0]
+        if save_grid and len(grid_in) * x.shape[0] < 8:
+            grid_in.append(tgt01[:4].cpu())
+            grid_rec.append(rec01[:4].cpu())
+    model.train()
+    res = {
+        "n_images": n_img,
+        "l1_norm": sum(l1s) / max(1, len(l1s)),
+        "psnr": sum(psnrs) / max(1, len(psnrs)),
+        "ssim": sum(ssims) / max(1, len(ssims)),
+        "psnr_mean_image_baseline": sum(cst) / max(1, len(cst)),
+        "psnr_patch_dc_baseline": sum(dcs) / max(1, len(dcs)),
+        "pred_clamped_to_01": True,   # 指标用 clamp(0,1) 后的预测（基线天然在域内）
+    }
+    res["psnr_gain_over_patch_dc"] = res["psnr"] - res["psnr_patch_dc_baseline"]
+    if save_grid and grid_in:
+        save_pair_grid(torch.cat(grid_in), torch.cat(grid_rec), save_grid, 8)
+    return res
+
+
+# ─────────────────────────── 主流程 ───────────────────────────
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_dir", default="/root/autodl-tmp/datasets/imagenet100")
+    ap.add_argument("--output_dir", default="output/linattn_k64")
+    ap.add_argument("--img_size", type=int, default=224)
+    ap.add_argument("--patch", type=int, default=16)
+    ap.add_argument("--num_specials", type=int, default=64, help="K: z_s 压缩 token 数")
+    # 编码器
+    ap.add_argument("--enc_dim", type=int, default=448)
+    ap.add_argument("--enc_depth", type=int, default=13)
+    ap.add_argument("--enc_heads", type=int, default=8)
+    ap.add_argument("--enc_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--enc_dwconv", type=int, default=1)
+    # 解码器
+    ap.add_argument("--dec_dim", type=int, default=512)
+    ap.add_argument("--dec_depth", type=int, default=7)
+    ap.add_argument("--dec_heads", type=int, default=8)
+    ap.add_argument("--dec_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--pixel_hidden", type=int, default=1024)
+    ap.add_argument("--dropout", type=float, default=0.0)
+    # 优化
+    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--batch_size", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--min_lr", type=float, default=1e-6)
+    ap.add_argument("--weight_decay", type=float, default=0.05)
+    ap.add_argument("--warmup_frac", type=float, default=0.05)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--amp", type=int, default=1)
+    ap.add_argument("--num_workers", type=int, default=16)
+    ap.add_argument("--val_per_class", type=int, default=50)
+    ap.add_argument("--val_batches", type=int, default=40)
+    ap.add_argument("--log_interval", type=int, default=20)
+    ap.add_argument("--sample_interval", type=int, default=2000)
+    ap.add_argument("--save_every_epochs", type=int, default=1)
+    # 控制
+    ap.add_argument("--max_steps", type=int, default=0, help=">0 时提前停（冒烟）")
+    ap.add_argument("--limit", type=int, default=0, help=">0 时限制训练集大小（冒烟）")
+    ap.add_argument("--time_budget_h", type=float, default=0.0, help=">0 时到点保存退出")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume", default="")
+    ap.add_argument("--smoke", action="store_true", help="冒烟: 快速配置 + 小数据")
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.smoke:
+        args.limit = args.limit or 512
+        args.max_steps = args.max_steps or 30
+        args.val_batches = 2
+        args.log_interval = 5
+        args.num_workers = 8
+        args.sample_interval = 20
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_path = os.path.join(args.output_dir, "train_log.jsonl")
+    status_path = os.path.join(args.output_dir, "status.json")
+    with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+        json.dump(vars(args), f, ensure_ascii=False, indent=1)
+
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.benchmark = True
+
+    cfg = LinAttnConfig(
+        img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
+        enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
+        enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
+        dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
+        dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
+        dropout=args.dropout)
+    model = SRPhase1LinAttn(cfg).cuda()
+    pc = model.count_params()
+    print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
+          f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth}", flush=True)
+    print(f"[params] {pc}", flush=True)
+
+    tr_loader, va_loader, tr_ds, va_ds = build_loaders(
+        args.data_dir, args.img_size, args.batch_size, args.val_per_class,
+        args.num_workers, args.limit, args.val_batches)
+    steps_per_epoch = len(tr_loader)
+    total_steps = (args.max_steps if args.max_steps > 0
+                   else steps_per_epoch * args.epochs)
+    warmup = max(1, int(total_steps * args.warmup_frac))
+    print(f"[data] train={len(tr_ds)} val={len(va_ds)} "
+          f"steps/epoch={steps_per_epoch} total_steps={total_steps} "
+          f"warmup={warmup}", flush=True)
+
+    opt = torch.optim.AdamW(param_groups(model, args.weight_decay),
+                            lr=args.lr, betas=(0.9, 0.95), eps=1e-8)
+    start_step, start_epoch, best_psnr = 0, 0, -1e9
+    if args.resume and os.path.exists(args.resume):
+        ck = torch.load(args.resume, map_location="cpu", weights_only=False)
+        model.load_state_dict(ck["model"])
+        if "opt" in ck:
+            opt.load_state_dict(ck["opt"])
+        start_step = ck.get("step", 0)
+        start_epoch = ck.get("epoch", 0)
+        best_psnr = ck.get("best_psnr", -1e9)
+        print(f"[resume] {args.resume} step={start_step} epoch={start_epoch} "
+              f"best_psnr={best_psnr:.3f}", flush=True)
+
+    def save_ckpt(path, step, epoch, best, tag=""):
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
+                    "cfg": cfg.to_dict(), "args": vars(args), "step": step,
+                    "epoch": epoch, "best_psnr": best, "tag": tag,
+                    "params": pc}, path)
+
+    t0 = time.time()
+    run_imgs, run_t0 = 0, time.time()
+    model.train()
+    step = start_step
+    stop = False
+    epoch = start_epoch
+    # 终止条件用**步数**（而非 epoch 数）: 这样 --time_budget_h 中途打断后从
+    # ckpt 续跑也能正好补满 total_steps, cosine 能走到 min_lr
+    # （2026-10-15 独立审查 finding 6: 旧版按 epoch 数终止会少跑 <1 epoch）。
+    while step < total_steps and not stop:
+        epoch += 1
+        for bi, (x, _) in enumerate(tr_loader):
+            if step >= total_steps:
+                stop = True
+                break
+            lr = lr_at(step, total_steps, warmup, args.lr, args.min_lr)
+            for g in opt.param_groups:
+                g["lr"] = lr
+            x = x.cuda(non_blocking=True)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
+                out = model(x)
+                loss = out["loss"]
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            if args.grad_clip > 0:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            else:
+                gn = torch.tensor(0.0)
+            opt.step()
+            step += 1
+            run_imgs += x.shape[0]
+
+            if step % args.log_interval == 0 or step - start_step <= 3:
+                el = time.time() - t0
+                ips = run_imgs / max(1e-6, time.time() - run_t0)
+                eta_h = (total_steps - step) / max(1e-6, ips) * args.batch_size / 3600
+                rec = {
+                    "step": step, "epoch": epoch, "loss": round(loss.item(), 5),
+                    "recon": round(out["recon"].item(), 5),
+                    "lr": lr, "grad_norm": round(float(gn), 4),
+                    "img_per_s": round(ips, 1), "elapsed_min": round(el / 60, 2),
+                    "eta_h": round(eta_h, 2),
+                    "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+                }
+                print(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
+                      f"loss={loss.item():.4f} recon={out['recon'].item():.4f} "
+                      f"lr={lr:.2e} gn={float(gn):.2f} {ips:.0f}img/s "
+                      f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h", flush=True)
+                log_jsonl(log_path, rec)
+                write_status(status_path, {**rec, "best_psnr": best_psnr,
+                                           "running": True})
+
+            if args.sample_interval and step % args.sample_interval == 0:
+                with torch.no_grad():
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
+                        o = model(x[:8])
+                    g_in = denorm01(o["target_pix"].float(), args.img_size, args.patch)
+                    g_rec = denorm01(o["F_hat"].float(), args.img_size, args.patch)
+                    save_pair_grid(g_in, g_rec,
+                                   os.path.join(args.output_dir, "samples",
+                                                f"step{step:07d}.png"))
+
+            if args.time_budget_h > 0 and (time.time() - t0) / 3600 >= args.time_budget_h:
+                print(f"[stop] 达到时间预算 {args.time_budget_h}h", flush=True)
+                stop = True
+                break
+
+        # ── epoch 末验证 + 存档 ──
+        if args.val_batches > 0 and (step > start_step or epoch > 1):
+            vr = evaluate(model, va_loader, args.patch, args.img_size,
+                          bool(args.amp), args.val_batches,
+                          save_grid=os.path.join(args.output_dir, "samples",
+                                                 f"epoch{epoch:03d}_val.png"))
+            vr.update({"step": step, "epoch": epoch, "split": "val"})
+            print(f"[val] ep{epoch} step{step} l1={vr['l1_norm']:.4f} "
+                  f"psnr={vr['psnr']:.2f}dB ssim={vr['ssim']:.4f} "
+                  f"(mean基线 {vr['psnr_mean_image_baseline']:.2f}dB, "
+                  f"patchDC基线 {vr['psnr_patch_dc_baseline']:.2f}dB)", flush=True)
+            log_jsonl(log_path, vr)
+            with open(os.path.join(args.output_dir, "eval_val.json"), "w") as f:
+                json.dump(vr, f, ensure_ascii=False, indent=1)
+            if vr["psnr"] > best_psnr:
+                best_psnr = vr["psnr"]
+                save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"),
+                          step, epoch, best_psnr, "best")
+            write_status(status_path, {"step": step, "epoch": epoch,
+                                       "val_psnr": vr["psnr"], "val_l1": vr["l1_norm"],
+                                       "best_psnr": best_psnr,
+                                       "elapsed_min": round((time.time() - t0) / 60, 2),
+                                       "running": not stop})
+        if args.save_every_epochs and epoch % args.save_every_epochs == 0:
+            save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"),
+                      step, epoch, best_psnr, "last")
+
+    save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"), step, epoch,
+              best_psnr, "last")
+    if best_psnr < -1e8 and args.val_batches == 0:
+        save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"), step, epoch,
+                  best_psnr, "notvalidated")
+    dt = (time.time() - t0) / 60
+    print(f"[done] steps={step} epochs={epoch} best_val_psnr={best_psnr:.2f} "
+          f"wall={dt:.1f}min", flush=True)
+    write_status(status_path, {"step": step, "epoch": epoch,
+                               "best_psnr": best_psnr,
+                               "elapsed_min": round(dt, 2), "running": False,
+                               "done": True})
+
+
+if __name__ == "__main__":
+    main()
