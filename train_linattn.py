@@ -104,7 +104,8 @@ def save_pair_grid(inp01: torch.Tensor, rec01: torch.Tensor, path: str, n: int =
 def evaluate(model, loader, patch: int, img_size: int, amp: bool,
              max_batches: int = 0, save_grid: str = "", max_images: int = 0):
     model.eval()
-    l1s, psnrs, ssims, dcs, cst = [], [], [], [], []
+    # 按图数加权（与 eval_linattn 同口径; 早期按批等权会系统性偏低 ~0.06dB）
+    tot = {"l1": 0.0, "p": 0.0, "s": 0.0, "dc": 0.0, "c": 0.0}
     n_img = 0
     grid_in, grid_rec = [], []
     const01 = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
@@ -116,7 +117,9 @@ def evaluate(model, loader, patch: int, img_size: int, amp: bool,
             break
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             out = model(x)
-        l1s.append(F.l1_loss(out["F_hat"].float(), out["target_pix"].float()).item())
+        Bb = x.shape[0]
+        tot["l1"] += float(F.l1_loss(out["F_hat"].float(),
+                                     out["target_pix"].float())) * Bb
         rec01 = denorm01(out["F_hat"].float(), img_size, patch)
         tgt01 = denorm01(out["target_pix"].float(), img_size, patch)
         # ★运行时护栏: 反归一化单位口径一旦再写错（多除 255）, 目标图均值会从
@@ -125,12 +128,12 @@ def evaluate(model, loader, patch: int, img_size: int, amp: bool,
         assert 0.02 < float(tgt01.mean()) < 0.98, (
             f"反归一化单位口径疑似错误: tgt01.mean()={float(tgt01.mean()):.6f} "
             f"(真实图像应≈0.45)")
-        psnrs.append(psnr(rec01, tgt01).mean().item())
-        ssims.append(ssim(rec01, tgt01).mean().item())
-        dcs.append(per_patch_dc_baseline(tgt01, patch).mean().item())
+        tot["p"] += float(psnr(rec01, tgt01).sum())
+        tot["s"] += float(ssim(rec01, tgt01).sum())
+        tot["dc"] += float(per_patch_dc_baseline(tgt01, patch).sum())
         # 常数均值图基线: 拿"ImageNet 均值图"去和**真实 val 目标**比（不是和黑图比）
-        cst.append(psnr(const01.expand_as(tgt01).to(tgt01.device),
-                        tgt01).mean().item())
+        tot["c"] += float(psnr(const01.expand_as(tgt01).to(tgt01.device),
+                               tgt01).sum())
         n_img += x.shape[0]
         if save_grid and len(grid_in) * x.shape[0] < 8:
             grid_in.append(tgt01[:4].cpu())
@@ -138,11 +141,11 @@ def evaluate(model, loader, patch: int, img_size: int, amp: bool,
     model.train()
     res = {
         "n_images": n_img,
-        "l1_norm": sum(l1s) / max(1, len(l1s)),
-        "psnr": sum(psnrs) / max(1, len(psnrs)),
-        "ssim": sum(ssims) / max(1, len(ssims)),
-        "psnr_mean_image_baseline": sum(cst) / max(1, len(cst)),
-        "psnr_patch_dc_baseline": sum(dcs) / max(1, len(dcs)),
+        "l1_norm": tot["l1"] / max(1, n_img),
+        "psnr": tot["p"] / max(1, n_img),
+        "ssim": tot["s"] / max(1, n_img),
+        "psnr_mean_image_baseline": tot["c"] / max(1, n_img),
+        "psnr_patch_dc_baseline": tot["dc"] / max(1, n_img),
         "pred_clamped_to_01": True,   # 指标用 clamp(0,1) 后的预测（基线天然在域内）
     }
     res["psnr_gain_over_patch_dc"] = res["psnr"] - res["psnr_patch_dc_baseline"]
@@ -168,6 +171,14 @@ def parse_args():
     ap.add_argument("--enc_dwconv", type=int, default=1)
     ap.add_argument("--enc_qk_norm", type=int, default=1,
                     help="线性注意力 QK-Norm（稳定性修复 1, 见模型 docstring）")
+    ap.add_argument("--dec_recurrent", type=int, default=0,
+                    help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
+    ap.add_argument("--dec_steps", default="",
+                    help="逗号分隔采样步; 空 = square_block_starts(K)（K=64 → 8 步）")
+    ap.add_argument("--freeze_encoder", type=int, default=0,
+                    help="1 = 冻结编码器（只训解码器; 逐步精炼实验用）")
+    ap.add_argument("--init_from", default="",
+                    help="warm start ckpt（循环版可从单步版 ckpt 热启动, 只缺零初始化 mem_pos）")
     # 解码器
     ap.add_argument("--dec_dim", type=int, default=512)
     ap.add_argument("--dec_depth", type=int, default=7)
@@ -227,11 +238,30 @@ def main():
         enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
         enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
         enc_qk_norm=bool(args.enc_qk_norm),
+        dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
         dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
         dropout=args.dropout)
     model = SRPhase1LinAttn(cfg).cuda()
+    if args.init_from:
+        ck0 = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        missing, unexpected = model.load_state_dict(ck0["model"], strict=False)
+        print(f"[init_from] {args.init_from} → missing={list(missing)} "
+              f"unexpected={list(unexpected)}", flush=True)
+        assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
+        assert set(missing) <= {"decoder.mem_pos"}, \
+            f"除 mem_pos 外还有未加载参数（形状不符?）: {list(missing)[:8]}"
+    if args.freeze_encoder:
+        for prm in model.encoder.parameters():
+            prm.requires_grad_(False)
+        n_tr = sum(prm.numel() for prm in model.parameters() if prm.requires_grad)
+        print(f"[freeze] 冻结编码器 ⇒ 可训参数 {n_tr/1e6:.3f} M "
+              f"(原 {sum(prm.numel() for prm in model.parameters())/1e6:.3f} M)", flush=True)
     pc = model.count_params()
+    n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
+    print(f"[decode] recurrent={getattr(model,'recurrent',False)} T={n_steps}"
+          + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else ""),
+          flush=True)
     print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
           f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth}", flush=True)
     print(f"[params] {pc}", flush=True)
@@ -293,7 +323,9 @@ def main():
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if args.grad_clip > 0:
-                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                gn = torch.nn.utils.clip_grad_norm_(
+                    [prm for prm in model.parameters() if prm.requires_grad],
+                    args.grad_clip)
             else:
                 gn = torch.tensor(0.0)
             # ★梯度爆炸跳步护栏（线性注意力稳定性修复 3）: 前向产出巨大 activation
@@ -314,7 +346,7 @@ def main():
                 rec = {
                     "step": step, "epoch": epoch, "loss": round(loss.item(), 5),
                     "recon": round(out["recon"].item(), 5),
-                    "lr": lr, "grad_norm": round(float(gn), 4), "skipped": n_skipped,
+                    "lr": lr, "grad_norm": round(float(gn), 4), "skipped": n_skipped, "T": n_steps,
                     "img_per_s": round(ips, 1), "elapsed_min": round(el / 60, 2),
                     "eta_h": round(eta_h, 2),
                     "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),

@@ -415,6 +415,120 @@ class StandardAttentionDecoder(nn.Module):
         return self.pixel_head(self.norm_out(y))            # (B,N,patch_px)
 
 
+# ═══ 逐步（循环）读出：平方块读窗口 + BPTT carry（与主线 model_v2 同口径）═══
+#   本节的 square_block_starts / step_windows 是主线 model_v2 同名函数的本地副本,
+#   语义**逐位一致**（自检 §8 直接与主线对拍, 防止两处口径漂移）。
+
+def square_block_starts(num_patches: int) -> list:
+    """步集 = {k² | 1 ≤ k² ≤ num_patches}（主线同式）。
+
+    N=196 → [1,4,9,…,196]（14 步）; K=64 → [1,4,9,16,25,36,49,64]（**8 步**）。
+    块 k = [k², min((k+1)²−1, N)] —— 步值即"该步读完前 k² 个 token"。
+    """
+    K = math.isqrt(int(num_patches))
+    return [k * k for k in range(1, K + 1)]
+
+
+def step_windows(num_specials: int, steps, plan: str = "square",
+                 block: int = 0) -> list:
+    """每个采样步在 A 坐标（0=z_cls, 1..K=z_s）下的读窗口 `[(lo, hi), …]`。
+
+    与主线 `model_v2.step_windows` **逐位一致**（自检 §8 对拍）:
+      · `plan="square"`（默认）: k=⌊√t⌋, hi=min((k+1)²−1, K);
+        非首步 lo=max(k²,1); 首步 lo=0（额外含 z_cls）。
+      · `plan="fixed"`: k=t, hi=min(k·block, K); 非首步 lo=(k−1)·block+1。
+    """
+    assert plan in ("square", "fixed"), f"未知 plan={plan}"
+    if plan == "fixed":
+        assert block >= 1, f"plan=fixed 须 block ≥1, got {block}"
+    out = []
+    for i, t in enumerate(steps):
+        if plan == "fixed":
+            k = int(t)
+            hi = min(k * block, num_specials)
+            lo = 0 if i == 0 else (k - 1) * block + 1
+        else:
+            k = math.isqrt(int(t))
+            hi = min((k + 1) ** 2 - 1, num_specials)
+            lo = 0 if i == 0 else max(k * k, 1)
+        assert lo <= hi, \
+            f"步 {t} 的读窗口 [{lo},{hi}] 为空 (K={num_specials}, plan={plan})"
+        out.append((lo, hi))
+    return out
+
+
+class RecurrentOutputQueryDecoder(nn.Module):
+    """主线口径的**循环读出**解码器（普通 softmax 注意力 stack 复用 T 次）。
+
+    与 `StandardAttentionDecoder` **参数形状逐 key 一致**（同名子模块
+    mem_proj/mem_norm/query_base/query_pos/stack/norm_out/pixel_head）
+    ⇒ 可直接 `load_state_dict` 做 warm start; 额外只多一个**零初始化**的
+    `mem_pos`（(1,K+1,dim)，给 memory 位置信息, 初始为恒等不改变行为）。
+
+    机制（与 `model_v2.OutputQueryDecoder` 同构）:
+        Y = query_base + query_pos                    ← step1 查询
+        for 步 t（读窗口 lo..hi = 该步自己那块 z_s）:
+            Y = stack(Y, mem[:, lo:hi+1])             ← 自注意力 + 交叉注意力到本块
+            out_t = pixel_head(norm_out(Y))           ← 该步对**全部 N 个 patch** 的直接预测
+            Y = query_base + Y                        ← carry（**BPTT, 不 detach**）
+    返回 (B, T, N, patch_px)；训练损失 = 各步直接预测的**平权**像素 L1（主线同款）。
+
+    与单步版的关系: T=1 时退化为单步版（只是多了一个零初始化 mem_pos）。
+    """
+
+    def __init__(self, enc_dim: int = 448, dim: int = 512, depth: int = 7,
+                 heads: int = 8, mlp_ratio: float = 4.0, patch: int = 16,
+                 num_patches: int = 196, num_specials: int = 64,
+                 pixel_hidden: int = 1024, dropout: float = 0.0,
+                 steps=None, step_plan: str = "square", block: int = 0):
+        super().__init__()
+        assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
+        self.enc_dim, self.dim = enc_dim, dim
+        self.num_patches, self.num_specials = num_patches, num_specials
+        self.patch_px = 3 * patch * patch
+
+        self.mem_proj = (nn.Identity() if enc_dim == dim
+                         else nn.Linear(enc_dim, dim))
+        self.mem_norm = nn.LayerNorm(dim)
+        self.query_base = nn.Parameter(torch.randn(num_patches, dim) * 0.02)
+        self.query_pos = nn.Parameter(torch.randn(num_patches, dim) * 0.02)
+        self.stack = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=dim, nhead=heads,
+                dim_feedforward=int(dim * mlp_ratio),
+                dropout=dropout, activation="gelu",
+                batch_first=True, norm_first=True),
+            num_layers=depth)
+        self.norm_out = nn.LayerNorm(dim)
+        self.pixel_head = PixelHead(dim, self.patch_px, pixel_hidden)
+        # memory 位置编码（零初始化 ⇒ 初始恒等, 不破坏 warm start）
+        self.mem_pos = nn.Parameter(torch.zeros(1, num_specials + 1, dim))
+
+        self.steps = ([int(x) for x in steps] if steps
+                      else square_block_starts(num_specials))
+        self.step_plan, self.block = step_plan, int(block)
+        self.windows = step_windows(num_specials, self.steps, step_plan, self.block)
+        self.last_windows = self.windows
+
+    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+        assert z_cls.dim() == 3 and z_s.dim() == 3, "z_cls/z_s 须为 (B,·,D)"
+        assert z_cls.shape[1] == 1 and z_s.shape[1] == self.num_specials, \
+            f"z_cls 应 1 列 / z_s 应 {self.num_specials} 列"
+        mem = torch.cat([z_cls, z_s], dim=1)                # (B,1+K,D_enc)
+        mem = self.mem_norm(self.mem_proj(mem)) + self.mem_pos
+        B = mem.shape[0]
+        base = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
+        Y = base
+        outs = []
+        for lo, hi in self.windows:
+            Y = self.stack(Y, mem[:, lo:hi + 1])            # 只读本步那块 memory
+            outs.append(Y)
+            Y = self.query_base.unsqueeze(0) + Y            # carry = BPTT（不 detach）
+        Ys = torch.stack(outs, dim=1)                       # (B,T,N,dim)
+        self.last_Y = Ys
+        return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
+
+
 # ═══ 配置 ═══
 
 @dataclass
@@ -430,6 +544,9 @@ class LinAttnConfig:
     enc_mlp_ratio: float = 4.0
     enc_dwconv: bool = True
     enc_qk_norm: bool = True       # 线性注意力稳定性修复 1（见 LinearAttention）
+    # ── 解码器（普通 softmax 注意力; dec_recurrent=True 时走循环读出）──
+    dec_recurrent: bool = False   # 循环读出（主线口径; 单步版 = False）
+    dec_steps: str = ""           # 逗号分隔采样步; 空 = square_block_starts(K)
     # ── 解码器（普通 softmax 注意力）──
     dec_dim: int = 512
     dec_depth: int = 7
@@ -484,23 +601,43 @@ class SRPhase1LinAttn(nn.Module):
             mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
             num_specials=cfg.num_specials, dwconv=cfg.enc_dwconv,
             qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout)
-        self.decoder = StandardAttentionDecoder(
+        _dec_kw = dict(
             enc_dim=cfg.enc_dim, dim=cfg.dec_dim, depth=cfg.dec_depth,
             heads=cfg.dec_heads, mlp_ratio=cfg.dec_mlp_ratio, patch=cfg.patch,
             num_patches=self.num_patches, num_specials=cfg.num_specials,
             pixel_hidden=cfg.pixel_hidden, dropout=cfg.dropout)
+        self.recurrent = bool(cfg.dec_recurrent)
+        if self.recurrent:
+            _steps = [int(x) for x in str(cfg.dec_steps).split(",") if x.strip()]
+            self.decoder = RecurrentOutputQueryDecoder(steps=_steps or None, **_dec_kw)
+        else:
+            self.decoder = StandardAttentionDecoder(**_dec_kw)
 
     # ── encode / decode（训练与推理同一路径, 与主线同名同义）──
     def encode(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
         return self.encoder(pixel_values)
 
     def decode(self, z_cls: Tensor, z_s: Tensor, pixel_values: Tensor) -> dict:
+        """解码器 + 像素头 + 像素 L1（**各步直接预测平权**, 与主线同口径）。
+
+        单步版（dec_recurrent=False）: `pix` = (B,N,pp) → 补 |T|=1 维,
+        损失与改造前**逐位相同**（T=1 的平权 = 原来的单步 L1）。
+        循环版: `pix` = (B,T,N,pp), 每步各自直接预测整图,
+        `loss = mean_t L1(Y_t, target)`, `F_hat = Y_pix[:, -1]`（末步）。
+        额外返回 `step_l1`(T,) = 每一步在**归一化空间**的 L1（逐步分析用）。
+        """
         B, C, H, W = pixel_values.shape
-        pix = self.decoder(z_cls, z_s)                       # (B,N,3pp)
+        pix = self.decoder(z_cls, z_s)                       # (B,N,pp) 或 (B,T,N,pp)
+        if pix.dim() == 3:
+            pix = pix.unsqueeze(1)                           # (B,1,N,pp)
         target_pix = image_to_patches(pixel_values, self.patch)
-        recon = F.l1_loss(pix, target_pix)
-        return {"loss": recon, "recon": recon, "F_hat": pix,
-                "Y_pix": pix.unsqueeze(1), "target_pix": target_pix}
+        per_step = F.l1_loss(pix, target_pix.unsqueeze(1).expand_as(pix),
+                             reduction="none").mean(dim=(0, 2, 3))   # (T,)
+        F_pix = pix[:, -1]                                   # 末步 = F_hat
+        recon = F.l1_loss(F_pix, target_pix)
+        return {"loss": per_step.mean(), "recon": recon, "F_hat": F_pix,
+                "Y_pix": pix, "target_pix": target_pix,
+                "step_l1": per_step.detach()}
 
     def forward(self, pixel_values: Tensor) -> dict:
         x = pixel_values
@@ -695,6 +832,71 @@ if __name__ == "__main__":
         o = mstab(torch.randn(2, 3, 64, 64) * 3.0)
     assert torch.isfinite(o["loss"]), f"扰动后损失非有限: {o['loss']}"
     print(f"    端到端（qkv 权重 ×20 + 输入 ×3）: loss={o['loss'].item():.4f} 有限 OK")
+
+    print("[8] 循环读出（与主线 model_v2 口径对拍 + 与单步版参数兼容）")
+    # 8a. 读窗口/步集必须与主线 model_v2 **逐位一致**（两处口径漂移是最危险的静默错误）
+    import model_v2 as _mv2
+    for K in (1, 4, 7, 15, 64, 196):
+        assert square_block_starts(K) == _mv2.square_block_starts(K), K
+        st = square_block_starts(K)
+        assert step_windows(K, st, "square", 0) == _mv2.step_windows(K, st, "square", 0), K
+        for blk in (1, 3, 8):
+            fst = _mv2.fixed_block_starts(K, blk)
+            assert step_windows(K, fst, "fixed", blk) == \
+                _mv2.step_windows(K, fst, "fixed", blk), (K, blk)
+    print(f"    step_windows/square_block_starts 与 model_v2 逐位一致 "
+          f"(K=64 → steps={square_block_starts(64)})")
+
+    # 8b. 循环解码器与单步解码器**参数形状逐 key 一致**（warm start 的前提）
+    rdec = RecurrentOutputQueryDecoder(num_specials=64)
+    sdec = StandardAttentionDecoder(num_specials=64)
+    rs, ss_ = rdec.state_dict(), sdec.state_dict()
+    shared = set(rs) & set(ss_)
+    assert all(rs[k].shape == ss_[k].shape for k in shared), "共享 key 形状不一致"
+    assert set(ss_) <= set(rs), f"单步版有循环版缺的 key: {set(ss_) - set(rs)}"
+    only = set(rs) - set(ss_)
+    assert only == {"mem_pos"}, f"循环版多出的 key 应为 mem_pos, got {only}"
+    missing, unexpected = rdec.load_state_dict(ss_, strict=False)
+    assert set(missing) == {"mem_pos"} and not unexpected
+    assert float(rdec.mem_pos.abs().max()) == 0.0, "mem_pos 应零初始化"
+    print(f"    循环/单步解码器共享 {len(ss_)} 个 key 且形状全同; "
+          f"循环版仅多零初始化 mem_pos ⇒ 可 warm start")
+
+    # 8c. 单步 == "只跑一步且窗口覆盖全部 memory" 的循环版（同一权重逐位一致）
+    #     注意: steps=[1] 的窗口是 [0,3]（首块）, **不是**全量 —— 所以要用
+    #     steps=[K]（k=⌊√K⌋ ⇒ hi=min((k+1)²−1,K)=K）才等价于单步的"读全部"。
+    small_rec = LinAttnConfig(img_size=64, patch=16, num_specials=8, enc_dim=64,
+                              enc_depth=2, enc_heads=4, dec_dim=64, dec_depth=2,
+                              dec_heads=4, pixel_hidden=128,
+                              dec_recurrent=True, dec_steps="8")
+    mrec = SRPhase1LinAttn(small_rec)
+    msingle = SRPhase1LinAttn(LinAttnConfig(img_size=64, patch=16, num_specials=8,
+                                            enc_dim=64, enc_depth=2, enc_heads=4,
+                                            dec_dim=64, dec_depth=2, dec_heads=4,
+                                            pixel_hidden=128))
+    msingle.load_state_dict(mrec.state_dict(), strict=False)
+    xr2 = torch.randn(2, 3, 64, 64)
+    mrec.eval(); msingle.eval()
+    with torch.no_grad():
+        o1, o2 = mrec(xr2), msingle(xr2)
+    assert o1["Y_pix"].shape[1] == 1 and o2["Y_pix"].shape[1] == 1
+    assert mrec.decoder.windows[0] == (0, 8), mrec.decoder.windows  # [K] ⇒ 读全量
+    assert torch.allclose(o1["F_hat"], o2["F_hat"], atol=1e-6), \
+        f"T=1 循环版与单步版不一致: {(o1['F_hat'] - o2['F_hat']).abs().max()}"
+    print(f"    T=1 循环版与单步版前向逐位一致 (max|diff|={float((o1['F_hat']-o2['F_hat']).abs().max()):.2e})")
+
+    # 8d. K=64 循环版形状 + 逐步 L1
+    m64 = SRPhase1LinAttn(LinAttnConfig(num_specials=64, dec_recurrent=True)).eval()
+    with torch.no_grad():
+        o64 = m64(torch.randn(1, 3, 224, 224))
+    assert o64["Y_pix"].shape == (1, 8, 196, 768), o64["Y_pix"].shape
+    assert o64["step_l1"].shape == (8,)
+    # A 坐标: 0=z_cls, 1..K=z_s ⇒ 末步 hi=min((8+1)²−1, 64)=64 (含 z_s[63])
+    assert m64.decoder.windows[0] == (0, 3), m64.decoder.windows
+    assert m64.decoder.windows[-1][1] == 64, m64.decoder.windows
+    print(f"    K=64: Y_pix{tuple(o64['Y_pix'].shape)} (T=8), "
+          f"读窗口 {m64.decoder.windows[0]}…{m64.decoder.windows[-1]}, "
+          f"decoder 参数 {m64.count_params()['dec_M']}M")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")

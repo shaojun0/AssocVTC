@@ -51,7 +51,9 @@ def run_eval(args):
     for ckpt in args.ckpt:
         model, cfg, ck = load_model(ckpt, device)
         patch = cfg.patch
-        l1s, ps, ss, dcs, cst = [], [], [], [], []
+        # 按**图数**加权累加（早期版本 append 每批的 mean 再等权平均 ⇒ 末批 8 张
+        # 与 128 张等权, 系统性偏低 ~0.06dB; 改为 sum/count）
+        tot_l1 = tot_p = tot_s = tot_dc = tot_c = 0.0
         const01 = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
         seen = 0
         grid_done = False
@@ -60,7 +62,9 @@ def run_eval(args):
             with torch.autocast("cuda", dtype=torch.bfloat16,
                                 enabled=bool(device == "cuda" and args.amp)):
                 out = model(x)
-            l1s.append(F.l1_loss(out["F_hat"].float(), out["target_pix"].float()).item())
+            Bb = x.shape[0]
+            _l1 = F.l1_loss(out["F_hat"].float(), out["target_pix"].float()) * Bb
+            tot_l1 += float(_l1)
             # ⚠️ IMAGENET_MEAN/STD 是 [0,1] 标度 ⇒ 反归一化后直接是 [0,1]，不再 /255
             rec01 = patches_to_image(out["F_hat"].float(), args.img_size,
                                      args.img_size, patch, IMAGENET_MEAN,
@@ -71,10 +75,10 @@ def run_eval(args):
             # ★运行时护栏: 反归一化单位口径写错会整体虚高 ~48dB（metrics_linattn §4）
             assert 0.02 < float(tgt01.mean()) < 0.98, (
                 f"反归一化单位口径疑似错误: tgt01.mean()={float(tgt01.mean()):.6f}")
-            ps.append(psnr(rec01, tgt01).mean().item())
-            ss.append(ssim(rec01, tgt01).mean().item())
-            dcs.append(per_patch_dc_baseline(tgt01, patch).mean().item())
-            cst.append(psnr(const01.expand_as(tgt01), tgt01).mean().item())
+            tot_p += float(psnr(rec01, tgt01).sum())
+            tot_s += float(ssim(rec01, tgt01).sum())
+            tot_dc += float(per_patch_dc_baseline(tgt01, patch).sum())
+            tot_c += float(psnr(const01.expand_as(tgt01), tgt01).sum())
             if args.grid and not grid_done and seen + x.shape[0] >= args.grid_n:
                 grid_in.append(tgt01[:args.grid_n - seen].float().cpu())
                 grid_rec.append(rec01[:args.grid_n - seen].float().cpu())
@@ -85,11 +89,11 @@ def run_eval(args):
             "tag": ck.get("tag", ""),
             "cfg": ck["cfg"], "params": ck.get("params"),
             "n_images": seen,
-            "l1_norm": sum(l1s) / len(l1s),
-            "psnr": sum(ps) / len(ps),
-            "ssim": sum(ss) / len(ss),
-            "psnr_patch_dc_baseline": sum(dcs) / len(dcs),
-            "psnr_mean_image_baseline": sum(cst) / len(cst),
+            "l1_norm": tot_l1 / seen,
+            "psnr": tot_p / seen,
+            "ssim": tot_s / seen,
+            "psnr_patch_dc_baseline": tot_dc / seen,
+            "psnr_mean_image_baseline": tot_c / seen,
             "pred_clamped_to_01": True,
         }
         res["psnr_gain_over_patch_dc"] = res["psnr"] - res["psnr_patch_dc_baseline"]

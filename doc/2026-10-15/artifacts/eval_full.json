@@ -33,12 +33,12 @@
    "enc_dec_ratio": 0.9769
   },
   "n_images": 5000,
-  "l1_norm": 0.1475193364545703,
-  "psnr": 26.545024871826172,
-  "ssim": 0.7637878581881523,
-  "psnr_patch_dc_baseline": 18.431029796600342,
-  "psnr_mean_image_baseline": 11.811034870147704,
+  "l1_norm": 0.1463152034521103,
+  "psnr": 26.602025009155273,
+  "ssim": 0.7654284029006958,
+  "psnr_patch_dc_baseline": 18.451105377197266,
+  "psnr_mean_image_baseline": 11.80515333251953,
   "pred_clamped_to_01": true,
-  "psnr_gain_over_patch_dc": 8.11399507522583
+  "psnr_gain_over_patch_dc": 8.150919631958008
  }
 }

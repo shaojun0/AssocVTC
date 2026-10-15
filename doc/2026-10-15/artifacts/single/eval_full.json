@@ -1,0 +1,44 @@
+{
+ "k64/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_linattn/k64/ckpt_best.pt",
+  "step": 42750,
+  "epoch": 45,
+  "tag": "best",
+  "cfg": {
+   "img_size": 224,
+   "patch": 16,
+   "num_specials": 64,
+   "enc_dim": 448,
+   "enc_depth": 13,
+   "enc_heads": 8,
+   "enc_mlp_ratio": 4.0,
+   "enc_dwconv": true,
+   "enc_qk_norm": true,
+   "dec_dim": 512,
+   "dec_depth": 7,
+   "dec_heads": 8,
+   "dec_mlp_ratio": 4.0,
+   "pixel_hidden": 1024,
+   "dropout": 0.0,
+   "num_patches": 196,
+   "enc_patch_px": 768
+  },
+  "params": {
+   "encoder": 31909024,
+   "decoder": 31173376,
+   "total": 63082400,
+   "enc_M": 31.909,
+   "dec_M": 31.173,
+   "total_M": 63.082,
+   "enc_dec_ratio": 0.9769
+  },
+  "n_images": 5000,
+  "l1_norm": 0.1463152034521103,
+  "psnr": 26.602025009155273,
+  "ssim": 0.7654284029006958,
+  "psnr_patch_dc_baseline": 18.451105377197266,
+  "psnr_mean_image_baseline": 11.80515333251953,
+  "pred_clamped_to_01": true,
+  "psnr_gain_over_patch_dc": 8.150919631958008
+ }
+}

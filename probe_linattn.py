@@ -16,10 +16,16 @@ import torch
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
 
-def probe(bs: int, K: int, iters: int = 8):
-    cfg = LinAttnConfig(num_specials=K)
+def probe(bs: int, K: int, iters: int = 8, recurrent: bool = False,
+          freeze_encoder: bool = False):
+    cfg = LinAttnConfig(num_specials=K, dec_recurrent=recurrent)
     model = SRPhase1LinAttn(cfg).cuda().train()
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    if freeze_encoder:
+        for prm in model.encoder.parameters():
+            prm.requires_grad_(False)
+    T = len(model.decoder.steps) if getattr(model, "recurrent", False) else 1
+    trainable = [prm for prm in model.parameters() if prm.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=1e-4)
     x = torch.randn(bs, 3, cfg.img_size, cfg.img_size, device="cuda")
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
@@ -41,7 +47,7 @@ def probe(bs: int, K: int, iters: int = 8):
     torch.cuda.synchronize()
     dt = (time.time() - t0) / iters
     peak = torch.cuda.max_memory_allocated() / 1e9
-    print(f"  bs={bs:>4d} K={K:>3d}  {dt*1000:7.1f} ms/step  "
+    print(f"  bs={bs:>4d} K={K:>3d} T={T:>2d}  {dt*1000:7.1f} ms/step  "
           f"{bs/dt:7.1f} img/s  峰值显存 {peak:5.2f} GB  loss={loss.item():.4f}",
           flush=True)
     del model, opt, x
@@ -54,13 +60,16 @@ if __name__ == "__main__":
     ap.add_argument("--batch_sizes", type=int, nargs="+", default=[64, 128, 256])
     ap.add_argument("--K", type=int, default=64)
     ap.add_argument("--iters", type=int, default=8)
+    ap.add_argument("--recurrent", type=int, default=0)
+    ap.add_argument("--freeze_encoder", type=int, default=0)
     a = ap.parse_args()
     print(f"[probe] {torch.cuda.get_device_name(0)} "
           f"torch={torch.__version__} cuda={torch.version.cuda}")
     best = None
     for bs in a.batch_sizes:
         try:
-            ips, peak = probe(bs, a.K, a.iters)
+            ips, peak = probe(bs, a.K, a.iters, bool(a.recurrent),
+                              bool(a.freeze_encoder))
             if best is None or ips > best[1]:
                 best = (bs, ips, peak)
         except torch.cuda.OutOfMemoryError as e:
