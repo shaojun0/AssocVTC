@@ -166,6 +166,8 @@ def parse_args():
     ap.add_argument("--enc_heads", type=int, default=8)
     ap.add_argument("--enc_mlp_ratio", type=float, default=4.0)
     ap.add_argument("--enc_dwconv", type=int, default=1)
+    ap.add_argument("--enc_qk_norm", type=int, default=1,
+                    help="线性注意力 QK-Norm（稳定性修复 1, 见模型 docstring）")
     # 解码器
     ap.add_argument("--dec_dim", type=int, default=512)
     ap.add_argument("--dec_depth", type=int, default=7)
@@ -176,11 +178,14 @@ def parse_args():
     # 优化
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--min_lr", type=float, default=1e-6)
     ap.add_argument("--weight_decay", type=float, default=0.05)
-    ap.add_argument("--warmup_frac", type=float, default=0.05)
+    ap.add_argument("--warmup_frac", type=float, default=0.08)
     ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--skip_grad", type=float, default=50.0,
+                    help="clip 前 grad_norm 超过该值就跳过本步更新（0=关）; "
+                         "线性注意力低精度间歇爆炸的护栏, 见模型 docstring")
     ap.add_argument("--amp", type=int, default=1)
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--val_per_class", type=int, default=50)
@@ -221,6 +226,7 @@ def main():
         img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
         enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
         enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
+        enc_qk_norm=bool(args.enc_qk_norm),
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
         dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
         dropout=args.dropout)
@@ -263,6 +269,7 @@ def main():
 
     t0 = time.time()
     run_imgs, run_t0 = 0, time.time()
+    n_skipped = 0
     model.train()
     step = start_step
     stop = False
@@ -289,7 +296,14 @@ def main():
                 gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             else:
                 gn = torch.tensor(0.0)
-            opt.step()
+            # ★梯度爆炸跳步护栏（线性注意力稳定性修复 3）: 前向产出巨大 activation
+            #   时参数本身还完好, 只要**不做这一步更新**就不会被毁（实测不设护栏时
+            #   grad_norm 冲到 3e8, 一步就把 PSNR 从 19.6dB 打到 11.8dB 且不可恢复）。
+            if args.skip_grad > 0 and float(gn) > args.skip_grad:
+                n_skipped += 1
+                opt.zero_grad(set_to_none=True)
+            else:
+                opt.step()
             step += 1
             run_imgs += x.shape[0]
 
@@ -300,14 +314,14 @@ def main():
                 rec = {
                     "step": step, "epoch": epoch, "loss": round(loss.item(), 5),
                     "recon": round(out["recon"].item(), 5),
-                    "lr": lr, "grad_norm": round(float(gn), 4),
+                    "lr": lr, "grad_norm": round(float(gn), 4), "skipped": n_skipped,
                     "img_per_s": round(ips, 1), "elapsed_min": round(el / 60, 2),
                     "eta_h": round(eta_h, 2),
                     "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
                 }
                 print(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
                       f"loss={loss.item():.4f} recon={out['recon'].item():.4f} "
-                      f"lr={lr:.2e} gn={float(gn):.2f} {ips:.0f}img/s "
+                      f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
                       f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h", flush=True)
                 log_jsonl(log_path, rec)
                 write_status(status_path, {**rec, "best_psnr": best_psnr,

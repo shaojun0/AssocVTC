@@ -19,7 +19,7 @@
 | # | 要求 | 落地 | 实测 |
 |---|---|---|---|
 | A | 不用预训练编码器 | 编码器从零训练（随机初始化 Conv patch embed + 13 层线性注意力） | 无任何预训练权重加载 |
-| B | 线性注意力编码器 ~30 几 M | `LinearAttentionEncoder(dim=448, depth=13)` | **31.906 M** |
+| B | 线性注意力编码器 ~30 几 M | `LinearAttentionEncoder(dim=448, depth=13)` | **31.909 M** |
 | C | 解码器 = 同等体量普通（softmax）注意力 transformer | `StandardAttentionDecoder(dim=512, depth=7, nn.TransformerDecoder)` | **31.173 M**（dec/enc = 0.977） |
 | D | 224×224 → 224×224 | patch=16 ⇒ N=196，PixelHead 出 16×16×3 像素 patch | 见 `python model_v2_linattn.py` 自检 |
 
@@ -76,9 +76,9 @@
 
 | 模块 | 参数量 | 构成 |
 |---|---|---|
-| `LinearAttentionEncoder` | **31,906,112**（31.906 M） | patch_embed 0.34M + cls/specials/pos 0.12M + 13 层 × 2.42M |
+| `LinearAttentionEncoder` | **31,909,024**（31.909 M） | patch_embed 0.34M + cls/specials/pos 0.12M + 13 层 × 2.42M（含 QK-Norm 2.9k） |
 | `StandardAttentionDecoder` | **31,173,376**（31.173 M） | mem_proj 0.23M + query 0.20M + 7 层 × 4.19M + PixelHead 1.31M + LN |
-| 合计 | **63,079,488**（63.079 M） | dec/enc = **0.977**（"同等体量"） |
+| 合计 | **63,082,400**（63.082 M） | dec/enc = **0.977**（31.909/31.173）（"同等体量"） |
 
 每层参数（`dim=D`）：线性注意力块 `12D² + 9D`（qkv 3D² + proj D² + DWConv 9D + 2×LN）;
 TransformerDecoderLayer `16D²`（self-attn 4D² + cross-attn 4D² + FFN 8D²）。
@@ -146,11 +146,14 @@ Attn(Q,K,V)_i = φ(q_i)ᵀ Σ_j φ(k_j) v_jᵀ / (φ(q_i)ᵀ Σ_j φ(k_j))
 | 项 | 值 |
 |---|---|
 | 模型 | K=64（N=196 ⇒ 压缩率 196/64 ≈ 3.06×）, enc 448×13, dec 512×7 |
-| batch / 优化器 | 128 / AdamW (β=0.9,0.95, eps=1e-8), wd 0.05（norm/bias 不 decay） |
-| lr / schedule | 3e-4, cosine + warmup 5%（2850 步）, min_lr 1e-6, grad_clip 1.0 |
-| 精度 | bf16 autocast（参数 fp32） |
-| 步数 | 950 步/epoch × 60 epoch = 57,000 步 |
-| 实测吞吐 | **~365 img/s**（bs=128 峰值显存 15.8 GB）⇒ ~5.6 min/epoch, 总 ~5.6 h |
+| 批量 / 优化器 | 128 / AdamW (β=0.9,0.95, eps=1e-8), wd 0.05（norm/bias 不 decay） |
+| lr / schedule | **2e-4**, cosine + warmup **8%**（3420 步）, min_lr 1e-6, grad_clip 1.0 |
+| **稳定性** | `enc_qk_norm=1`（默认）+ 线性注意力聚合段 fp32 + `--skip_grad 50`（见 §8.1） |
+| 精度 | bf16 autocast（参数 fp32; **线性注意力聚合段内部强制 fp32**） |
+| 步数 | 950 步/epoch × **45 epoch** = 42,750 步 |
+| 实测吞吐 | **~318 img/s**（bs=128 峰值显存 19.1 GB; fp32 聚合段比纯 bf16 慢约 20%）⇒ ~6.4 min/epoch, 总 ~5.0 h |
+
+> lr 从 3e-4 降到 2e-4、warmup 从 5% 提到 8%, 是 §8.1 那次梯度爆炸之后的调整（不是调参偏好）。
 
 **评测口径**（`metrics_linattn.py`，沿用主线"PSNR 单独不可信"的教训）：
 
@@ -167,7 +170,42 @@ Attn(Q,K,V)_i = φ(q_i)ᵀ Σ_j φ(k_j) v_jᵀ / (φ(q_i)ᵀ Σ_j φ(k_j))
 
 ## 8. 踩坑记录（本轮真实发生，已加回归测试）
 
-**单位口径 bug（PSNR 虚高 48.1 dB）**：`IMAGENET_MEAN/STD` 是 **[0,1] 标度**（0.485/0.229），
+### 8.1 线性注意力在 bf16 下**间歇性梯度爆炸**（本轮最大的一次翻车）
+
+第一次正式训练（K=64 / bs=128 / **lr 3e-4**）跑得非常好，然后**突然崩**：
+
+```
+step 4750 ep5  loss=0.3217  val PSNR=19.58dB   ← 一切正常
+step 5300 ep6  loss=0.3934  gn=0.69
+step 5320 ep6  loss=0.8197  gn=26.28           ← 开始异常
+step 5400 ep6  loss=0.8878  gn=338.23
+step 5420 ep6  loss=0.9338  gn=1,219,840.62    ← 爆炸
+step 6020 ep7  loss=0.9624  gn=337,617,760.00  ← 3.4e8
+[val] ep6 PSNR=11.76dB                          ← 不可恢复（此后一直 12dB 上下）
+```
+
+**根因**：`φ(x)=elu(x)+1` 的核形式**没有 softmax 的归一化**，
+`Σ_j φ(k_j)` 与 `Σ_j φ(k_j)v_jᵀ` 会随 qkv 权重增大而**无界增长**。
+分子分母都长到 1e3+ 时，bf16（尾数 8 位 ≈ 3 位十进制）的相对误差 ~1e-3，
+噪声经 13 层放大 ⇒ 梯度间歇性爆炸; `clip_grad_norm_(1.0)` **挡不住**
+（方向本身已被少数巨大分量支配, 一步更新就足以毁掉权重）。
+
+**三处修复（缺一不可，已全部落地 + 回归测试）**：
+
+| # | 修复 | 位置 | 代价 |
+|---|---|---|---|
+| ① | 每个 head 的 **QK LayerNorm**（φ 之前）⇒ φ 输出钉在 [0,~4], `Σφ(k)` 有界 | `LinearAttention.__init__` | +2.9k 参数, 可忽略 |
+| ② | 线性注意力**聚合段强制 fp32**：`.float()` 不够, autocast 会把 fp32 matmul 再降回 bf16, 必须 `torch.autocast(enabled=False)` | `LinearAttention.forward` | **吞吐 −20%**（404→318 img/s） |
+| ③ | train 侧**梯度爆炸跳步护栏**：clip 前 `grad_norm > --skip_grad(50)` 就跳过本步更新（前向爆 activation 时参数本身还好, 不做更新就不会坏） | `train_linattn.py` | 无 |
+
+**量化验证**（`python model_v2_linattn.py` §7, 回归测试）：
+qkv 权重 ×20 时 `Σ_j φ(k_j)` 的量级 —— **无 QK-Norm 放大 ×17.1（分母爆炸）**，
+**有 QK-Norm ×1.00（钉住）**。另断言"权重 ×20 + 输入 ×3"的端到端 loss 仍有限。
+
+**边界（诚实标注）**：本轮**没有**单独消融 ①②③ 各自的贡献 ——
+只能确认"三件一起上"之后训练稳定（见 REPORT）。`enc_qk_norm=0` 可复现旧行为。
+
+### 8.2 单位口径 bug（PSNR 虚高 48.1 dB）：`IMAGENET_MEAN/STD` 是 **[0,1] 标度**（0.485/0.229），
 所以反归一化后**本来就是 [0,1]**；首版 `denorm01` 又除了 255 ⇒ 预测与目标**同时**缩到
 1/255 ⇒ MSE 缩 1/255² ⇒ **PSNR 整体虚高 `20log10(255) = +48.13 dB`、SSIM 退化到 ≈0.99**。
 症状是**自相矛盾**的数字："归一化空间 L1 = 0.85（≈预测均值水平），却报 PSNR 61 dB / SSIM 0.994"。

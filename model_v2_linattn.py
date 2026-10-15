@@ -69,6 +69,14 @@ SR-Diffusion Phase 1 v2 — **实验版 (linattn)**: 无预训练编码器
     纯线性注意力缺局部性, 这是线性注意力 ViT (MLLA / EfficientViT) 的通行做法,
     可由 `dwconv=False` 关掉做消融。
 
+⚠️ **数值稳定性（2026-10-15 实测, 非可选）**: elu+1 核形式在 bf16 下会**间歇性
+    梯度爆炸**（实测 grad_norm 0.6→26→338→1.2e6→3e8, 一步把 val PSNR 从
+    19.6dB 打到 11.8dB 且不可恢复）。三处修复（详见 `LinearAttention` docstring）:
+      ① 每 head 的 **QK LayerNorm**（`enc_qk_norm=True`, 默认开）;
+      ② 线性注意力**聚合段强制 fp32**（`torch.autocast(enabled=False)`）;
+      ③ train 侧**梯度爆炸跳步护栏**（`--skip_grad`, 默认 50）。
+    `enc_qk_norm=False` 可复现旧的不稳定行为（用于消融）。
+
 用法
 ----
     from model_v2_linattn import SRPhase1LinAttn, LinAttnConfig
@@ -189,10 +197,29 @@ class LinearAttention(nn.Module):
               = (φ(Q) (φ(K)^T V)) / (φ(Q) Σ_j φ(K_j))
 
     先聚合 KV 统计量 (B,H,d,d) 再乘 Q ⇒ 对序列长度 N 线性。
-    分母 +1e-6 防除零（φ≥1 时理论不会发生, 但 fp16 下仍稳妥）。
+
+    ⚠️ **数值稳定性（2026-10-15 实测踩坑, 这不是可选项）**
+    elu+1 核形式没有 softmax 的归一化, `Σ_j φ(k_j)` 与 `Σ_j φ(k_j)v_jᵀ` 会随
+    qkv 权重增大而**无界增长**; 在 bf16 下（尾数 8 位 ≈ 3 位十进制）分子分母
+    都到 1e3 量级时相对误差 ~1e-3, 噪声经 13 层放大 ⇒ **梯度间歇性爆炸**。
+    实测（K=64/bs128/lr3e-4）: 前 5000 步一切正常（val PSNR 19.58dB @ep5）,
+    随后 grad_norm 从 0.6 跳到 26 → 338 → 1.2e6 → 3e8, 损失 0.32→0.96,
+    PSNR 掉到 11.8dB 且**不可恢复**。三处修复（缺一不可）：
+
+      1. **QK-Norm**（`qk_norm=True`, 默认开）: 在 φ 之前对每个 head 的 q/k 做
+         LayerNorm(head_dim) ⇒ φ 的输出被钉在 [0, ~4], `Σφ(k)` 有界,
+         分子分母不再随训练漂移（ViT-22B / FLatten 的同类做法）;
+      2. **核内强制 fp32**: `.float()` 还不够 —— autocast 会把 fp32 的 matmul
+         再降回 bf16, 必须用 `torch.autocast(enabled=False)` 包住聚合段
+         （该段算力占比 <1%, 几乎不影响吞吐）;
+      3. **梯度爆炸跳步护栏**（在 train 侧, `--skip_grad`）: 前向产出巨大
+         activation 时参数本身还是好的, 只要**不做那一步优化器更新**就不会坏。
+
+    分母 +1e-6 防除零（φ≥1 时理论不会发生, 但低精度下仍稳妥）。
     """
 
-    def __init__(self, dim: int, heads: int = 8, dwconv: bool = True):
+    def __init__(self, dim: int, heads: int = 8, dwconv: bool = True,
+                 qk_norm: bool = True):
         super().__init__()
         assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
         self.heads = heads
@@ -200,6 +227,9 @@ class LinearAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
         self.local = DepthwiseConv(dim) if dwconv else None
+        # 每 head 的 QK LayerNorm（参数极少: 13 层 × 2 × 2×56 ≈ 2.9k）
+        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
+        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
 
     def forward(self, x: Tensor, h: int, w: int, n_prefix: int = 0) -> Tensor:
         """x: (B, n_prefix + h*w, D); 局部混合只作用在 patch 段（前 n_prefix 个
@@ -211,14 +241,22 @@ class LinearAttention(nn.Module):
         B, N, D = x.shape
         H, d = self.heads, self.head_dim
         q, k, v = self.qkv(x).chunk(3, dim=-1)
-        q = phi(q).reshape(B, N, H, d).transpose(1, 2)      # (B,H,N,d)
-        k = phi(k).reshape(B, N, H, d).transpose(1, 2)
+        q = q.reshape(B, N, H, d).transpose(1, 2)           # (B,H,N,d)
+        k = k.reshape(B, N, H, d).transpose(1, 2)
         v = v.reshape(B, N, H, d).transpose(1, 2)
-        kv = k.transpose(-1, -2) @ v                        # (B,H,d,d)
-        zs = k.sum(dim=-2)                                  # (B,H,d)
-        num = q @ kv                                        # (B,H,N,d)
-        den = q @ zs.unsqueeze(-1)                          # (B,H,N,1)
-        out = (num / (den + 1e-6)).transpose(1, 2).reshape(B, N, D)
+        if self.q_norm is not None:                         # 稳定性修复 1
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        out_dtype = q.dtype
+        # 稳定性修复 2: 聚合段强制 fp32（autocast 会忽略 .float(), 必须关掉）
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            qf = phi(q.float())
+            kf = phi(k.float())
+            vf = v.float()
+            kv = kf.transpose(-1, -2) @ vf                  # (B,H,d,d)
+            zs = kf.sum(dim=-2)                             # (B,H,d)  fp32 累加
+            out = qf @ kv / (qf @ zs.unsqueeze(-1) + 1e-6)  # (B,H,N,d)
+        out = out.to(out_dtype).transpose(1, 2).reshape(B, N, D)
         return self.proj(out)
 
 
@@ -226,10 +264,10 @@ class LinearAttentionBlock(nn.Module):
     """pre-norm: x + LinearAttn(LN(x)) → x + FFN(LN(x))"""
 
     def __init__(self, dim: int, heads: int = 8, mlp_ratio: float = 4.0,
-                 dwconv: bool = True):
+                 dwconv: bool = True, qk_norm: bool = True):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = LinearAttention(dim, heads, dwconv)
+        self.attn = LinearAttention(dim, heads, dwconv, qk_norm)
         self.norm2 = nn.LayerNorm(dim)
         hidden = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(),
@@ -255,7 +293,7 @@ class LinearAttentionEncoder(nn.Module):
     def __init__(self, dim: int = 448, depth: int = 13, heads: int = 8,
                  mlp_ratio: float = 4.0, patch: int = 16, img_size: int = 224,
                  num_specials: int = 64, dwconv: bool = True,
-                 drop_rate: float = 0.0):
+                 qk_norm: bool = True, drop_rate: float = 0.0):
         super().__init__()
         assert img_size % patch == 0, f"img_size={img_size} 须被 patch={patch} 整除"
         self.patch = patch
@@ -270,7 +308,7 @@ class LinearAttentionEncoder(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, dim) * 0.02)
         self.pos_drop = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
         self.blocks = nn.ModuleList([
-            LinearAttentionBlock(dim, heads, mlp_ratio, dwconv)
+            LinearAttentionBlock(dim, heads, mlp_ratio, dwconv, qk_norm)
             for _ in range(depth)])
         self.norm = nn.LayerNorm(dim)
 
@@ -391,6 +429,7 @@ class LinAttnConfig:
     enc_heads: int = 8
     enc_mlp_ratio: float = 4.0
     enc_dwconv: bool = True
+    enc_qk_norm: bool = True       # 线性注意力稳定性修复 1（见 LinearAttention）
     # ── 解码器（普通 softmax 注意力）──
     dec_dim: int = 512
     dec_depth: int = 7
@@ -444,7 +483,7 @@ class SRPhase1LinAttn(nn.Module):
             dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
             mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
             num_specials=cfg.num_specials, dwconv=cfg.enc_dwconv,
-            drop_rate=cfg.dropout)
+            qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout)
         self.decoder = StandardAttentionDecoder(
             enc_dim=cfg.enc_dim, dim=cfg.dec_dim, depth=cfg.dec_depth,
             heads=cfg.dec_heads, mlp_ratio=cfg.dec_mlp_ratio, patch=cfg.patch,
@@ -609,6 +648,53 @@ if __name__ == "__main__":
         f"reconstruct 应返回 [0,1], got [{img.min()}, {img.max()}]"
     print(f"    eval 两次前向逐位一致; reconstruct() → {tuple(img.shape)} "
           f"范围 [{img.min():.3f}, {img.max():.3f}] ∈ [0,1]")
+
+    print("[7] ★数值稳定性（QK-Norm 必须把 φ 的量级钉死）")
+    # 2026-10-15: 不设 QK-Norm 时 φ(k) 随 qkv 权重**无界增长** ⇒ 分子/分母都到
+    # 1e3+ 量级, bf16 尾数只有 ~3 位十进制 ⇒ 相对噪声经 13 层放大 ⇒ 梯度间歇
+    # 爆炸（实测 grad_norm 0.6→26→338→1.2e6→3e8, val PSNR 19.6→11.8dB 不可恢复）。
+    # 这里直接量 **Σ_j φ(k_j) 的量级**随 qkv 权重放大的增长倍数:
+    #   关掉 QK-Norm → 随权重线性放大（分母爆掉）; 打开 → 被 LayerNorm 钉住。
+    def _den_mag(qk_norm: bool, scale: float) -> float:
+        torch.manual_seed(0)
+        att = LinearAttention(dim=32, heads=4, dwconv=False, qk_norm=qk_norm)
+        with torch.no_grad():
+            att.qkv.weight.mul_(scale)
+            if att.qkv.bias is not None:
+                att.qkv.bias.mul_(scale)
+        x = torch.randn(2, 32, 32) * 10.0
+        B, N, D = x.shape
+        H, d = att.heads, att.head_dim
+        with torch.no_grad():
+            _, k, _ = att.qkv(x).chunk(3, dim=-1)
+            k = k.reshape(B, N, H, d).transpose(1, 2)
+            if att.k_norm is not None:
+                k = att.k_norm(k)
+            return float(phi(k.float()).sum(dim=-2).abs().max())
+
+    base_on, base_off = _den_mag(True, 1.0), _den_mag(False, 1.0)
+    big_on, big_off = _den_mag(True, 20.0), _den_mag(False, 20.0)
+    grow_on = big_on / max(base_on, 1e-9)
+    grow_off = big_off / max(base_off, 1e-9)
+    assert all(map(lambda v: v == v and v < 1e12,
+                   (base_on, base_off, big_on, big_off))), "出现 NaN/Inf"
+    assert grow_off > 10.0, f"未复现未归一化的分母爆炸 (×{grow_off:.1f})"
+    assert grow_on < 2.0, f"QK-Norm 后分母仍被放大 (×{grow_on:.2f})"
+    print(f"    qkv 权重 ×20: Σφ(k) 无 QK-Norm 放大 ×{grow_off:,.1f}（分母爆炸）; "
+          f"有 QK-Norm ×{grow_on:.2f}（钉住）")
+    # 端到端: 大幅扰动权重后, 开了 QK-Norm 的整模型输出仍须有限
+    torch.manual_seed(0)
+    mstab = SRPhase1LinAttn(LinAttnConfig(img_size=64, patch=16, num_specials=8,
+                                          enc_dim=64, enc_depth=2, enc_heads=4,
+                                          dec_dim=64, dec_depth=2, dec_heads=4,
+                                          pixel_hidden=128))
+    with torch.no_grad():
+        for n_, prm in mstab.named_parameters():
+            if "qkv.weight" in n_:
+                prm.mul_(20.0)
+        o = mstab(torch.randn(2, 3, 64, 64) * 3.0)
+    assert torch.isfinite(o["loss"]), f"扰动后损失非有限: {o['loss']}"
+    print(f"    端到端（qkv 权重 ×20 + 输入 ×3）: loss={o['loss'].item():.4f} 有限 OK")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")
