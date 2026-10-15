@@ -58,7 +58,7 @@ def run_eval(args):
         for x, _ in va:
             x = x.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16,
-                                enabled=(device == "cuda" and args.amp)):
+                                enabled=bool(device == "cuda" and args.amp)):
                 out = model(x)
             l1s.append(F.l1_loss(out["F_hat"].float(), out["target_pix"].float()).item())
             # ⚠️ IMAGENET_MEAN/STD 是 [0,1] 标度 ⇒ 反归一化后直接是 [0,1]，不再 /255
