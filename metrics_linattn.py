@@ -1,5 +1,5 @@
 """
-重建指标 — SR-Diffusion-v3 实验版 (linattn)
+重建指标 — AssocVTC 实验版 (linattn)
 ==========================================
 
 口径（与仓库主线一致, 见 doc/2026-09-23/ANALYSIS_res_sweep_rootcause.md）:

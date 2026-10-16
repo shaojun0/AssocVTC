@@ -1,5 +1,5 @@
 """
-评测脚本 — SR-Diffusion-v3 实验版 (linattn)
+评测脚本 — AssocVTC 实验版 (linattn)
 ==========================================
 
     python eval_linattn.py --ckpt output/linattn_k64/ckpt_best.pt \

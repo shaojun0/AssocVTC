@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SR-Diffusion-v3 训练指标统一解析器。
+"""AssocVTC 训练指标统一解析器。
 
 把下列三类数据源解析成一份统一的 ``metrics.json`` + 若干 CSV：
 
@@ -619,7 +619,7 @@ def summarize(bundle: dict) -> str:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="解析 SR-Diffusion-v3 训练指标")
+    ap = argparse.ArgumentParser(description="解析 AssocVTC 训练指标")
     default_out = os.environ.get("SRDASH_DATA") or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "data")
     ap.add_argument("--out", default=default_out, help="输出目录（写 metrics.json 与 CSV）")

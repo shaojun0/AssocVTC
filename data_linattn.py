@@ -1,5 +1,5 @@
 """
-ImageNet-100 数据管线 — SR-Diffusion-v3 实验版 (linattn)
+ImageNet-100 数据管线 — AssocVTC 实验版 (linattn)
 =======================================================
 
 数据集: `/root/autodl-tmp/datasets/imagenet100/<synset>/*.JPEG`（**直接**是 100 个

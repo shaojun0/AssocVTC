@@ -1,5 +1,5 @@
 """
-吞吐/显存探针 — SR-Diffusion-v3 实验版 (linattn)
+吞吐/显存探针 — AssocVTC 实验版 (linattn)
 ==============================================
 
     python probe_linattn.py --batch_sizes 64 128 256

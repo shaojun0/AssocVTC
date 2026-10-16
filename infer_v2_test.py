@@ -1,5 +1,5 @@
 """
-SR-Diffusion Phase 1 v2 — register 式推理测试（像素目标版, 2026-08-27 起）
+AssocVTC Phase 1 v2 — register 式推理测试（像素目标版, 2026-08-27 起）
 =================================================
 架构（model_v2.py, register 式唯一路径）: DINOv2-large + register
     specials(K) 直接拼进输入序列 → OutputQueryDecoder（**顺序循环**: 每采样步

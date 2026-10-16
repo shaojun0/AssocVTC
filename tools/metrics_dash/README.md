@@ -1,4 +1,4 @@
-# SR-Diffusion-v3 训练指标可视化看板
+# AssocVTC 训练指标可视化看板
 
 把 **训练日志 + 探针 JSON + 全量推理 JSON** 三类数据源统一解析成 `metrics.json`，
 再由两个服务呈现。当前做 **baseline / 旧 stack2x / 修复版 stack2x 三路同图对照**：
@@ -96,7 +96,7 @@ bash run_dash.sh health     # 只做 HTTP 自检
 ### 从本地仓库部署到服务器
 
 ```bash
-cd /home/linaro/dsh/SR-Diffusion-v3/tools/metrics_dash
+cd /home/linaro/dsh/AssocVTC/tools/metrics_dash
 scp -P 38024 -o StrictHostKeyChecking=no \
     parse_metrics.py emit_tensorboard.py app_streamlit.py make_static_html.py run_dash.sh \
     root@connect.westb.seetacloud.com:/root/sr-metrics-dash/

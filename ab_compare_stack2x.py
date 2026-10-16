@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SR-Diffusion-v3: self.stack 2x vs blockdiag slice[0:5] 基线 A/B 对比.
+"""AssocVTC: self.stack 2x vs blockdiag slice[0:5] 基线 A/B 对比.
 
 输入 = infer_v2_test.py 产出的两个 JSON（同一脚本、同一 test 全量 3004 张），
 可选训练 log（解析 eval_recon 曲线）。输出 markdown 表格 + 结论。

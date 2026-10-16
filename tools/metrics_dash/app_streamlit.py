@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SR-Diffusion-v3 训练指标交互看板（Streamlit，6008 端口）。
+"""AssocVTC 训练指标交互看板（Streamlit，6008 端口）。
 
 数据来源： ``parse_metrics.py`` 生成的 ``metrics.json``（由 ``run_dash.sh`` 的刷新
 循环每 30-60s 重写一次）。本应用**只读**该 JSON，不接触训练日志/训练进程。
@@ -31,7 +31,7 @@ DEFAULT_REFRESH = int(os.environ.get("SRDASH_REFRESH", "30"))
 PLOTLY_TEMPLATE = "plotly_white"
 BASELINE_RECON_FALLBACK = 0.3318
 
-st.set_page_config(page_title="SR-Diffusion-v3 训练指标看板", page_icon="📈",
+st.set_page_config(page_title="AssocVTC 训练指标看板", page_icon="📈",
                    layout="wide")
 
 
@@ -119,7 +119,7 @@ def render():
             st.rerun()
 
     # ---------------- 顶部状态 ----------------
-    st.title("📈 SR-Diffusion-v3 训练指标看板")
+    st.title("📈 AssocVTC 训练指标看板")
     st.caption(
         "数据源：训练日志 `{}` + 探针 JSON + 推理 JSON ｜ 刷新由后台循环驱动".format(
             cfg.get("train_log_dir", "?"))

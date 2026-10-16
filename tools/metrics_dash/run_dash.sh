@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================================
-# SR-Diffusion-v3 训练指标看板 —— 一键在 GPU 服务器上拉起
+# AssocVTC 训练指标看板 —— 一键在 GPU 服务器上拉起
 #
 #   6006 = TensorBoard   （事件文件由 emit_tensorboard.py 幂等重写）
 #   6008 = Streamlit 交互式看板
@@ -193,7 +193,7 @@ run_loop() {
 
 # ---- 子命令 ------------------------------------------------------------------------
 cmd_start() {
-    log "===== 启动 SR-Diffusion-v3 指标看板 ====="
+    log "===== 启动 AssocVTC 指标看板 ====="
     log "DASH_DIR=$DASH_DIR  DATA_DIR=$DATA_DIR  TF_LOGDIR=$TF_LOGDIR"
     log "[1/4] 首次解析 + 写 TensorBoard 事件…"
     do_refresh

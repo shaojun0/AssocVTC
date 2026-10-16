@@ -1,5 +1,5 @@
 """
-画"逐步重建"曲线 — SR-Diffusion-v3 实验版 (linattn)
+画"逐步重建"曲线 — AssocVTC 实验版 (linattn)
 ==================================================
 
     python plot_stepwise_linattn.py --json stepwise.json --out stepwise.png \

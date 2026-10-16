@@ -1,5 +1,5 @@
 """
-训练曲线绘图 — SR-Diffusion-v3 实验版 (linattn)
+训练曲线绘图 — AssocVTC 实验版 (linattn)
 ==============================================
 
     python plot_linattn.py --log <output_dir>/train_log.jsonl --out curves.png

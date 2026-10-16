@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SR-Diffusion-v3 消融臂 (stdattn): 编码器 = **普通 transformer** (softmax 注意力)
+# AssocVTC 消融臂 (stdattn): 编码器 = **普通 transformer** (softmax 注意力)
 # =============================================================================
 # 2026-10-16 用户口径: 「把编码器换成普通的 transformer, 跑 BPTT」
 #   相对昨日 linattn 臂 (run_linattn.sh) 的**唯一自变量 = 编码器注意力形式**:

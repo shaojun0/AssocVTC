@@ -1,5 +1,5 @@
 """
-逐 step 评测（循环读出）— SR-Diffusion-v3 实验版 (linattn)
+逐 step 评测（循环读出）— AssocVTC 实验版 (linattn)
 ==========================================================
 
 对应主线 `eval_stepwise.py` + `doc/2026-09-16/ANALYSIS_ksweep_stepwise_refinement.md`

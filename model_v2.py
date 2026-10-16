@@ -1,5 +1,5 @@
 """
-SR-Diffusion Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
+AssocVTC Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
 =================================================================
 
 项目目标（权威版见 doc/2026-08-28/GOAL_compression_for_nlp.md）:

@@ -146,7 +146,7 @@ def build_html(bundle: dict) -> str:
 <html lang="zh-CN"><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>SR-Diffusion-v3 训练指标看板（静态）</title>
+<title>AssocVTC 训练指标看板（静态）</title>
 <script src="{PLOTLY_CDN}"></script>
 <style>
  body {{ font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
@@ -168,7 +168,7 @@ def build_html(bundle: dict) -> str:
 </style></head>
 <body>
 <header>
-  <h1>📈 SR-Diffusion-v3 训练指标看板（静态兜底版）</h1>
+  <h1>📈 AssocVTC 训练指标看板（静态兜底版）</h1>
   <div class="sub">生成时间 {html.escape(str(bundle.get('generated_at')))}
     ｜ {status_line}<br/>
     自动刷新：由服务器后台循环重写本页；浏览器每 60 秒 reload 一次。

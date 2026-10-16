@@ -1,4 +1,12 @@
-# SR-Diffusion-v3（main 分支: v2 最小可运行代码 + 全部实验文档）
+# AssocVTC（main 分支: v2 最小可运行代码 + 全部实验文档）
+
+> **名字**：AssocVTC = **Assoc**iation-trained **V**isual **T**oken **C**ompression（靠 token 压缩训练编码器的"联想能力"）。
+> **曾用名 `SR-Diffusion-v3`**（2026-10-16 更名，GitHub 旧链接自动跳转）。更早的 `SR-Diffusion` 是**超分扩散**线
+> （SVD + DINOv2-giant + SD 2.1 U-Net，见首个提交 `524872f`）；2026-08-27 起主线已转为**视觉 token 压缩**
+> （DINOv2 + register specials + 循环读出，全程无 diffusion 组件），旧名与现状不符，故更名。
+> ⚠️ **更名范围**：只改"项目自称"。**以下一律保留原样、不要批量替换** —— `doc/` 按日期归档的历史文档/日志/证据里的旧名、
+> 远端机器目录（`/root/autodl-tmp/srdiff_*`、`/data/srdiff-20260926/…`）、模块名 `srdiff_runtime.py`、环境变量 `SRDIFF_*`、
+> 看板变量 `SRDASH_ROOT`（改它们会断代码与在跑的实验，且会篡改历史证据）。
 
 ## 0. 项目目标与核心思路
 

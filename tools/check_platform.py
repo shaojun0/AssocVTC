@@ -55,7 +55,7 @@ def main():
     from srdiff_runtime import Runtime, is_rocm, detect_device_type
 
     print("=" * 78)
-    print("check_platform — SR-Diffusion-v3 平台自检")
+    print("check_platform — AssocVTC 平台自检")
     print("=" * 78)
 
     # 1) 解释器 / torch
