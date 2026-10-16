@@ -17,7 +17,8 @@ SR-Diffusion Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
     开关）自 2026-09-15 起被**循环架构**取代并整块删除; 需要复现旧结果时从
     git 取回（`git log -- model_v2.py`, 最后一个含并行路径的提交 = 043ef2a）。
     循环 = 同一组解码器权重在 |T| 个采样步上反复施加、每步把上一步输出作为
-    下一步查询（looped transformer 口径, 见参考资料 [10]/[11]）。
+    下一步查询（looped transformer 口径, 见参考资料 [10]/[11]）; 不动点口径
+    （把循环解到收敛 + 隐式微分, 见 [12]）本文**未采用**——固定 |T| 步 + BPTT。
 
 架构（register 式, 无选择、无预算）:
     specials 作为额外 token 直接拼进 DINOv2 输入序列
@@ -114,6 +115,15 @@ SR-Diffusion Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
         解码器"的最早形式（该文另有 per-position halting / ACT, 本项目未用,
         不构成依据）
         https://arxiv.org/abs/1807.03819
+    [12] Bai et al. (NeurIPS 2019), Deep Equilibrium Models（DEQ）——**不动点
+        口径**: 权重共享的无限深网络, 前向 = 解不动点 z* = f_θ(z*, x), 后向
+        走隐函数定理 ⇒ 显存与有效深度无关; 与 [10]/[11] 的循环读出同族, 但
+        **不是同一个对象**——本文每步只读自己那块 z_s（映射随步变 ⇒ 非自治,
+        严格无不动点, 只有慢点/幽灵不动点）, 且跑固定 |T| 步 + BPTT; DEQ 是
+        迭代到收敛 + 隐式微分（本项目**未实现**, 仅作对照与"解到收敛"的出路）
+        https://arxiv.org/abs/1909.01377
+        https://proceedings.neurips.cc/paper/2019/hash/01386bd6d8e091c2ab4c7c7de644d37b-Abstract.html
+        https://github.com/locuslab/deq
 """
 
 import math
