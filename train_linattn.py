@@ -171,6 +171,12 @@ def parse_args():
     ap.add_argument("--enc_dwconv", type=int, default=1)
     ap.add_argument("--enc_qk_norm", type=int, default=1,
                     help="线性注意力 QK-Norm（稳定性修复 1, 见模型 docstring）")
+    ap.add_argument("--enc_attn", default="linear",
+                    choices=["linear", "linattn", "std", "standard", "softmax"],
+                    help="编码器注意力形式: linear=昨日臂(线性注意力, 默认); "
+                         "std=**普通 transformer** softmax 缩放点积注意力（消融臂）")
+    ap.add_argument("--enc_std_qk_norm", type=int, default=0,
+                    help="enc_attn=std 时的 QK-Norm（默认 0 = 普通 transformer 原貌）")
     ap.add_argument("--dec_recurrent", type=int, default=0,
                     help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
     ap.add_argument("--dec_steps", default="",
@@ -237,7 +243,8 @@ def main():
         img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
         enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
         enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
-        enc_qk_norm=bool(args.enc_qk_norm),
+        enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
+        enc_std_qk_norm=bool(args.enc_std_qk_norm),
         dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
         dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
@@ -263,7 +270,8 @@ def main():
           + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else ""),
           flush=True)
     print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
-          f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth}", flush=True)
+          f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
+          f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__}", flush=True)
     print(f"[params] {pc}", flush=True)
 
     tr_loader, va_loader, tr_ds, va_ds = build_loaders(

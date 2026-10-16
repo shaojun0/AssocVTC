@@ -102,6 +102,7 @@ SR-Diffusion Phase 1 v2 — **实验版 (linattn)**: 无预训练编码器
 from dataclasses import dataclass, field, asdict
 import json
 import math
+import os
 from typing import Optional, Sequence, Tuple
 
 import torch
@@ -342,6 +343,148 @@ class LinearAttentionEncoder(nn.Module):
         return seq[:, :1], seq[:, 1:1 + self.num_specials]
 
 
+# ═══ 消融臂: 普通 (softmax) 注意力编码器 ═══
+#   2026-10-16 用户要求: 「把编码器换成普通的 transformer, 跑 BPTT」。
+#   本节的 block 与 LinearAttentionBlock **结构逐项对应**（pre-norm: 注意力 →
+#   残差 → FFN → 残差, GELU, mlp_ratio=4）, **唯一自变量 = 注意力形式**:
+#       线性核注意力 (φ=elu+1, O(N))  →  标准 softmax 缩放点积注意力 (O(N²))
+#   参数量天然对齐: 普通块少了 DWConv(9D+9) 与 QK-Norm(4·head_dim) 两项,
+#   dim=448/depth=13 时 **31.848M vs 31.909M（−0.19%）** ⇒ 编码器体量不变,
+#   对比可归因到注意力形式本身（见 __main__ §9 实测断言）。
+
+class StandardAttention(nn.Module):
+    """标准多头缩放点积注意力（softmax, 双向, 无因果掩码）。
+
+    与 `LinearAttention` 的接口差异: 不需要 `h/w/n_prefix`（没有 DWConv 局部
+    混合, 因而也不存在"只卷 patch 段"的问题）。
+
+    为什么**不**需要 `LinearAttention` 那套数值稳定性修复:
+        softmax 天然把每行权重归一化到 [0,1] 且和为 1 ⇒ 输出是 value 的凸组合,
+        量级被 value 钉住, 不会像 elu+1 核形式那样随 qkv 权重无界增长。
+        因此这里用 `F.scaled_dot_product_attention`（PyTorch 自选 flash /
+        mem-efficient 后端, 自带 1/√d 缩放）, 直接吃 bf16 autocast。
+        `qk_norm` 默认关闭（普通 transformer 的原貌）; 置 True 可做 QK-Norm 变体。
+    """
+
+    def __init__(self, dim: int, heads: int = 8, qk_norm: bool = False):
+        super().__init__()
+        assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
+        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
+
+    def forward(self, x: Tensor) -> Tensor:
+        B, N, D = x.shape
+        H, d = self.heads, self.head_dim
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q.reshape(B, N, H, d).transpose(1, 2)            # (B,H,N,d)
+        k = k.reshape(B, N, H, d).transpose(1, 2)
+        v = v.reshape(B, N, H, d).transpose(1, 2)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        out = F.scaled_dot_product_attention(q, k, v)        # softmax(QKᵀ/√d)V
+        out = out.transpose(1, 2).reshape(B, N, D)
+        return self.proj(out)
+
+
+class StandardAttentionBlock(nn.Module):
+    """pre-norm: x + MHSA(LN(x)) → x + FFN(LN(x))（与 LinearAttentionBlock 同构）。
+
+    forward 保留 `(x, h, w, n_prefix)` 签名（与线性块一致, 便于编码器统一循环）,
+    但普通注意力不使用这些参数（无局部混合）。
+    """
+
+    def __init__(self, dim: int, heads: int = 8, mlp_ratio: float = 4.0,
+                 qk_norm: bool = False):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = StandardAttention(dim, heads, qk_norm)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(),
+                                 nn.Linear(hidden, dim))
+
+    def forward(self, x: Tensor, h: int = 0, w: int = 0,
+                n_prefix: int = 0) -> Tensor:
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class StandardAttentionEncoder(nn.Module):
+    """`LinearAttentionEncoder` 的**普通 transformer** 对应体（消融臂）。
+
+    token 化逐位相同: `[cls(1); specials(K); patches(N)]` + learnable pos,
+    patch_embed 同 Conv2d(3→dim, k=patch, s=patch), 末尾 LayerNorm, 返回
+    `(z_cls, z_s)`。**只把 13 层线性注意力块换成 13 层标准 softmax 注意力块。**
+    """
+
+    def __init__(self, dim: int = 448, depth: int = 13, heads: int = 8,
+                 mlp_ratio: float = 4.0, patch: int = 16, img_size: int = 224,
+                 num_specials: int = 64, qk_norm: bool = False,
+                 drop_rate: float = 0.0):
+        super().__init__()
+        assert img_size % patch == 0, f"img_size={img_size} 须被 patch={patch} 整除"
+        self.patch = patch
+        self.img_size = img_size
+        self.num_patches = (img_size // patch) ** 2
+        self.num_specials = num_specials
+        self.dim = dim
+
+        self.patch_embed = nn.Conv2d(3, dim, kernel_size=patch, stride=patch)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+        self.special_tokens = nn.Parameter(torch.randn(1, num_specials, dim) * 0.02)
+        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, dim) * 0.02)
+        self.pos_drop = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
+        self.blocks = nn.ModuleList([
+            StandardAttentionBlock(dim, heads, mlp_ratio, qk_norm)
+            for _ in range(depth)])
+        self.norm = nn.LayerNorm(dim)
+
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.special_tokens, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def _pos(self, n: int) -> Tensor:
+        """位置编码; n != num_patches 时线性插值（便于小分辨率冒烟）。"""
+        if n == self.num_patches:
+            return self.pos_embed
+        pos = F.interpolate(self.pos_embed.transpose(1, 2), size=(n,),
+                            mode="linear", align_corners=False)
+        return pos.transpose(1, 2)
+
+    def forward(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
+        x = pixel_values
+        B, C, H, W = x.shape
+        assert H % self.patch == 0 and W % self.patch == 0, \
+            f"{H}x{W} 不是 patch={self.patch} 的整数倍"
+        h, w = H // self.patch, W // self.patch
+        n = h * w
+        p = self.patch_embed(x).flatten(2).transpose(1, 2)          # (B,n,dim)
+        p = self.pos_drop(p + self._pos(n))
+        seq = torch.cat([self.cls_token.expand(B, -1, -1),
+                         self.special_tokens.expand(B, -1, -1), p], dim=1)
+        n_prefix = 1 + self.num_specials
+        for blk in self.blocks:
+            seq = blk(seq, h, w, n_prefix)
+        seq = self.norm(seq)
+        return seq[:, :1], seq[:, 1:1 + self.num_specials]
+
+
+# 编码器名 → 构造函数的注册表（`enc_attn` 的合法取值; 见 LinAttnConfig）
+ENCODER_REGISTRY = {
+    "linear": "LinearAttentionEncoder",
+    "linattn": "LinearAttentionEncoder",
+    "std": "StandardAttentionEncoder",
+    "standard": "StandardAttentionEncoder",
+    "softmax": "StandardAttentionEncoder",
+}
+
+
 # ═══ 像素头（与主线 PixelHead 同结构, patch_px 泛化到 16×16×3）═══
 
 class PixelHead(nn.Module):
@@ -544,6 +687,13 @@ class LinAttnConfig:
     enc_mlp_ratio: float = 4.0
     enc_dwconv: bool = True
     enc_qk_norm: bool = True       # 线性注意力稳定性修复 1（见 LinearAttention）
+    # ── 编码器注意力形式（消融开关; 2026-10-16）──
+    #   "linear"（默认, 昨日臂）= 核形式线性注意力 + DWConv 局部混合;
+    #   "std" = **普通 transformer** 的 softmax 缩放点积注意力（消融臂）。
+    #   两者只差注意力形式, 参数量 31.909M vs 31.848M（−0.19%）。
+    #   注意: enc_dwconv 只在 "linear" 下有意义; enc_qk_norm 只在 "linear" 下有意义。
+    enc_attn: str = "linear"
+    enc_std_qk_norm: bool = False  # "std" 编码器的 QK-Norm（默认关 = 普通 transformer 原貌）
     # ── 解码器（普通 softmax 注意力; dec_recurrent=True 时走循环读出）──
     dec_recurrent: bool = False   # 循环读出（主线口径; 单步版 = False）
     dec_steps: str = ""           # 逗号分隔采样步; 空 = square_block_starts(K)
@@ -596,11 +746,7 @@ class SRPhase1LinAttn(nn.Module):
         assert 1 <= cfg.num_specials <= self.num_patches, \
             f"num_specials(K)={cfg.num_specials} 越界 (须 1 ≤ K ≤ N={self.num_patches})"
 
-        self.encoder = LinearAttentionEncoder(
-            dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
-            mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
-            num_specials=cfg.num_specials, dwconv=cfg.enc_dwconv,
-            qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout)
+        self.encoder = self._build_encoder(cfg)
         _dec_kw = dict(
             enc_dim=cfg.enc_dim, dim=cfg.dec_dim, depth=cfg.dec_depth,
             heads=cfg.dec_heads, mlp_ratio=cfg.dec_mlp_ratio, patch=cfg.patch,
@@ -612,6 +758,26 @@ class SRPhase1LinAttn(nn.Module):
             self.decoder = RecurrentOutputQueryDecoder(steps=_steps or None, **_dec_kw)
         else:
             self.decoder = StandardAttentionDecoder(**_dec_kw)
+
+    @staticmethod
+    def _build_encoder(cfg: "LinAttnConfig") -> nn.Module:
+        """按 `cfg.enc_attn` 选编码器（消融开关; 默认 "linear" = 昨日臂, 行为不变）。"""
+        kind = str(cfg.enc_attn).lower()
+        assert kind in ENCODER_REGISTRY, \
+            f"未知 enc_attn={cfg.enc_attn!r}; 合法值: {sorted(ENCODER_REGISTRY)}"
+        if kind == "linear":
+            return LinearAttentionEncoder(
+                dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
+                mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
+                num_specials=cfg.num_specials, dwconv=cfg.enc_dwconv,
+                qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout)
+        if kind == "std":
+            return StandardAttentionEncoder(
+                dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
+                mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
+                num_specials=cfg.num_specials, qk_norm=cfg.enc_std_qk_norm,
+                drop_rate=cfg.dropout)
+        raise AssertionError(f"未处理的 enc_attn={kind!r}")
 
     # ── encode / decode（训练与推理同一路径, 与主线同名同义）──
     def encode(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
@@ -897,6 +1063,104 @@ if __name__ == "__main__":
     print(f"    K=64: Y_pix{tuple(o64['Y_pix'].shape)} (T=8), "
           f"读窗口 {m64.decoder.windows[0]}…{m64.decoder.windows[-1]}, "
           f"decoder 参数 {m64.count_params()['dec_M']}M")
+
+    # 9e. 普通 transformer 编码器的 13 层参数体量必须与线性臂对齐（消融可归因的前提）
+    print("[9] ★消融臂: 普通 (softmax) 注意力编码器（enc_attn='std'）")
+    # 9a-9d 见下; 先验"注意力确实是标准 softmax 缩放点积"（数值对拍手工实现）
+    torch.manual_seed(0)
+    att_s = StandardAttention(dim=32, heads=4)
+    xs = torch.randn(2, 7, 32)
+    with torch.no_grad():
+        got = att_s(xs)
+        Bs, Ns, Ds = xs.shape
+        Hs, ds = att_s.heads, att_s.head_dim
+        q_, k_, v_ = att_s.qkv(xs).chunk(3, dim=-1)
+        q_ = q_.reshape(Bs, Ns, Hs, ds).transpose(1, 2)
+        k_ = k_.reshape(Bs, Ns, Hs, ds).transpose(1, 2)
+        v_ = v_.reshape(Bs, Ns, Hs, ds).transpose(1, 2)
+        w = torch.softmax(q_ @ k_.transpose(-1, -2) / math.sqrt(ds), dim=-1)
+        assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1)), atol=1e-5), \
+            "softmax 注意力权重每行未归一（不是普通 transformer！）"
+        want = att_s.proj((w @ v_).transpose(1, 2).reshape(Bs, Ns, Ds))
+    dmax = float((got - want).abs().max())
+    assert dmax < 1e-6, f"StandardAttention 与手工 softmax 实现不一致: {dmax}"
+    print(f"    StandardAttention == softmax(QKᵀ/√d)V 手工实现 (max|diff|={dmax:.2e}); "
+          f"注意力权重行和==1")
+
+    # 9e. 普通 transformer 编码器的 13 层参数体量必须与线性臂对齐（消融可归因的前提）
+    enc_lin = LinearAttentionEncoder(dim=448, depth=13, heads=8)
+    enc_std = StandardAttentionEncoder(dim=448, depth=13, heads=8)
+    n_lin = sum(p.numel() for p in enc_lin.parameters())
+    n_std = sum(p.numel() for p in enc_std.parameters())
+    rel = abs(n_std - n_lin) / n_lin
+    assert rel < 0.01, f"编码器参数量差 {rel:.2%} 超过 1%（无法归因到注意力形式）"
+    print(f"    编码器参数量: 线性 {n_lin:,} ({n_lin/1e6:.3f}M) vs "
+          f"普通 {n_std:,} ({n_std/1e6:.3f}M)  相对差 {rel:.2%} OK")
+    ms = SRPhase1LinAttn(LinAttnConfig(enc_attn="std"))
+    ps = ms.count_params()
+    assert type(ms.encoder).__name__ == "StandardAttentionEncoder", type(ms.encoder)
+    assert 25.0 <= ps["enc_M"] <= 42.0 and 25.0 <= ps["dec_M"] <= 42.0
+    print(f"    整机(enc_attn=std): {_fmt(ps)}")
+
+    # 9f. 普通编码器端的形状/损失/梯度（单步 + BPTT 两种解码都要能跑通）
+    xt = torch.randn(2, 3, 64, 64)
+    for flag in (False, True):
+        mc = SRPhase1LinAttn(LinAttnConfig(
+            img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+            enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+            enc_attn="std", dec_recurrent=flag))
+        T = len(mc.decoder.steps) if flag else 1
+        mc.train()
+        oc = mc(xt)
+        assert oc["Y_pix"].shape[:2] == (2, T), oc["Y_pix"].shape
+        assert torch.isfinite(oc["loss"])
+        oc["loss"].backward()
+        bad = [k for k, p in mc.named_parameters()
+               if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())]
+        assert not bad, f"无梯度/非有限梯度: {bad[:5]}"
+        nz = sum(1 for _, p in mc.named_parameters()
+                 if p.grad is not None and p.grad.abs().sum() > 0)
+        print(f"    enc_attn=std dec_recurrent={int(flag)} T={T}: "
+              f"Y_pix{tuple(oc['Y_pix'].shape)} loss={oc['loss'].item():.4f} "
+              f"有梯度张量 {nz}/{sum(1 for _ in mc.parameters())} OK")
+
+    # 9g. 普通编码器在 bf16 autocast 下前向/反向必须有限（softmax 自带归一的护栏）
+    mb = SRPhase1LinAttn(LinAttnConfig(
+        img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+        enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+        enc_attn="std"))
+    mb.train()
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        ob = mb(xt)
+    assert torch.isfinite(ob["loss"]), f"bf16 下损失非有限: {ob['loss']}"
+    ob["loss"].backward()
+    gn = torch.nn.utils.clip_grad_norm_(list(mb.parameters()), 1e9)
+    assert torch.isfinite(gn) and float(gn) < 1e4, f"bf16 梯度范数异常: {gn}"
+    print(f"    enc_attn=std bf16 autocast: loss={ob['loss'].item():.4f} "
+          f"grad_norm={float(gn):.3f} 有限 OK")
+
+    # 9h. 默认路径不受影响（回归: 昨天的 linattn 臂必须逐位仍是原实现）
+    cfg_def = LinAttnConfig()
+    assert cfg_def.enc_attn == "linear" and cfg_def.enc_std_qk_norm is False
+    mdl_def = SRPhase1LinAttn(cfg_def)
+    assert type(mdl_def.encoder).__name__ == "LinearAttentionEncoder"
+    assert mdl_def.count_params()["encoder"] == 31909024, \
+        f"默认编码器参数量变了: {mdl_def.count_params()['encoder']} ≠ 31909024"
+    assert type(mdl_def.decoder).__name__ == "StandardAttentionDecoder"
+    print(f"    默认路径回归: enc_attn={cfg_def.enc_attn!r} → "
+          f"{type(mdl_def.encoder).__name__} {mdl_def.count_params()['encoder']:,} 参数 不变 OK")
+
+    # 9i. 昨天 ckpt 仍能 strict 载入（若本机有该文件; 远程/本地都可能没有 ⇒ 跳过）
+    _ck = os.environ.get("LINATTN_CKPT", "")
+    if _ck and os.path.exists(_ck):
+        ck_old = torch.load(_ck, map_location="cpu", weights_only=False)
+        cfg_old = LinAttnConfig(**{k: v for k, v in ck_old["cfg"].items()
+                                   if k in LinAttnConfig.__dataclass_fields__})
+        m_old = SRPhase1LinAttn(cfg_old)
+        m_old.load_state_dict(ck_old["model"])       # strict=True
+        print(f"    回归: 旧 ckpt strict 载入成功 ({os.path.basename(_ck)}) OK")
+    else:
+        print(f"    回归: 未提供 LINATTN_CKPT（跳过旧 ckpt strict 载入检查）")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")
