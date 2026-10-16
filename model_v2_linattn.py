@@ -1,5 +1,5 @@
 """
-SR-Diffusion Phase 1 v2 — **实验版 (linattn)**: 无预训练编码器
+AssocVTC Phase 1 v2 — **实验版 (linattn)**: 无预训练编码器
 ================================================================
 
 本文件是 `model_v2.py` 的**实验性分支**, 与主线并存、互不影响
@@ -109,6 +109,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 # ImageNet 统计量 (= 主线 DINO_MEAN/DINO_STD 同值); 输入归一化与像素目标同一口径
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -232,9 +233,14 @@ class LinearAttention(nn.Module):
         self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
         self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
 
-    def forward(self, x: Tensor, h: int, w: int, n_prefix: int = 0) -> Tensor:
+    def forward(self, x: Tensor, h: int = 0, w: int = 0,
+                n_prefix: int = 0) -> Tensor:
         """x: (B, n_prefix + h*w, D); 局部混合只作用在 patch 段（前 n_prefix 个
-        token 是 cls/specials, 没有 2-D 网格语义, 不参与卷积）。"""
+        token 是 cls/specials, 没有 2-D 网格语义, 不参与卷积）。
+
+        `h/w` 默认 0：只有 `dwconv=True` 时才会用到（解码器侧不构造 DWConv,
+        故可省略）。
+        """
         if self.local is not None and n_prefix < x.shape[1]:
             pre = x[:, :n_prefix]
             pat = self.local(x[:, n_prefix:], h, w)
@@ -672,6 +678,195 @@ class RecurrentOutputQueryDecoder(nn.Module):
         return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
 
 
+# ═══ 消融臂: **全线性** 解码器（编码器 + 解码器都用线性注意力, 配 BPTT）═══
+#   2026-10-16 用户要求: 「BPTT 编码解码全线性」。上面已把**编码器**做成可切换的
+#   线性/普通注意力; 本节把**解码器**也做成可切换的 —— 自注意力与交叉注意力都由
+#   softmax 换成核形式 φ(x)=elu(x)+1 的线性注意力。
+#
+#   参数量天然对齐: 线性层 = 4D²(自注意力) + 4D²(交叉注意力) + 8D²(FFN) + 3·LayerNorm
+#   = 16D² + 9,728 + 2×(4·head_dim)（QK-Norm）
+#   ⇒ D=512 时每层 4,204,544 vs nn.TransformerDecoderLayer 的 4,204,032（**+512, +0.012%**）。
+#
+#   ⚠️ 数值稳定性: 与编码器侧同样的问题 —— elu+1 核形式**没有 softmax 的归一化**,
+#   分子分母会随 qkv 权重无界增长, bf16 下会间歇性梯度爆炸（见 LinearAttention
+#   docstring 的实测）。因此这里默认 `qk_norm=True`（把 φ 的输出钉住）+ 聚合段强制
+#   fp32。解码器侧**不加** DWConv（查询基行没有 2-D 网格语义）。
+
+class LinearCrossAttention(nn.Module):
+    """线性注意力**交叉**注意力: query 来自解码器查询行, key/value 来自 memory。
+
+        out_i = (φ(q_i)ᵀ Σ_j φ(k_j) v_jᵀ) / (φ(q_i)ᵀ Σ_j φ(k_j))
+
+    memory 长度 M=1+K（K=64 ⇒ 65）, 查询行数 N=196 ⇒ 复杂度 O(N·M·d), 与 softmax
+    交叉注意力的 O(N·M) 同阶（此处 M 很小, 省算力不是动机; 动机是"全线性"这个口径）。
+    数值稳定性处理与 `LinearAttention` 一致: 每 head 的 QK LayerNorm + 聚合段 fp32。
+    """
+
+    def __init__(self, dim: int, heads: int = 8, qk_norm: bool = True):
+        super().__init__()
+        assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.q = nn.Linear(dim, dim)
+        self.kv = nn.Linear(dim, dim * 2)
+        self.proj = nn.Linear(dim, dim)
+        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
+        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else None
+
+    def forward(self, x: Tensor, mem: Tensor) -> Tensor:
+        B, N, D = x.shape
+        M = mem.shape[1]
+        H, d = self.heads, self.head_dim
+        q = self.q(x).reshape(B, N, H, d).transpose(1, 2)          # (B,H,N,d)
+        k, v = self.kv(mem).chunk(2, dim=-1)
+        k = k.reshape(B, M, H, d).transpose(1, 2)                  # (B,H,M,d)
+        v = v.reshape(B, M, H, d).transpose(1, 2)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        out_dtype = q.dtype
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            qf, kf, vf = phi(q.float()), phi(k.float()), v.float()
+            kv = kf.transpose(-1, -2) @ vf                         # (B,H,d,d)
+            zs = kf.sum(dim=-2)                                    # (B,H,d)
+            out = qf @ kv / (qf @ zs.unsqueeze(-1) + 1e-6)         # (B,H,N,d)
+        out = out.to(out_dtype).transpose(1, 2).reshape(B, N, D)
+        return self.proj(out)
+
+
+class LinearDecoderLayer(nn.Module):
+    """pre-norm: x + LinSelfAttn(LN(x)) → x + LinCrossAttn(LN(x), mem) → x + FFN(LN(x))。
+
+    与 `nn.TransformerDecoderLayer(norm_first=True)` **逐项同构**（3 个 LayerNorm、
+    GELU FFN、mlp_ratio=4）, 只把两处多头注意力换成线性注意力。
+    """
+
+    def __init__(self, dim: int, heads: int = 8, mlp_ratio: float = 4.0,
+                 qk_norm: bool = True):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = LinearAttention(dim, heads, dwconv=False, qk_norm=qk_norm)
+        self.norm2 = nn.LayerNorm(dim)
+        self.cross_attn = LinearCrossAttention(dim, heads, qk_norm)
+        self.norm3 = nn.LayerNorm(dim)
+        hidden = int(dim * mlp_ratio)
+        self.ffn = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(),
+                                 nn.Linear(hidden, dim))
+
+    def forward(self, x: Tensor, mem: Tensor) -> Tensor:
+        x = x + self.self_attn(self.norm1(x))      # dwconv=False ⇒ h/w 不用给
+        x = x + self.cross_attn(self.norm2(x), mem)
+        x = x + self.ffn(self.norm3(x))
+        return x
+
+
+class LinearAttentionDecoder(nn.Module):
+    """输出查询式 + **全线性注意力** stack 解码器（单步并行, T=1）。
+
+    接口与 `StandardAttentionDecoder` 完全一致 `(z_cls, z_s) → (B,N,patch_px)`;
+    与 `LinearRecurrentDecoder` **参数逐 key 同名同形** ⇒ 可从单步版热启动做 BPTT 微调。
+    """
+
+    def __init__(self, enc_dim: int = 448, dim: int = 512, depth: int = 7,
+                 heads: int = 8, mlp_ratio: float = 4.0, patch: int = 16,
+                 num_patches: int = 196, num_specials: int = 64,
+                 pixel_hidden: int = 1024, dropout: float = 0.0,
+                 qk_norm: bool = True, grad_ckpt: bool = False):
+        super().__init__()
+        assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
+        self.enc_dim, self.dim = enc_dim, dim
+        self.num_patches, self.num_specials = num_patches, num_specials
+        self.patch_px = 3 * patch * patch
+        self.qk_norm = bool(qk_norm)
+        self.grad_ckpt = bool(grad_ckpt)
+
+        self.mem_proj = (nn.Identity() if enc_dim == dim
+                         else nn.Linear(enc_dim, dim))
+        self.mem_norm = nn.LayerNorm(dim)
+        self.query_base = nn.Parameter(torch.randn(num_patches, dim) * 0.02)
+        self.query_pos = nn.Parameter(torch.randn(num_patches, dim) * 0.02)
+        # ModuleList（不是 nn.TransformerDecoder）: 键名与循环版逐 key 对齐
+        self.stack = nn.ModuleList([
+            LinearDecoderLayer(dim, heads, mlp_ratio, qk_norm)
+            for _ in range(depth)])
+        self.norm_out = nn.LayerNorm(dim)
+        self.pixel_head = PixelHead(dim, self.patch_px, pixel_hidden)
+        nn.init.trunc_normal_(self.query_base, std=0.02)
+        nn.init.trunc_normal_(self.query_pos, std=0.02)
+
+    def _prep(self, z_cls: Tensor, z_s: Tensor) -> Tuple[Tensor, Tensor]:
+        assert z_cls.dim() == 3 and z_s.dim() == 3, \
+            f"z_cls/z_s 须为 (B,·,D), got {tuple(z_cls.shape)}/{tuple(z_s.shape)}"
+        assert z_cls.shape[1] == 1, f"z_cls 应为 1 列, got {z_cls.shape[1]}"
+        assert z_s.shape[1] == self.num_specials, \
+            f"z_s 列数 {z_s.shape[1]} != num_specials={self.num_specials}"
+        assert z_cls.shape[0] == z_s.shape[0], "batch 不一致"
+        mem = torch.cat([z_cls, z_s], dim=1)
+        return mem, self.mem_norm(self.mem_proj(mem))
+
+    def _run(self, y: Tensor, mem: Tensor) -> Tensor:
+        """逐层前向。`grad_ckpt=True` 时对每层做**梯度检查点**（反向重算激活）——
+        数学完全等价, 但能把"线性注意力聚合段强制 fp32"产生的中间张量
+        （每层每次调用 ~4 个 (B,H,N,d) fp32）从"跨 7 层 × T 步全部保留"变成
+        "用完即弃、反向重算", 从而把 BPTT 的 bs=64 从 OOM 拉回可用。
+        """
+        for layer in self.stack:
+            if self.grad_ckpt and self.training:
+                y = checkpoint(layer, y, mem, use_reentrant=False)
+            else:
+                y = layer(y, mem)
+        return y
+
+    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+        _, mem = self._prep(z_cls, z_s)
+        B = mem.shape[0]
+        tgt = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
+        return self.pixel_head(self.norm_out(self._run(tgt, mem)))
+
+
+class LinearRecurrentDecoder(LinearAttentionDecoder):
+    """循环读出（**BPTT** carry）+ 全线性注意力解码器。
+
+    机制与 `RecurrentOutputQueryDecoder` 逐位相同（平方块读窗口 / carry 不 detach /
+    各步直接预测整图 / 平权 L1）, 只是 stack 换成线性注意力层。
+    与 `LinearAttentionDecoder` 参数逐 key 同名同形, 仅多一个**零初始化** `mem_pos`
+    ⇒ 可直接 `load_state_dict` 做阶段 1 → 阶段 2 的热启动。
+    """
+
+    def __init__(self, enc_dim: int = 448, dim: int = 512, depth: int = 7,
+                 heads: int = 8, mlp_ratio: float = 4.0, patch: int = 16,
+                 num_patches: int = 196, num_specials: int = 64,
+                 pixel_hidden: int = 1024, dropout: float = 0.0,
+                 qk_norm: bool = True, steps=None, step_plan: str = "square",
+                 block: int = 0, grad_ckpt: bool = False):
+        super().__init__(enc_dim=enc_dim, dim=dim, depth=depth, heads=heads,
+                         mlp_ratio=mlp_ratio, patch=patch,
+                         num_patches=num_patches, num_specials=num_specials,
+                         pixel_hidden=pixel_hidden, dropout=dropout,
+                         qk_norm=qk_norm, grad_ckpt=grad_ckpt)
+        self.mem_pos = nn.Parameter(torch.zeros(1, num_specials + 1, dim))
+        self.steps = ([int(x) for x in steps] if steps
+                      else square_block_starts(num_specials))
+        self.step_plan, self.block = step_plan, int(block)
+        self.windows = step_windows(num_specials, self.steps, step_plan, self.block)
+        self.last_windows = self.windows
+
+    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+        _, mem = self._prep(z_cls, z_s)
+        mem = mem + self.mem_pos
+        B = mem.shape[0]
+        base = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
+        Y = base
+        outs = []
+        for lo, hi in self.windows:
+            Y = self._run(Y, mem[:, lo:hi + 1])             # 只读本步那块 memory
+            outs.append(Y)
+            Y = self.query_base.unsqueeze(0) + Y            # carry = BPTT（不 detach）
+        Ys = torch.stack(outs, dim=1)                       # (B,T,N,dim)
+        self.last_Y = Ys
+        return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
+
+
 # ═══ 配置 ═══
 
 @dataclass
@@ -697,6 +892,13 @@ class LinAttnConfig:
     # ── 解码器（普通 softmax 注意力; dec_recurrent=True 时走循环读出）──
     dec_recurrent: bool = False   # 循环读出（主线口径; 单步版 = False）
     dec_steps: str = ""           # 逗号分隔采样步; 空 = square_block_starts(K)
+    # ── 解码器注意力形式（消融开关; 2026-10-16 "全线性"臂）──
+    #   "std"（默认, 昨日与普通编码器臂）= nn.TransformerDecoder 的 softmax 注意力;
+    #   "linear" = 自注意力与交叉注意力都用核形式线性注意力（φ=elu+1）。
+    #   每层参数量 4,204,032 vs 4,204,544（+0.012%）。
+    dec_attn: str = "std"
+    dec_linear_qk_norm: bool = True   # "linear" 解码器的 QK-Norm（稳定性修复, 默认开）
+    dec_grad_ckpt: bool = False       # "linear"+BPTT 显存不够时开（数学等价, 反向重算）
     # ── 解码器（普通 softmax 注意力）──
     dec_dim: int = 512
     dec_depth: int = 7
@@ -719,7 +921,7 @@ class LinAttnConfig:
 # ═══ 主模型 ═══
 
 class SRPhase1LinAttn(nn.Module):
-    """无预训练编码器的 SR-Diffusion Phase 1（实验版）。
+    """无预训练编码器的 AssocVTC Phase 1（实验版）。
 
     `forward(pixel_values)` → `{"loss","recon","F_hat","Y_pix","target_pix"}`
     · target_pix: (B,N,3*p*p) 归一化像素 patch（`image_to_patches` 布局）
@@ -753,11 +955,24 @@ class SRPhase1LinAttn(nn.Module):
             num_patches=self.num_patches, num_specials=cfg.num_specials,
             pixel_hidden=cfg.pixel_hidden, dropout=cfg.dropout)
         self.recurrent = bool(cfg.dec_recurrent)
-        if self.recurrent:
-            _steps = [int(x) for x in str(cfg.dec_steps).split(",") if x.strip()]
-            self.decoder = RecurrentOutputQueryDecoder(steps=_steps or None, **_dec_kw)
+        self.dec_attn = str(cfg.dec_attn).lower()
+        _steps = [int(x) for x in str(cfg.dec_steps).split(",") if x.strip()]
+        if self.dec_attn == "std":
+            if self.recurrent:
+                self.decoder = RecurrentOutputQueryDecoder(steps=_steps or None, **_dec_kw)
+            else:
+                self.decoder = StandardAttentionDecoder(**_dec_kw)
+        elif self.dec_attn == "linear":
+            _lin_kw = dict(qk_norm=bool(cfg.dec_linear_qk_norm),
+                           grad_ckpt=bool(cfg.dec_grad_ckpt))
+            if self.recurrent:
+                self.decoder = LinearRecurrentDecoder(
+                    steps=_steps or None, **_dec_kw, **_lin_kw)
+            else:
+                self.decoder = LinearAttentionDecoder(**_dec_kw, **_lin_kw)
         else:
-            self.decoder = StandardAttentionDecoder(**_dec_kw)
+            raise AssertionError(
+                f"未知 dec_attn={cfg.dec_attn!r}; 合法值: ['std', 'linear']")
 
     @staticmethod
     def _build_encoder(cfg: "LinAttnConfig") -> nn.Module:
@@ -1161,6 +1376,145 @@ if __name__ == "__main__":
         print(f"    回归: 旧 ckpt strict 载入成功 ({os.path.basename(_ck)}) OK")
     else:
         print(f"    回归: 未提供 LINATTN_CKPT（跳过旧 ckpt strict 载入检查）")
+
+    print("[10] ★消融臂: **全线性**（编码器 + 解码器都用线性注意力, 配 BPTT）")
+    # 10a. 解码器的两处注意力必须真的是核形式线性注意力（与手工实现数值对拍）
+    torch.manual_seed(0)
+    ca = LinearCrossAttention(dim=32, heads=4)
+    xq, xm = torch.randn(2, 5, 32), torch.randn(2, 7, 32)
+    with torch.no_grad():
+        got = ca(xq, xm)
+        Bc, Nc, Dc = xq.shape
+        Mc = xm.shape[1]
+        Hc, dc = ca.heads, ca.head_dim
+        q_ = ca.q_norm(ca.q(xq).reshape(Bc, Nc, Hc, dc).transpose(1, 2))
+        k_, v_ = ca.kv(xm).chunk(2, dim=-1)
+        k_ = ca.k_norm(k_.reshape(Bc, Mc, Hc, dc).transpose(1, 2))
+        v_ = v_.reshape(Bc, Mc, Hc, dc).transpose(1, 2)
+        # 手工核形式: (φ(Q) Σ φ(K)Vᵀ) / (φ(Q) Σ φ(K))
+        phiq, phik = phi(q_), phi(k_)
+        want = (phiq @ (phik.transpose(-1, -2) @ v_)) / \
+               (phiq @ phik.sum(dim=-2).unsqueeze(-1) + 1e-6)
+        want = ca.proj(want.transpose(1, 2).reshape(Bc, Nc, Dc))
+    dcmax = float((got - want).abs().max())
+    assert dcmax < 1e-5, f"LinearCrossAttention 与手工核形式不一致: {dcmax}"
+    # 核形式的注意力权重**不**满足"每行和为 1"（这正是与 softmax 的区别）
+    with torch.no_grad():
+        w_kernel = phi(q_) @ phik.transpose(-1, -2)
+        w_soft = torch.softmax(q_ @ k_.transpose(-1, -2) / math.sqrt(dc), dim=-1)
+    assert not torch.allclose(w_kernel.sum(-1), torch.ones_like(w_kernel.sum(-1)),
+                              atol=1e-3), "核形式不该是行归一化的（那说明写成了 softmax）"
+    print(f"    LinearCrossAttention == 手工 φ(Q)(φ(K)ᵀV)/(φ(Q)Σφ(K)) "
+          f"(max|diff|={dcmax:.2e}); φ 未行归一（与 softmax 的真正区别）; "
+          f"softmax 行和=={float(w_soft.sum(-1).mean()):.4f}")
+
+    # 10b. 参数量: 线性解码器层 vs nn.TransformerDecoderLayer（应几乎相同）
+    lin_layer = LinearDecoderLayer(dim=512, heads=8)
+    sm_layer = nn.TransformerDecoderLayer(d_model=512, nhead=8,
+                                          dim_feedforward=2048, dropout=0.0,
+                                          activation="gelu", batch_first=True,
+                                          norm_first=True)
+    n_lin = sum(p.numel() for p in lin_layer.parameters())
+    n_sm = sum(p.numel() for p in sm_layer.parameters())
+    rel = abs(n_lin - n_sm) / n_sm
+    assert rel < 0.01, f"解码器层参数量差 {rel:.3%} 超过 1%"
+    print(f"    解码器每层参数: 线性 {n_lin:,} vs 普通 softmax {n_sm:,} "
+          f"(Δ{n_lin - n_sm:+,}, {rel:.4%}) OK")
+    m_all = SRPhase1LinAttn(LinAttnConfig(enc_attn="linear", dec_attn="linear",
+                                          dec_recurrent=True))
+    p_all = m_all.count_params()
+    assert type(m_all.encoder).__name__ == "LinearAttentionEncoder"
+    assert type(m_all.decoder).__name__ == "LinearRecurrentDecoder"
+    print(f"    整机(全线性 + BPTT): {_fmt(p_all)}  "
+          f"vs 全 softmax 臂 63.116M（BPTT）")
+
+    # 10c. 单步版 ↔ 循环版参数逐 key 同名同形（阶段 1 → 阶段 2 热启动的前提）
+    ls = LinearAttentionDecoder(num_specials=64)
+    lr_ = LinearRecurrentDecoder(num_specials=64)
+    ks, kr = ls.state_dict(), lr_.state_dict()
+    shared = set(ks) & set(kr)
+    assert all(ks[k].shape == kr[k].shape for k in shared), "共享 key 形状不一致"
+    assert set(ks) <= set(kr), f"循环版缺 key: {set(ks) - set(kr)}"
+    only = set(kr) - set(ks)
+    assert only == {"mem_pos"}, f"循环版多出的 key 应只有 mem_pos, got {only}"
+    missing, unexpected = lr_.load_state_dict(ks, strict=False)
+    assert set(missing) == {"mem_pos"} and not unexpected
+    assert float(lr_.mem_pos.abs().max()) == 0.0, "mem_pos 应零初始化"
+    print(f"    单步/循环线性解码器共享 {len(ks)} 个 key 且形状全同; "
+          f"循环版仅多零初始化 mem_pos ⇒ 可 warm start")
+
+    # 10d. 形状/损失/梯度: 全线性 + 单步 与 全线性 + BPTT 都要跑通
+    for flag in (False, True):
+        mall = SRPhase1LinAttn(LinAttnConfig(
+            img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+            enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+            enc_attn="linear", dec_attn="linear", dec_recurrent=flag))
+        Tall = len(mall.decoder.steps) if flag else 1
+        mall.train()
+        oall = mall(torch.randn(2, 3, 64, 64))
+        assert oall["Y_pix"].shape[:2] == (2, Tall), oall["Y_pix"].shape
+        assert torch.isfinite(oall["loss"]), "全线性臂损失非有限"
+        oall["loss"].backward()
+        bad = [k for k, p in mall.named_parameters()
+               if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())]
+        assert not bad, f"无梯度/非有限梯度: {bad[:5]}"
+        print(f"    全线性 dec_recurrent={int(flag)} T={Tall}: "
+              f"Y_pix{tuple(oall['Y_pix'].shape)} loss={oall['loss'].item():.4f} 梯度 OK")
+
+    # 10e. 数值边界: 把线性解码器 qkv/kv 权重放大后, QK-Norm 必须把 φ 的分母钉住
+    def _dec_den_mag(scale: float) -> float:
+        torch.manual_seed(0)
+        c = LinearCrossAttention(dim=32, heads=4, qk_norm=True)
+        with torch.no_grad():
+            c.kv.weight.mul_(scale)
+            if c.kv.bias is not None:
+                c.kv.bias.mul_(scale)
+        m = torch.randn(2, 64, 32) * 10.0
+        with torch.no_grad():
+            k, _ = c.kv(m).chunk(2, dim=-1)
+            k = c.k_norm(k.reshape(2, 64, 4, 8).transpose(1, 2))
+            return float(phi(k.float()).sum(dim=-2).abs().max())
+
+    g1, g20 = _dec_den_mag(1.0), _dec_den_mag(20.0)
+    assert g20 / max(g1, 1e-9) < 2.0, f"交叉注意力分母未钉住 (×{g20 / g1:.2f})"
+    print(f"    交叉注意力 kv 权重 ×20: Σφ(k) 放大 ×{g20 / max(g1, 1e-9):.2f}（QK-Norm 钉住）OK")
+
+    # 10f. 梯度检查点必须**数学等价**（反向重算 ≠ 改数学）: 同权重下梯度应逐位接近
+    def _grads(ckpt_flag: bool):
+        torch.manual_seed(0)
+        m = SRPhase1LinAttn(LinAttnConfig(
+            img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+            enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+            enc_attn="linear", dec_attn="linear", dec_recurrent=True,
+            dec_grad_ckpt=ckpt_flag))
+        m.train()
+        torch.manual_seed(1)
+        xx = torch.randn(2, 3, 64, 64)
+        m(xx)["loss"].backward()
+        return {k: p.grad.detach().clone() for k, p in m.named_parameters()}
+
+    ga, gb = _grads(False), _grads(True)
+    assert set(ga) == set(gb)
+    worst_k, worst_d = None, 0.0
+    for k in ga:
+        d = float((ga[k] - gb[k]).abs().max())
+        ref = float(ga[k].abs().max()) + 1e-12
+        if d / ref > worst_d:
+            worst_k, worst_d = k, d / ref
+    assert worst_d < 1e-5, f"梯度检查点与不检查点的梯度不一致: {worst_k} 相对差 {worst_d:.2e}"
+    print(f"    梯度检查点数学等价: 全部 {len(ga)} 个参数梯度相对差 < {worst_d:.2e} "
+          f"(worst: {worst_k}) OK")
+
+    # 10g. 默认路径回归: dec_attn 默认 'std' ⇒ 昨日/普通臂行为不变
+    assert LinAttnConfig().dec_attn == "std"
+    m_def2 = SRPhase1LinAttn(LinAttnConfig())
+    assert type(m_def2.decoder).__name__ == "StandardAttentionDecoder"
+    assert m_def2.count_params()["decoder"] == 31173376, \
+        f"默认解码器参数量变了: {m_def2.count_params()['decoder']}"
+    m_def3 = SRPhase1LinAttn(LinAttnConfig(enc_attn="std"))
+    assert m_def3.count_params()["decoder"] == 31173376
+    print(f"    默认回归: dec_attn='std' → {type(m_def2.decoder).__name__} "
+          f"{m_def2.count_params()['decoder']:,} 参数 不变 OK")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")

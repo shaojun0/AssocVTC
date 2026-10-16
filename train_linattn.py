@@ -1,5 +1,5 @@
 """
-训练脚本 — SR-Diffusion-v3 实验版 (linattn): 无预训练编码器
+训练脚本 — AssocVTC 实验版 (linattn): 无预训练编码器
 =========================================================
 
 从零训练 `model_v2_linattn.SRPhase1LinAttn`（线性注意力编码器 ~31.9M +
@@ -181,6 +181,14 @@ def parse_args():
                     help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
     ap.add_argument("--dec_steps", default="",
                     help="逗号分隔采样步; 空 = square_block_starts(K)（K=64 → 8 步）")
+    ap.add_argument("--dec_attn", default="std", choices=["std", "linear"],
+                    help="解码器注意力形式: std=nn.TransformerDecoder softmax（默认）; "
+                         "linear=自注意力与交叉注意力都用线性注意力（**全线性**臂）")
+    ap.add_argument("--dec_linear_qk_norm", type=int, default=1,
+                    help="dec_attn=linear 时的 QK-Norm（默认 1 = 线性注意力稳定性修复）")
+    ap.add_argument("--dec_grad_ckpt", type=int, default=0,
+                    help="dec_attn=linear 时对解码器层做梯度检查点（数学等价, 反向重算; "
+                         "全线性+BPTT 在 bs64 会 OOM, 置 1 可放进显存）")
     ap.add_argument("--freeze_encoder", type=int, default=0,
                     help="1 = 冻结编码器（只训解码器; 逐步精炼实验用）")
     ap.add_argument("--init_from", default="",
@@ -246,6 +254,8 @@ def main():
         enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
         enc_std_qk_norm=bool(args.enc_std_qk_norm),
         dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
+        dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
+        dec_grad_ckpt=bool(args.dec_grad_ckpt),
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
         dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
         dropout=args.dropout)
@@ -266,7 +276,8 @@ def main():
               f"(原 {sum(prm.numel() for prm in model.parameters())/1e6:.3f} M)", flush=True)
     pc = model.count_params()
     n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
-    print(f"[decode] recurrent={getattr(model,'recurrent',False)} T={n_steps}"
+    print(f"[decode] recurrent={getattr(model,'recurrent',False)} "
+          f"dec_attn={cfg.dec_attn} → {type(model.decoder).__name__} T={n_steps}"
           + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else ""),
           flush=True)
     print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
