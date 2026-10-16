@@ -123,6 +123,53 @@ def build_datasets(data_dir: str, img_size: int = 224, val_per_class: int = 50
             ImageNet100(va, build_transform(img_size, False), img_size))
 
 
+# ─── OOD（无标签）数据集; E-A3 IID/OOD 熟悉度阶梯用 ─────────────────────
+# 与 ImageNet100 不同, OOD 目录没有类别标签（COCO val2017 / OpenImages /
+# construction_site 均为 flat 或 ImageFolder 布局）⇒ 只用 **val transform**
+# 保证与 IID val 逐位同口径（Resize(256)+CenterCrop(224)+Normalize）。
+_OOD_EXTS = (".jpeg", ".jpg", ".png", ".bmp", ".webp", ".tif", ".tiff")
+
+
+def scan_ood_images(root: str) -> List[str]:
+    """递归扫描 `root` 下所有图片路径（无标签; 支持 flat 目录或 ImageFolder 子目录）。"""
+    paths: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for f in sorted(filenames):
+            if f.lower().endswith(_OOD_EXTS):
+                paths.append(os.path.join(dirpath, f))
+    assert paths, f"{root} 下未找到任何图片"
+    return paths
+
+
+class OODImageDataset(Dataset):
+    """无标签图片集（OOD 用）: `label` 恒为 -1, 仅保证与 `(x, y)` DataLoader 兼容。"""
+
+    def __init__(self, paths: Sequence[str], img_size: int = 224, transform=None):
+        self.paths = list(paths)
+        self.img_size = img_size
+        self.transform = (transform if transform is not None
+                          else build_transform(img_size, False))
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, i: int):
+        path = self.paths[i]
+        with open(path, "rb") as f:
+            img = Image.open(f)
+            img.load()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        assert self.transform is not None
+        return self.transform(img), -1
+
+
+def build_ood_dataset(data_dir: str, img_size: int = 224) -> OODImageDataset:
+    """无标签 OOD 数据集（val transform, 与 IID val 同口径）; E-A3 用。"""
+    return OODImageDataset(scan_ood_images(data_dir), img_size)
+
+
 def build_loaders(data_dir: str, img_size: int = 224, batch_size: int = 64,
                   val_per_class: int = 50, num_workers: int = 16,
                   limit: int = 0, val_batches: int = 0

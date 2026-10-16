@@ -1,0 +1,214 @@
+{
+ "meta": {
+  "tool": "tools/alit_task_fidelity.py",
+  "task": "E-C1 (§5) / task-5",
+  "ckpt": null,
+  "ckpt_signature": "random(smoke,dim=64,depth=3)",
+  "ckpt_meta": {
+   "step": null,
+   "epoch": null,
+   "missing_ok": []
+  },
+  "cfg": {
+   "img_size": 64,
+   "patch": 8,
+   "num_specials": 16,
+   "enc_dim": 64,
+   "enc_depth": 3,
+   "enc_heads": 4,
+   "enc_attn": "std",
+   "dec_recurrent": false,
+   "dec_dim": 64,
+   "dec_depth": 2
+  },
+  "K": 16,
+  "N": 64,
+  "feature_dim": 64,
+  "data_dir": "/root/autodl-tmp/datasets/imagenet100",
+  "data_source": "synthetic(smoke)",
+  "synthetic": true,
+  "split": {
+   "val_per_class": 50,
+   "n_train": 320,
+   "n_val": 200,
+   "n_eval": 200,
+   "train_per_class": 100,
+   "val_n": 0
+  },
+  "feature": {
+   "pool": "mean-prefix",
+   "use_cls": false,
+   "train_aug": false,
+   "note": "预算 k 的特征 = mean-pool(z_s[:, :k])（+z_cls 可选）"
+  },
+  "probe": {
+   "kind": "logreg",
+   "steps": 150,
+   "lr": 0.01,
+   "wd": 0.0001,
+   "ridge": 0.01,
+   "standardize": "train per-dim mean/std"
+  },
+  "ks": [
+   4,
+   8,
+   16
+  ],
+  "n_classes": 8,
+  "chance_top1": 0.125,
+  "tsc": {
+   "path": "doc/2026-10-16/artifacts/alit/smoke_tsc_input.json",
+   "form": "per_image",
+   "tau_grid": null,
+   "match_key": {
+    "path": 200,
+    "filename": 0,
+    "index": 0
+   },
+   "k_grid": [
+    4,
+    8,
+    16
+   ],
+   "cum_z_s": null,
+   "source": "SMOKE synthetic per_image (E-C1 --tsc_json 规范形态样例)"
+  },
+  "tsc_source_k_sets": [
+   "per_image"
+  ],
+  "device": "cpu",
+  "batch_size": 32,
+  "amp": true,
+  "cache": "/tmp/alit_final/zs",
+  "cache_status": {
+   "train": "miss",
+   "val": "miss"
+  },
+  "seed": 0,
+  "n_boot": 200,
+  "ci": 0.95,
+  "min_effect_pp": 0.5,
+  "primary_tau_frac": 0.6,
+  "sec_extract": 0.7324507236480713,
+  "sec_probe": 0.4062209129333496,
+  "wall_sec": 1.1497621536254883
+ },
+ "top1_by_k": [
+  {
+   "k": 4,
+   "top1": 0.27,
+   "n_correct": 54,
+   "n": 200,
+   "train_top1": 1.0,
+   "final_loss": 0.017198476940393448,
+   "feat_dim": 64,
+   "top1_ci": [
+    0.21987500000000001,
+    0.34
+   ]
+  },
+  {
+   "k": 8,
+   "top1": 0.26,
+   "n_correct": 52,
+   "n": 200,
+   "train_top1": 1.0,
+   "final_loss": 0.01716337725520134,
+   "feat_dim": 64,
+   "top1_ci": [
+    0.20962500000000006,
+    0.33
+   ]
+  },
+  {
+   "k": 16,
+   "top1": 0.28,
+   "n_correct": 56,
+   "n": 200,
+   "train_top1": 1.0,
+   "final_loss": 0.017118483781814575,
+   "feat_dim": 64,
+   "top1_ci": [
+    0.22987500000000002,
+    0.345125
+   ]
+  }
+ ],
+ "adaptive_curve": [
+  {
+   "label": "per_image",
+   "tau": null,
+   "n": 200,
+   "mean_k": 8.28,
+   "median_k": 8.0,
+   "std_k": 4.7245740548752115,
+   "adaptive_top1": 0.27,
+   "adaptive_top1_ci": [
+    0.22,
+    0.34012500000000007
+   ],
+   "fixed_top1_at_equal_budget": 0.2606999908387661,
+   "fixed_top1_at_equal_budget_ci": [
+    0.21033375000000007,
+    0.330529375
+   ],
+   "fixed_k_nearest_grid": 8.0,
+   "fixed_top1_nearest_grid": 0.25999999046325684,
+   "delta_pp": 0.9300009161233913,
+   "delta_pp_ci": [
+    -1.0221562500000012,
+    2.8993125000000006
+   ],
+   "verdict": "indistinguishable"
+  }
+ ],
+ "bootstrap": {
+  "n_boot": 200,
+  "seed": 0,
+  "ci_level": 0.95,
+  "paired": true,
+  "note": "每样本内重算 mean(k_i) 再对该固定档曲线插值 ⇒ 预算是配对的"
+ },
+ "oracle_upper_bound": {
+  "any_k_correct_rate": 0.28,
+  "mean_min_k_all_images": 12.68,
+  "mean_min_k_correct_only": 4.142857142857143,
+  "frac_images_needing_K": 0.72,
+  "chance_top1": 0.125,
+  "note": "上界: 知道标签时每图最小需要多少 token; 不可实现, 只量化 TSC-TOI gap"
+ },
+ "E_C1_verdict": {
+  "primary_label": "per_image",
+  "primary_mean_k": 8.28,
+  "primary_mean_k_over_K": 0.5175,
+  "primary_adaptive_top1": 0.27,
+  "primary_fixed_top1_at_equal_budget": 0.2606999908387661,
+  "primary_delta_pp": 0.9300009161233913,
+  "primary_delta_pp_ci": [
+   -1.0221562500000012,
+   2.8993125000000006
+  ],
+  "primary_verdict": "indistinguishable",
+  "max_delta_pp_over_sweep": 0.9300009161233913,
+  "min_delta_pp_over_sweep": 0.9300009161233913,
+  "any_row_adaptive_better": false,
+  "any_row_fixed_better": false,
+  "decision_rule": "行判据: delta_pp >= +0.5 且 CI 下界 >0 ⇒ adaptive_better; <= -0.5 且 CI 上界 <0 ⇒ fixed_better; 否则 indistinguishable（PLAN §8 E-C1: 等平均 token 数下自适应 ≥ 固定 K 才算成立）",
+  "caveat": "分类线性探针 ≠ Phase 2 生成任务; 单种子; 见 honesty"
+ },
+ "honesty": [
+  "分类线性探针 ≠ Phase 2 生成任务: 这里只测 'z_s 前缀中类别可线性读出的信息', 不能替代 GOAL §2 的 caption/幻觉口径 (E-C2)。",
+  "等平均 token 数 (mean k) 口径: 自适应逐图 k_i 必须与 '平均 token 数相同' 的固定档比较, 不能与固定 K=64 或等最大 token 数比较; 插值存在格点误差, 故同时报最近格点值。",
+  "每档 probe 独立训练: 曲线非单调时先看各档 train top-1 (欠拟合/过拟合) 再谈科学结论。",
+  "单种子 (默认 seed 0): 只有 paired bootstrap CI 不跨 0 的差异可谈方向; <0.5 pp 不作结论。",
+  "TSC (重建 L1, 自监督) 与 TOI (分类) 不必然对齐; oracle 上界只量化 gap, 不是可实现策略。",
+  "--smoke 是管线证据: 合成数据 + 随机编码器, 无科学含义。"
+ ],
+ "tsc_interface": {
+  "canonical": "{\"per_image\":[{\"index\":i,\"filename\":str,\"path\":str,\"k\":int,\"step\":int}],\"k_grid\":[int],\"cum_z_s\":[int],\"tau\":float}",
+  "k_list": "[k0, k1, ...] 与 val 顺序一一对应（或 {\"k\":[...]}）",
+  "eadump": "E-A1 --dump_per_image json + --tsc_tau/--tsc_taus（本工具现场推 k_i）",
+  "match_priority": "path > filename > index(val 划分下标)",
+  "k_semantics": "k = 该图读入的 z_s 前缀长度; step → k 用 cum_z_s[step]"
+ }
+}

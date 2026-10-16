@@ -1,0 +1,16 @@
+{
+ "step": 380,
+ "epoch": 1,
+ "loss": 0.43704,
+ "recon": 0.36206,
+ "lr": 8.333333333333333e-05,
+ "grad_norm": 0.5067,
+ "skipped": 0,
+ "T": 8,
+ "img_per_s": 138.1,
+ "elapsed_min": 2.93,
+ "eta_h": 1.42,
+ "vram_gb": 19.74,
+ "best_psnr": -1000000000.0,
+ "running": true
+}

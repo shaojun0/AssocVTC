@@ -1,0 +1,38 @@
+{
+ "ckpt": "/root/autodl-tmp/srdiff_linattn/k64/ckpt_best.pt",
+ "step": 42750,
+ "epoch": 45,
+ "recurrent": false,
+ "T": 1,
+ "steps": [
+  null
+ ],
+ "windows": [
+  null
+ ],
+ "cum_z_s": [
+  64
+ ],
+ "n_images": 5000,
+ "L1_255": [
+  8.43254299621582
+ ],
+ "L1_01": [
+  0.032988210791349414
+ ],
+ "PSNR": [
+  26.602025302124023
+ ],
+ "PSNR_mean_mse": [
+  24.907706992799362
+ ],
+ "delta_L1_255": [],
+ "total_drop_255": 0.0,
+ "best_step": 0,
+ "delta1_share": null,
+ "n_positive_steps": 0,
+ "best_step_hist": [
+  5000
+ ],
+ "const_baseline_255": 50.89169822998047
+}

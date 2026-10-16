@@ -1,0 +1,611 @@
+{
+ "meta": {
+  "tool": "tools/alit_task_fidelity.py",
+  "task": "E-C1 (§5) / task-5",
+  "ckpt": "/root/autodl-tmp/srdiff_stdattn/stdattn_k64_rec/ckpt_best.pt",
+  "ckpt_signature": "ckpt_best.pt:757023643:1792132661",
+  "ckpt_meta": {
+   "step": 11406,
+   "epoch": 6,
+   "missing_ok": []
+  },
+  "cfg": {
+   "img_size": 224,
+   "patch": 16,
+   "num_specials": 64,
+   "enc_dim": 448,
+   "enc_depth": 13,
+   "enc_heads": 8,
+   "enc_attn": "std",
+   "dec_recurrent": true,
+   "dec_dim": 512,
+   "dec_depth": 7
+  },
+  "K": 64,
+  "N": 196,
+  "feature_dim": 896,
+  "data_dir": "/root/autodl-tmp/datasets/imagenet100",
+  "data_source": "imagenet100",
+  "synthetic": false,
+  "split": {
+   "val_per_class": 50,
+   "n_train": 10000,
+   "n_val": 5000,
+   "n_eval": 5000,
+   "train_per_class": 100,
+   "val_n": 0
+  },
+  "feature": {
+   "pool": "mean-prefix",
+   "use_cls": true,
+   "train_aug": false,
+   "note": "预算 k 的特征 = mean-pool(z_s[:, :k])（+z_cls 可选）"
+  },
+  "probe": {
+   "kind": "logreg",
+   "steps": 600,
+   "lr": 0.01,
+   "wd": 0.0001,
+   "ridge": 0.01,
+   "standardize": "train per-dim mean/std"
+  },
+  "ks": [
+   1,
+   3,
+   4,
+   8,
+   12,
+   15,
+   16,
+   24,
+   32,
+   35,
+   40,
+   48,
+   56,
+   63,
+   64
+  ],
+  "n_classes": 100,
+  "chance_top1": 0.01,
+  "tsc": {
+   "path": "doc/2026-10-16/artifacts/alit/per_image_stdattn_k64_rec.json",
+   "form": "stepwise_dump(E-A1 --dump_per_image)",
+   "tau_grid": [
+    2.9347588062286376,
+    3.5887233511757572,
+    4.388413543198276,
+    5.366302036019738,
+    6.562097500228336,
+    8.024357055094505,
+    9.812458005295476,
+    11.999008947957792,
+    14.672798156738281
+   ],
+   "match_key": {
+    "path_or_filename_or_index": 5000
+   },
+   "n_dump_images": 5000,
+   "stepwise_ckpt": "/root/autodl-tmp/srdiff_stdattn/stdattn_k64_rec/ckpt_best.pt",
+   "cum_z_s": [
+    3,
+    8,
+    15,
+    24,
+    35,
+    48,
+    63,
+    64
+   ]
+  },
+  "tsc_source_k_sets": [
+   "tsc_tau=2.9348",
+   "tsc_tau=3.5887",
+   "tsc_tau=4.3884",
+   "tsc_tau=5.3663",
+   "tsc_tau=6.5621",
+   "tsc_tau=8.0244",
+   "tsc_tau=9.8125",
+   "tsc_tau=11.9990",
+   "tsc_tau=14.6728"
+  ],
+  "device": "cuda",
+  "batch_size": 64,
+  "amp": true,
+  "cache": "/root/autodl-tmp/alit_cache/zs_stdattn_k64_rec",
+  "cache_status": {
+   "train": "hit",
+   "val": "hit"
+  },
+  "seed": 0,
+  "n_boot": 1000,
+  "ci": 0.95,
+  "min_effect_pp": 0.5,
+  "primary_tau_frac": 0.6,
+  "sec_extract": 0.5238983631134033,
+  "sec_probe": 30.159818172454834,
+  "wall_sec": 38.596105098724365
+ },
+ "top1_by_k": [
+  {
+   "k": 1,
+   "top1": 0.05,
+   "n_correct": 250,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.04626868665218353,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.043795,
+    0.0558
+   ]
+  },
+  {
+   "k": 3,
+   "top1": 0.0566,
+   "n_correct": 283,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.048886559903621674,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0508,
+    0.06341
+   ]
+  },
+  {
+   "k": 4,
+   "top1": 0.0576,
+   "n_correct": 288,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.03967323154211044,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0514,
+    0.0638
+   ]
+  },
+  {
+   "k": 8,
+   "top1": 0.0546,
+   "n_correct": 273,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.03661550208926201,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0486,
+    0.061
+   ]
+  },
+  {
+   "k": 12,
+   "top1": 0.0536,
+   "n_correct": 268,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.03949974104762077,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.047195,
+    0.0598
+   ]
+  },
+  {
+   "k": 15,
+   "top1": 0.0576,
+   "n_correct": 288,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.04138012230396271,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0514,
+    0.0642
+   ]
+  },
+  {
+   "k": 16,
+   "top1": 0.0568,
+   "n_correct": 284,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.04145153984427452,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0504,
+    0.0632
+   ]
+  },
+  {
+   "k": 24,
+   "top1": 0.0606,
+   "n_correct": 303,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.04559209570288658,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0538,
+    0.0674
+   ]
+  },
+  {
+   "k": 32,
+   "top1": 0.061,
+   "n_correct": 305,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.0492432601749897,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.054195,
+    0.0678
+   ]
+  },
+  {
+   "k": 35,
+   "top1": 0.063,
+   "n_correct": 315,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.05028453841805458,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.056,
+    0.07
+   ]
+  },
+  {
+   "k": 40,
+   "top1": 0.0616,
+   "n_correct": 308,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.05244480445981026,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.054395,
+    0.0682
+   ]
+  },
+  {
+   "k": 48,
+   "top1": 0.0576,
+   "n_correct": 288,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.0556064136326313,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0508,
+    0.064
+   ]
+  },
+  {
+   "k": 56,
+   "top1": 0.0594,
+   "n_correct": 297,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.06056592985987663,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0524,
+    0.066
+   ]
+  },
+  {
+   "k": 63,
+   "top1": 0.0626,
+   "n_correct": 313,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.061492133885622025,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0556,
+    0.0692
+   ]
+  },
+  {
+   "k": 64,
+   "top1": 0.063,
+   "n_correct": 315,
+   "n": 5000,
+   "train_top1": 1.0,
+   "final_loss": 0.06219927966594696,
+   "feat_dim": 896,
+   "top1_ci": [
+    0.0562,
+    0.0694
+   ]
+  }
+ ],
+ "adaptive_curve": [
+  {
+   "label": "tsc_tau=2.9348",
+   "tau": 2.9347588062286376,
+   "n": 5000,
+   "mean_k": 62.2408,
+   "median_k": 64.0,
+   "std_k": 7.24356371960653,
+   "adaptive_top1": 0.063,
+   "adaptive_top1_ci": [
+    0.055995,
+    0.0696
+   ],
+   "fixed_top1_at_equal_budget": 0.06225293861712728,
+   "fixed_top1_at_equal_budget_ci": [
+    0.05525293714285714,
+    0.06885293714285715
+   ],
+   "fixed_k_nearest_grid": 63.0,
+   "fixed_top1_nearest_grid": 0.06260000169277191,
+   "delta_pp": 0.07470613828727199,
+   "delta_pp_ci": [
+    -0.1218501999999999,
+    0.2690541428571436
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=3.5887",
+   "tau": 3.5887233511757572,
+   "n": 5000,
+   "mean_k": 60.3256,
+   "median_k": 64.0,
+   "std_k": 10.422110373623953,
+   "adaptive_top1": 0.063,
+   "adaptive_top1_ci": [
+    0.0558,
+    0.0694
+   ],
+   "fixed_top1_at_equal_budget": 0.061377418065922604,
+   "fixed_top1_at_equal_budget_ci": [
+    0.05437741714285714,
+    0.06797741714285714
+   ],
+   "fixed_k_nearest_grid": 63.0,
+   "fixed_top1_nearest_grid": 0.06260000169277191,
+   "delta_pp": 0.16225819340773967,
+   "delta_pp_ci": [
+    -0.13254827142857106,
+    0.4642978142857141
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=4.3884",
+   "tau": 4.388413543198276,
+   "n": 5000,
+   "mean_k": 57.1858,
+   "median_k": 64.0,
+   "std_k": 14.189773724763901,
+   "adaptive_top1": 0.064,
+   "adaptive_top1_ci": [
+    0.057,
+    0.0706
+   ],
+   "fixed_top1_at_equal_budget": 0.05994208001941442,
+   "fixed_top1_at_equal_budget_ci": [
+    0.05294208,
+    0.06654208
+   ],
+   "fixed_k_nearest_grid": 56.0,
+   "fixed_top1_nearest_grid": 0.05939999967813492,
+   "delta_pp": 0.4057919980585578,
+   "delta_pp_ci": [
+    -0.05345022857142861,
+    0.8769854285714288
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=5.3663",
+   "tau": 5.366302036019738,
+   "n": 5000,
+   "mean_k": 52.3306,
+   "median_k": 64.0,
+   "std_k": 17.98226080447061,
+   "adaptive_top1": 0.0614,
+   "adaptive_top1_ci": [
+    0.0548,
+    0.068
+   ],
+   "fixed_top1_at_equal_budget": 0.05857438437193632,
+   "fixed_top1_at_equal_budget_ci": [
+    0.05166612,
+    0.06508265
+   ],
+   "fixed_k_nearest_grid": 56.0,
+   "fixed_top1_nearest_grid": 0.05939999967813492,
+   "delta_pp": 0.2825615628063681,
+   "delta_pp_ci": [
+    -0.19045737499999998,
+    0.7660641375000001
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=6.5621",
+   "tau": 6.562097500228336,
+   "n": 5000,
+   "mean_k": 45.9698,
+   "median_k": 63.0,
+   "std_k": 21.116943149045035,
+   "adaptive_top1": 0.059,
+   "adaptive_top1_ci": [
+    0.0524,
+    0.065605
+   ],
+   "fixed_top1_at_equal_budget": 0.05861509917695075,
+   "fixed_top1_at_equal_budget_ci": [
+    0.051712321125,
+    0.065065855
+   ],
+   "fixed_k_nearest_grid": 48.0,
+   "fixed_top1_nearest_grid": 0.0575999990105629,
+   "delta_pp": 0.03849008230492473,
+   "delta_pp_ci": [
+    -0.5105479374999997,
+    0.5458277125
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=8.0244",
+   "tau": 8.024357055094505,
+   "n": 5000,
+   "mean_k": 37.9014,
+   "median_k": 35.0,
+   "std_k": 22.800475390657976,
+   "adaptive_top1": 0.0622,
+   "adaptive_top1_ci": [
+    0.0554,
+    0.06880499999999999
+   ],
+   "fixed_top1_at_equal_budget": 0.062187608231604095,
+   "fixed_top1_at_equal_budget_ci": [
+    0.0550686506,
+    0.068955496
+   ],
+   "fixed_k_nearest_grid": 40.0,
+   "fixed_top1_nearest_grid": 0.06159999966621399,
+   "delta_pp": 0.0012391768395902947,
+   "delta_pp_ci": [
+    -0.5828973799999996,
+    0.6506503000000001
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=9.8125",
+   "tau": 9.812458005295476,
+   "n": 5000,
+   "mean_k": 29.0142,
+   "median_k": 24.0,
+   "std_k": 22.406954241038648,
+   "adaptive_top1": 0.0624,
+   "adaptive_top1_ci": [
+    0.055395,
+    0.0698
+   ],
+   "fixed_top1_at_equal_budget": 0.060850710939057175,
+   "fixed_top1_at_equal_budget_ci": [
+    0.054047576125,
+    0.06765071
+   ],
+   "fixed_k_nearest_grid": 32.0,
+   "fixed_top1_nearest_grid": 0.061000000685453415,
+   "delta_pp": 0.15492890609428225,
+   "delta_pp_ci": [
+    -0.4697693875000003,
+    0.7681517749999993
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=11.9990",
+   "tau": 11.999008947957792,
+   "n": 5000,
+   "mean_k": 20.1846,
+   "median_k": 15.0,
+   "std_k": 19.69267180552197,
+   "adaptive_top1": 0.0578,
+   "adaptive_top1_ci": [
+    0.0516,
+    0.0644
+   ],
+   "fixed_top1_at_equal_budget": 0.05878768589021638,
+   "fixed_top1_at_equal_budget_ci": [
+    0.052178455,
+    0.065396915
+   ],
+   "fixed_k_nearest_grid": 24.0,
+   "fixed_top1_nearest_grid": 0.060600001364946365,
+   "delta_pp": -0.09876858902163818,
+   "delta_pp_ci": [
+    -0.6928141124999991,
+    0.4916002375
+   ],
+   "verdict": "indistinguishable"
+  },
+  {
+   "label": "tsc_tau=14.6728",
+   "tau": 14.672798156738281,
+   "n": 5000,
+   "mean_k": 12.9038,
+   "median_k": 5.5,
+   "std_k": 15.361645275165028,
+   "adaptive_top1": 0.058,
+   "adaptive_top1_ci": [
+    0.0514,
+    0.0646
+   ],
+   "fixed_top1_at_equal_budget": 0.05480506521910429,
+   "fixed_top1_at_equal_budget_ci": [
+    0.04846182633333333,
+    0.06112557333333333
+   ],
+   "fixed_k_nearest_grid": 12.0,
+   "fixed_top1_nearest_grid": 0.053599998354911804,
+   "delta_pp": 0.3194934780895713,
+   "delta_pp_ci": [
+    -0.2597535999999996,
+    1.0057583333333326
+   ],
+   "verdict": "indistinguishable"
+  }
+ ],
+ "bootstrap": {
+  "n_boot": 1000,
+  "seed": 0,
+  "ci_level": 0.95,
+  "paired": true,
+  "note": "每样本内重算 mean(k_i) 再对该固定档曲线插值 ⇒ 预算是配对的"
+ },
+ "oracle_upper_bound": {
+  "any_k_correct_rate": 0.2062,
+  "mean_min_k_all_images": 53.4236,
+  "mean_min_k_correct_only": 12.708050436469447,
+  "frac_images_needing_K": 0.7938,
+  "chance_top1": 0.01,
+  "note": "上界: 知道标签时每图最小需要多少 token; 不可实现, 只量化 TSC-TOI gap"
+ },
+ "E_C1_verdict": {
+  "primary_label": "tsc_tau=8.0244",
+  "primary_mean_k": 37.9014,
+  "primary_mean_k_over_K": 0.592209375,
+  "primary_adaptive_top1": 0.0622,
+  "primary_fixed_top1_at_equal_budget": 0.062187608231604095,
+  "primary_delta_pp": 0.0012391768395902947,
+  "primary_delta_pp_ci": [
+   -0.5828973799999996,
+   0.6506503000000001
+  ],
+  "primary_verdict": "indistinguishable",
+  "max_delta_pp_over_sweep": 0.4057919980585578,
+  "min_delta_pp_over_sweep": -0.09876858902163818,
+  "any_row_adaptive_better": false,
+  "any_row_fixed_better": false,
+  "decision_rule": "行判据: delta_pp >= +0.5 且 CI 下界 >0 ⇒ adaptive_better; <= -0.5 且 CI 上界 <0 ⇒ fixed_better; 否则 indistinguishable（PLAN §8 E-C1: 等平均 token 数下自适应 ≥ 固定 K 才算成立）",
+  "caveat": "分类线性探针 ≠ Phase 2 生成任务; 单种子; 见 honesty"
+ },
+ "honesty": [
+  "分类线性探针 ≠ Phase 2 生成任务: 这里只测 'z_s 前缀中类别可线性读出的信息', 不能替代 GOAL §2 的 caption/幻觉口径 (E-C2)。",
+  "等平均 token 数 (mean k) 口径: 自适应逐图 k_i 必须与 '平均 token 数相同' 的固定档比较, 不能与固定 K=64 或等最大 token 数比较; 插值存在格点误差, 故同时报最近格点值。",
+  "每档 probe 独立训练: 曲线非单调时先看各档 train top-1 (欠拟合/过拟合) 再谈科学结论。",
+  "单种子 (默认 seed 0): 只有 paired bootstrap CI 不跨 0 的差异可谈方向; <0.5 pp 不作结论。",
+  "TSC (重建 L1, 自监督) 与 TOI (分类) 不必然对齐; oracle 上界只量化 gap, 不是可实现策略。",
+  "--smoke 是管线证据: 合成数据 + 随机编码器, 无科学含义。"
+ ],
+ "tsc_interface": {
+  "canonical": "{\"per_image\":[{\"index\":i,\"filename\":str,\"path\":str,\"k\":int,\"step\":int}],\"k_grid\":[int],\"cum_z_s\":[int],\"tau\":float}",
+  "k_list": "[k0, k1, ...] 与 val 顺序一一对应（或 {\"k\":[...]}）",
+  "eadump": "E-A1 --dump_per_image json + --tsc_tau/--tsc_taus（本工具现场推 k_i）",
+  "match_priority": "path > filename > index(val 划分下标)",
+  "k_semantics": "k = 该图读入的 z_s 前缀长度; step → k 用 cum_z_s[step]"
+ }
+}

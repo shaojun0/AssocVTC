@@ -103,7 +103,7 @@ from dataclasses import dataclass, field, asdict
 import json
 import math
 import os
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -331,7 +331,8 @@ class LinearAttentionEncoder(nn.Module):
                             mode="linear", align_corners=False)
         return pos.transpose(1, 2)
 
-    def forward(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, pixel_values: Tensor,
+                return_seq: bool = False) -> Tuple[Tensor, ...]:
         x = pixel_values
         B, C, H, W = x.shape
         assert H % self.patch == 0 and W % self.patch == 0, \
@@ -346,6 +347,9 @@ class LinearAttentionEncoder(nn.Module):
         for blk in self.blocks:
             seq = blk(seq, h, w, n_prefix)
         seq = self.norm(seq)
+        if return_seq:
+            # E-B3: 额外回**末层 LayerNorm 后的 patch 段**（给 GrowthBlock 读; 默认关）
+            return seq[:, :1], seq[:, 1:1 + self.num_specials], seq[:, 1 + self.num_specials:]
         return seq[:, :1], seq[:, 1:1 + self.num_specials]
 
 
@@ -463,7 +467,8 @@ class StandardAttentionEncoder(nn.Module):
                             mode="linear", align_corners=False)
         return pos.transpose(1, 2)
 
-    def forward(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, pixel_values: Tensor,
+                return_seq: bool = False) -> Tuple[Tensor, ...]:
         x = pixel_values
         B, C, H, W = x.shape
         assert H % self.patch == 0 and W % self.patch == 0, \
@@ -478,6 +483,9 @@ class StandardAttentionEncoder(nn.Module):
         for blk in self.blocks:
             seq = blk(seq, h, w, n_prefix)
         seq = self.norm(seq)
+        if return_seq:
+            # E-B3: 额外回**末层 LayerNorm 后的 patch 段**（给 GrowthBlock 读; 默认关）
+            return seq[:, :1], seq[:, 1:1 + self.num_specials], seq[:, 1 + self.num_specials:]
         return seq[:, :1], seq[:, 1:1 + self.num_specials]
 
 
@@ -549,7 +557,9 @@ class StandardAttentionDecoder(nn.Module):
         nn.init.trunc_normal_(self.query_base, std=0.02)
         nn.init.trunc_normal_(self.query_pos, std=0.02)
 
-    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+    def forward(self, z_cls: Tensor, z_s: Tensor, mem_extra: Optional[Tensor] = None,
+                extra_per_step: int = 0, halt_target: Optional[Tensor] = None,
+                halt_quantile: float = 0.5) -> Tensor:
         assert z_cls.dim() == 3 and z_s.dim() == 3, \
             f"z_cls/z_s 须为 (B,·,D), got {tuple(z_cls.shape)}/{tuple(z_s.shape)}"
         assert z_cls.shape[1] == 1, f"z_cls 应为 1 列, got {z_cls.shape[1]}"
@@ -558,6 +568,12 @@ class StandardAttentionDecoder(nn.Module):
         assert z_cls.shape[0] == z_s.shape[0], "batch 不一致"
         mem = torch.cat([z_cls, z_s], dim=1)                # (B,1+K,D_enc)
         mem = self.mem_norm(self.mem_proj(mem))             # (B,1+K,D_dec)
+        if mem_extra is not None:
+            # E-B3 生长 token（已在 GrowthBlock 内带位置/步嵌入）直接接在 z_s 之后;
+            # 单步解码一次性读全量。halt_target 在单步（无 carry）下无意义, 忽略。
+            assert mem_extra.dim() == 3 and mem_extra.shape[2] == self.dim, \
+                f"mem_extra 须为 (B,M,{self.dim}), got {tuple(mem_extra.shape)}"
+            mem = torch.cat([mem, mem_extra.to(mem.dtype)], dim=1)
         B = mem.shape[0]
         tgt = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
         y = self.stack(tgt, mem)                            # (B,N,D_dec)
@@ -604,6 +620,141 @@ def step_windows(num_specials: int, steps, plan: str = "square",
             f"步 {t} 的读窗口 [{lo},{hi}] 为空 (K={num_specials}, plan={plan})"
         out.append((lo, hi))
     return out
+
+
+# ═══ E-B2 损失侧动态停机（P1 区域损失 / 软停机）═══
+#   与主线 `model_v2.region_slices` 同式（doc/2026-09-07/DESIGN_v2_region_loss.md §2.1）:
+#     region t = [⌊N·t/T⌋, ⌊N·(t+1)/T⌋)   t = 0..T−1
+#   互不相交、连续覆盖 [0,N)、大小差 ≤1、N≥T 时每区非空。
+#   全部「新增 + 默认关」: 默认 dh_mode=0 走原平权整图损失, 逐位不变。
+
+def region_slices(num_patches: int, num_steps: int) -> List[Tuple[int, int]]:
+    """把 N 个 patch 行按步数 T 均分成 T 个连续半开区间（整数除法, 无浮点误差）。"""
+    assert num_steps >= 1, f"num_steps={num_steps} 须 ≥1"
+    assert num_patches >= num_steps, \
+        f"region_slices 要求 N≥T（否则有空区 ⇒ mean=NaN）: N={num_patches}, T={num_steps}"
+    return [((num_patches * t) // num_steps, (num_patches * (t + 1)) // num_steps)
+            for t in range(num_steps)]
+
+
+def halt_keep_mask(err_prev: Tensor, quantile: float) -> Tensor:
+    """按**上一步逐 patch 误差**的**每图**分位给出"继续监督"掩码（软停机, E-B2 臂 3/4）。
+
+    `err_prev`: (B,N) 上一步的逐 patch 重建误差（调用方须已 detach）。
+    语义: `quantile=q` ⇒ 每图取误差的 q 分位阈值为 τ, **保留 err ≥ τ** 的 patch
+    （即"误差最大的 (1−q) 比例"继续参与监督; q=0.5 ⇒ 保留最大 50%）。
+    q≤0 ⇒ 全保留（退化 = 不平权掩码）; q≥1 ⇒ 只保留每图最大误差的 patch。
+    返回 (B,N) bool。分位按图算（不跨 batch 混）, 与"每图自适应"口径一致。
+    """
+    assert err_prev.dim() == 2, f"err_prev 须为 (B,N), got {tuple(err_prev.shape)}"
+    q = float(min(max(float(quantile), 0.0), 1.0))
+    if q <= 0.0:
+        return torch.ones_like(err_prev, dtype=torch.bool)
+    e = err_prev.detach().float()
+    thr = torch.quantile(e, q, dim=1, keepdim=True)          # (B,1) 每图分位
+    return e >= thr
+
+
+def parse_loss_weights(spec) -> Tuple[float, ...]:
+    """把 CLI/配置里的权重写法统一解析成 tuple：支持逗号或空格分隔的字符串/列表。
+
+    空（None/""/[]）⇒ `()` = 平权（默认路径）; 例: ``"2.5,2,1.5,1.25,1,1,1,1"``。
+    """
+    if spec is None:
+        return ()
+    if isinstance(spec, (int, float)):
+        return (float(spec),)
+    if isinstance(spec, str):
+        spec = spec.replace(",", " ").split()
+    out: List[float] = []
+    for v in spec:
+        for tok in str(v).replace(",", " ").split():
+            out.append(float(tok))
+    return tuple(out)
+
+
+class GrowthBlock(nn.Module):
+    """E-B3 方案 a: **共享的生长块**（读侧生长, ALIT 式自适应记忆）。
+
+    机制（每步新增 `num_grow` 个生长 token）::
+
+        L_it = GrowthBlock([L_{i(t-1)} ; patch_feat])          # 共享权重, 每步调一次
+        L_all = cat([L_1, …, L_it])                             # 累计
+        解码器读集合 = [z_cls ; z_s ; L_1 … L_it]               # 逐步变长
+
+    · `patch_feat` = 编码器**末层 LayerNorm 后**的 patch 段（N 个 token, 维度 enc_dim）,
+      经 `patch_proj` 投到 refiner_dim;
+    · `L_{i(t-1)}` = 之前已生成的生长 token（第一步为 None）⇒ 新 token 既读像素特征
+      也读已有记忆; 每步用可学习的 `grow_queries` + `step_embed` 作 query;
+    · `num_layers` 层 cross-attention（每层: cross-attn + FFN, pre-norm）+ 输出投影到 dec_dim。
+
+    **参数量（d=256, 1 层）≈ 1.05 M; 2 层 ≈ 1.84 M**（见 __main__ §11 实测断言）。
+    全部 key 只在本模块 ⇒ 旧 ckpt（refiner 关）strict 载入不受影响。
+    """
+
+    def __init__(self, dim: int = 256, heads: int = 8, mlp_ratio: float = 4.0,
+                 patch_dim: int = 448, num_grow: int = 16, out_dim: int = 512,
+                 num_layers: int = 1, max_steps: int = 32):
+        super().__init__()
+        assert dim % heads == 0, f"refiner_dim={dim} 须被 heads={heads} 整除"
+        self.dim, self.num_grow, self.out_dim = dim, num_grow, out_dim
+        self.patch_proj = nn.Linear(patch_dim, dim)
+        self.grow_queries = nn.Parameter(torch.zeros(1, num_grow, dim))
+        self.step_embed = nn.Parameter(torch.zeros(max_steps, dim))
+        hidden = int(dim * mlp_ratio)
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "norm_q": nn.LayerNorm(dim),
+                "norm_kv": nn.LayerNorm(dim),
+                "cross": nn.MultiheadAttention(dim, heads, batch_first=True,
+                                               dropout=0.0),
+                "norm_ff": nn.LayerNorm(dim),
+                "ffn": nn.Sequential(nn.Linear(dim, hidden), nn.GELU(),
+                                     nn.Linear(hidden, dim)),
+            }) for _ in range(int(num_layers))])
+        self.norm_out = nn.LayerNorm(dim)
+        self.out_proj = nn.Linear(dim, out_dim)
+        nn.init.trunc_normal_(self.grow_queries, std=0.02)
+
+    def to_dec(self, hidden: Tensor) -> Tensor:
+        """内部 refiner_dim 的生长 token → 解码器维度（读出集合用）。"""
+        return self.out_proj(self.norm_out(hidden))
+
+    def forward(self, latents: Optional[Tensor], patch_feats: Tensor,
+                step_idx: int = 0) -> Tensor:
+        """`latents` (B,M,dim) 或 None（第一步; **内部 refiner_dim**, 即上一步
+        `forward` 的返回, 不是 `to_dec` 之后的）; `patch_feats` (B,N,patch_dim);
+        返回本步新增的 (B, num_grow, **dim**) 生长 token（内部表示）。
+        读出集合用的解码器维度表示请再调 `to_dec()`
+        （见 `SRPhase1LinAttn._grow_tokens`）。"""
+        pf = self.patch_proj(patch_feats)
+        ctx = pf if latents is None else torch.cat([latents, pf], dim=1)
+        si = min(int(step_idx), self.step_embed.shape[0] - 1)
+        q = (self.grow_queries + self.step_embed[si]).expand(pf.shape[0], -1, -1)
+        for layer in self.layers:
+            h = q + layer["cross"](layer["norm_q"](q), layer["norm_kv"](ctx),
+                                   layer["norm_kv"](ctx), need_weights=False)[0]
+            q = h + layer["ffn"](layer["norm_ff"](h))
+        return q
+
+
+def _step_mem_with_extra(mem: Tensor, lo: int, hi: int, base_len: int,
+                         mem_extra: Optional[Tensor], extra_per_step: int,
+                         step_idx: int) -> Tensor:
+    """循环解码器的单步 memory = `mem[lo:hi+1]` + 到本步为止已生成的生长 token。
+
+    `extra_per_step>0` ⇒ 第 si 步读前 `extra_per_step·(si+1)` 个生长 token（累计生长）;
+    `extra_per_step<=0` ⇒ 每步都读全量（用于非逐步对齐的调用）。默认 `mem_extra=None`
+    ⇒ 逐位返回原 `mem[:, lo:hi+1]`（旧路径）。
+    """
+    step_mem = mem[:, lo:hi + 1]
+    if mem_extra is None:
+        return step_mem
+    if int(extra_per_step) > 0:
+        n_ex = min(int(extra_per_step) * (int(step_idx) + 1), mem_extra.shape[1])
+    else:
+        n_ex = mem_extra.shape[1]
+    return torch.cat([step_mem, mem[:, base_len:base_len + n_ex]], dim=1)
 
 
 class RecurrentOutputQueryDecoder(nn.Module):
@@ -659,22 +810,47 @@ class RecurrentOutputQueryDecoder(nn.Module):
         self.windows = step_windows(num_specials, self.steps, step_plan, self.block)
         self.last_windows = self.windows
 
-    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+    def forward(self, z_cls: Tensor, z_s: Tensor, mem_extra: Optional[Tensor] = None,
+                extra_per_step: int = 0, halt_target: Optional[Tensor] = None,
+                halt_quantile: float = 0.5) -> Tensor:
         assert z_cls.dim() == 3 and z_s.dim() == 3, "z_cls/z_s 须为 (B,·,D)"
         assert z_cls.shape[1] == 1 and z_s.shape[1] == self.num_specials, \
             f"z_cls 应 1 列 / z_s 应 {self.num_specials} 列"
         mem = torch.cat([z_cls, z_s], dim=1)                # (B,1+K,D_enc)
         mem = self.mem_norm(self.mem_proj(mem)) + self.mem_pos
+        base_len = mem.shape[1]
+        if mem_extra is not None:
+            assert mem_extra.dim() == 3 and mem_extra.shape[2] == self.dim, \
+                f"mem_extra 须为 (B,M,{self.dim}), got {tuple(mem_extra.shape)}"
+            mem = torch.cat([mem, mem_extra.to(mem.dtype)], dim=1)
         B = mem.shape[0]
         base = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
         Y = base
-        outs = []
-        for lo, hi in self.windows:
-            Y = self.stack(Y, mem[:, lo:hi + 1])            # 只读本步那块 memory
-            outs.append(Y)
+        Ys, pixs, halt_masks = [], [], []
+        for si, (lo, hi) in enumerate(self.windows):
+            Y = self.stack(Y, _step_mem_with_extra(
+                mem, lo, hi, base_len, mem_extra, extra_per_step, si))  # 只读本步那块
+            Ys.append(Y)
+            if halt_target is not None:
+                # E-B2 臂 4: 本步像素预测 → 逐 patch 误差 ⇒ "已完成" patch 的 carry 行
+                # 做 **stop-gradient**（切断它们经自注意力/交叉注意力污染后步的梯度路径）
+                pix_t = self.pixel_head(self.norm_out(Y))
+                pixs.append(pix_t)
+                keep = halt_keep_mask(
+                    (pix_t - halt_target).abs().mean(-1).detach(), halt_quantile)
+                halt_masks.append(keep)
+            else:
+                pix_t = None
             Y = self.query_base.unsqueeze(0) + Y            # carry = BPTT（不 detach）
-        Ys = torch.stack(outs, dim=1)                       # (B,T,N,dim)
+            if halt_target is not None:
+                Y = torch.where(halt_masks[-1].unsqueeze(-1), Y, Y.detach())
+        self.last_Y_list = list(Ys)                         # 每步 carry 前的 Y（逐步分析/自检）
+        Ys = torch.stack(Ys, dim=1)                         # (B,T,N,dim)
         self.last_Y = Ys
+        self.last_halt_masks = halt_masks or None
+        if halt_target is not None:
+            self.last_pix_per_step = torch.stack(pixs, dim=1)
+            return self.last_pix_per_step                   # (B,T,N,patch_px)
         return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
 
 
@@ -817,8 +993,15 @@ class LinearAttentionDecoder(nn.Module):
                 y = layer(y, mem)
         return y
 
-    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+    def forward(self, z_cls: Tensor, z_s: Tensor, mem_extra: Optional[Tensor] = None,
+                extra_per_step: int = 0, halt_target: Optional[Tensor] = None,
+                halt_quantile: float = 0.5) -> Tensor:
         _, mem = self._prep(z_cls, z_s)
+        if mem_extra is not None:
+            # E-B3 生长 token（单步一次性读全量; halt_target 在单步下无 carry 可切, 忽略）
+            assert mem_extra.dim() == 3 and mem_extra.shape[2] == self.dim, \
+                f"mem_extra 须为 (B,M,{self.dim}), got {tuple(mem_extra.shape)}"
+            mem = torch.cat([mem, mem_extra.to(mem.dtype)], dim=1)
         B = mem.shape[0]
         tgt = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
         return self.pixel_head(self.norm_out(self._run(tgt, mem)))
@@ -851,19 +1034,41 @@ class LinearRecurrentDecoder(LinearAttentionDecoder):
         self.windows = step_windows(num_specials, self.steps, step_plan, self.block)
         self.last_windows = self.windows
 
-    def forward(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+    def forward(self, z_cls: Tensor, z_s: Tensor, mem_extra: Optional[Tensor] = None,
+                extra_per_step: int = 0, halt_target: Optional[Tensor] = None,
+                halt_quantile: float = 0.5) -> Tensor:
         _, mem = self._prep(z_cls, z_s)
         mem = mem + self.mem_pos
+        base_len = mem.shape[1]
+        if mem_extra is not None:
+            assert mem_extra.dim() == 3 and mem_extra.shape[2] == self.dim, \
+                f"mem_extra 须为 (B,M,{self.dim}), got {tuple(mem_extra.shape)}"
+            mem = torch.cat([mem, mem_extra.to(mem.dtype)], dim=1)
         B = mem.shape[0]
         base = (self.query_base + self.query_pos).unsqueeze(0).expand(B, -1, -1)
         Y = base
-        outs = []
-        for lo, hi in self.windows:
-            Y = self._run(Y, mem[:, lo:hi + 1])             # 只读本步那块 memory
-            outs.append(Y)
+        Ys, pixs, halt_masks = [], [], []
+        for si, (lo, hi) in enumerate(self.windows):
+            Y = self._run(Y, _step_mem_with_extra(
+                mem, lo, hi, base_len, mem_extra, extra_per_step, si))
+            Ys.append(Y)
+            if halt_target is not None:
+                # E-B2 臂 4（全线性臂）: 已完成 patch 的 carry 行 stop-gradient
+                pix_t = self.pixel_head(self.norm_out(Y))
+                pixs.append(pix_t)
+                keep = halt_keep_mask(
+                    (pix_t - halt_target).abs().mean(-1).detach(), halt_quantile)
+                halt_masks.append(keep)
             Y = self.query_base.unsqueeze(0) + Y            # carry = BPTT（不 detach）
-        Ys = torch.stack(outs, dim=1)                       # (B,T,N,dim)
+            if halt_target is not None:
+                Y = torch.where(halt_masks[-1].unsqueeze(-1), Y, Y.detach())
+        self.last_Y_list = list(Ys)                         # 每步 carry 前的 Y（逐步分析/自检）
+        Ys = torch.stack(Ys, dim=1)                         # (B,T,N,dim)
         self.last_Y = Ys
+        self.last_halt_masks = halt_masks or None
+        if halt_target is not None:
+            self.last_pix_per_step = torch.stack(pixs, dim=1)
+            return self.last_pix_per_step                   # (B,T,N,patch_px)
         return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
 
 
@@ -906,6 +1111,27 @@ class LinAttnConfig:
     dec_mlp_ratio: float = 4.0
     pixel_hidden: int = 1024
     dropout: float = 0.0
+    # ── E-B1 逐迭代损失权重（ALIT 配方; 空 = 平权, 默认路径逐位不变）──
+    #   长度须 = T（循环步数）或 1（广播）; 例: ALIT 递减 "2.5,2,1.5,1.25,1,1,1,1"。
+    #   loss = Σ_t w_t·L1_t / Σ_t w_t（加权平均, 保持与平权同量级 ⇒ lr 不用改）。
+    loss_weights: Tuple[float, ...] = ()
+    # ── E-B2 损失侧动态停机（0=关=现状）──
+    #   1 = 硬区域掩码（第 t 步只监督 region_t = [(N·t)//T,(N·(t+1))//T) 行区）;
+    #   2 = 软停机（按**上一步**逐 patch 误差的每图 dh_quantile 分位, 保留误差大的 patch）;
+    #   3 = 2 + 已完成 patch 的 carry **stop-gradient**。
+    #   dh_quantile: 0.5 = 保留误差最大的 50% patch 继续参与监督（仅 2/3 有效）。
+    dh_mode: int = 0
+    dh_quantile: float = 0.5
+    # ── E-B4 随机预算采样: >0 时每步随机抽 2..sample_grad_iters 个迭代算 loss ──
+    #   0 = 全步平权（现状）。其余步照常前向（BPTT 链不变）, 只是不进损失。
+    sample_grad_iters: int = 0
+    # ── E-B3 读侧生长（GrowthBlock; refiner_layers=0 即关 = 现状）──
+    refiner_layers: int = 0        # 1–2 层 cross-attention（共享, 每步调一次）
+    refiner_dim: int = 256         # GrowthBlock 内部维度（d=256 ⇒ 1 层≈1.05M, 2 层≈1.84M）
+    refiner_heads: int = 8
+    refiner_mlp_ratio: float = 4.0
+    refiner_grow: int = 16         # 每步新增的生长 token 数
+    refiner_steps: int = 0         # 0 = 跟随解码器步数 T
 
     @property
     def num_patches(self) -> int:
@@ -974,6 +1200,35 @@ class SRPhase1LinAttn(nn.Module):
             raise AssertionError(
                 f"未知 dec_attn={cfg.dec_attn!r}; 合法值: ['std', 'linear']")
 
+        # ── E-B2 / E-B1 / E-B4 开关（全是普通 python 属性, **不进 state_dict**）──
+        self.loss_weights = parse_loss_weights(cfg.loss_weights)
+        self.dh_mode = int(cfg.dh_mode)
+        assert self.dh_mode in (0, 1, 2, 3), \
+            f"dh_mode={cfg.dh_mode} 越界（合法 0/1/2/3）"
+        self.dh_quantile = float(cfg.dh_quantile)
+        assert 0.0 <= self.dh_quantile <= 1.0, \
+            f"dh_quantile={cfg.dh_quantile} 越界（须 ∈[0,1]）"
+        self.sample_grad_iters = int(cfg.sample_grad_iters)
+        assert self.sample_grad_iters >= 0, "sample_grad_iters 须 ≥0"
+        self.refiner_grow = int(cfg.refiner_grow)
+        self.refiner_steps = int(cfg.refiner_steps)          # 0 = 跟随 T
+        self.refiner = self._build_refiner(cfg)               # None = 关（默认）
+        if self.refiner is not None:
+            assert not self.refiner_steps or self.refiner_steps >= 1
+
+    @staticmethod
+    def _build_refiner(cfg: "LinAttnConfig") -> Optional[nn.Module]:
+        """E-B3: `refiner_layers=0`（默认）⇒ 返回 None ⇒ 默认路径逐位不变。"""
+        n_layers = int(cfg.refiner_layers)
+        if n_layers <= 0:
+            return None
+        assert n_layers in (1, 2), \
+            f"refiner_layers={n_layers} 只支持 1–2 层（1–2M 预算, 见 PLAN §4 E-B3）"
+        return GrowthBlock(dim=int(cfg.refiner_dim), heads=int(cfg.refiner_heads),
+                           mlp_ratio=float(cfg.refiner_mlp_ratio),
+                           patch_dim=int(cfg.enc_dim), num_grow=int(cfg.refiner_grow),
+                           out_dim=int(cfg.dec_dim), num_layers=n_layers)
+
     @staticmethod
     def _build_encoder(cfg: "LinAttnConfig") -> nn.Module:
         """按 `cfg.enc_attn` 选编码器（消融开关; 默认 "linear" = 昨日臂, 行为不变）。"""
@@ -998,25 +1253,116 @@ class SRPhase1LinAttn(nn.Module):
     def encode(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
         return self.encoder(pixel_values)
 
-    def decode(self, z_cls: Tensor, z_s: Tensor, pixel_values: Tensor) -> dict:
+    # ── E-B3 生长 token 序列（共享 GrowthBlock, 每步新增 refiner_grow 个）──
+    def _grow_tokens(self, patch_feats: Tensor, n_steps: int) -> Tensor:
+        latents, outs = None, []
+        for si in range(int(n_steps)):
+            g = self.refiner(latents, patch_feats, si)          # (B,grow,dim) 内部表示
+            latents = g if latents is None else torch.cat([latents, g], dim=1)
+            outs.append(self.refiner.to_dec(g))                 # (B,grow,dec_dim) 读出集合
+        return torch.cat(outs, dim=1)                            # (B,T*grow,dec_dim)
+
+    # ── E-B2/E-B1 损失侧口径（全部默认关 ⇒ 走原式, 逐位不变）──
+    def _weight_tensor(self, num_steps: int, ref: Tensor) -> Optional[Tensor]:
+        """`loss_weights` → (T,) float 张量; 空 ⇒ None（平权）。长度 1 时广播到 T。"""
+        lw = tuple(float(x) for x in self.loss_weights)
+        if not lw:
+            return None
+        if len(lw) == 1:
+            lw = lw * int(num_steps)
+        assert len(lw) == int(num_steps), \
+            f"loss_weights 长度 {len(lw)} != T={int(num_steps)}（可为 1 = 广播）"
+        w = torch.tensor(lw, dtype=ref.dtype, device=ref.device)
+        assert float(w.sum()) > 0, "loss_weights 全为 0 ⇒ 无法归一化"
+        return w
+
+    def _aggregate_loss(self, per_step: Tensor) -> Tensor:
+        """把逐步 L1 聚合成标量: 默认 `mean`; 支持 loss_weights（加权平均）与
+        E-B4 `sample_grad_iters`（每步随机抽 2..N 个迭代算 loss）。"""
+        T = int(per_step.shape[0])
+        idx = None
+        if self.sample_grad_iters > 0 and T > 1:
+            lo = min(2, self.sample_grad_iters)
+            k = int(torch.randint(lo, self.sample_grad_iters + 1, (1,),
+                                  device=per_step.device).item())
+            k = min(max(k, 1), T)
+            idx = torch.randperm(T, device=per_step.device)[:k]
+        sel = per_step if idx is None else per_step[idx]
+        w = self._weight_tensor(T, per_step)
+        ws = None if w is None else (w if idx is None else w[idx])
+        if ws is None:
+            return sel.mean()
+        return (sel * ws).sum() / ws.sum().clamp_min(1e-12)
+
+    def _dh_step_loss(self, pix: Tensor, target_pix: Tensor) -> Tensor:
+        """E-B2 分步损失（dh_mode≠0）。返回 (T,) 可微逐步损失。
+
+        · 1 硬区域掩码: 第 t 步只在自己 region_t 行区上监督（P1 原设计）;
+        · 2 软停机: 第 t≥1 步只监督**上一步误差** ≥ 每图 dh_quantile 分位的 patch
+          （分位/掩码全部 detach）; 第 0 步全图;
+        · 3 = 2（carry 的 stop-gradient 由解码器在循环内实现, 见 decoder.forward）。
+        """
+        B, T, N, pp = pix.shape
+        per_patch = (pix - target_pix.unsqueeze(1)).abs().mean(dim=-1)   # (B,T,N)
+        if self.dh_mode == 1:
+            return torch.stack([
+                per_patch[:, t, lo:hi].mean()
+                for t, (lo, hi) in enumerate(region_slices(N, T))])
+        losses = []
+        for t in range(T):
+            if t == 0:
+                keep = torch.ones(B, N, dtype=per_patch.dtype, device=per_patch.device)
+            else:
+                keep = halt_keep_mask(per_patch[:, t - 1].detach(),
+                                      self.dh_quantile).to(per_patch.dtype)
+            losses.append((per_patch[:, t] * keep).sum() / keep.sum().clamp_min(1.0))
+        return torch.stack(losses)
+
+    def decode(self, z_cls: Tensor, z_s: Tensor, pixel_values: Tensor,
+               patch_feats: Optional[Tensor] = None) -> dict:
         """解码器 + 像素头 + 像素 L1（**各步直接预测平权**, 与主线同口径）。
 
         单步版（dec_recurrent=False）: `pix` = (B,N,pp) → 补 |T|=1 维,
         损失与改造前**逐位相同**（T=1 的平权 = 原来的单步 L1）。
         循环版: `pix` = (B,T,N,pp), 每步各自直接预测整图,
         `loss = mean_t L1(Y_t, target)`, `F_hat = Y_pix[:, -1]`（末步）。
-        额外返回 `step_l1`(T,) = 每一步在**归一化空间**的 L1（逐步分析用）。
+        额外返回 `step_l1`(T,) = 每一步在**归一化空间**的 L1（逐步分析用）;
+        默认路径（dh_mode=0 / loss_weights 空 / sample_grad_iters=0 / refiner 关）
+        与改造前逐位相同。
+
+        `patch_feats`: 仅当 refiner 开时由 `forward` 传入（编码器末层 patch 段）;
+        GrowthBlock 在**此处**生成生长 token ⇒ 解码器 memory = [z_cls; z_s; L_1..L_it]。
         """
         B, C, H, W = pixel_values.shape
-        pix = self.decoder(z_cls, z_s)                       # (B,N,pp) 或 (B,T,N,pp)
+        target_pix = image_to_patches(pixel_values, self.patch)
+        # E-B3: 生长 token（共享 GrowthBlock, 每步新增 refiner_grow 个）
+        mem_extra, extra_per_step = None, 0
+        if self.refiner is not None:
+            assert patch_feats is not None, \
+                "refiner 已开但 decode() 未收到 patch_feats —— 请走 forward()（或显式传入）"
+            T_dec = len(self.decoder.steps) if self.recurrent else 1
+            n_steps = self.refiner_steps if self.refiner_steps > 0 else T_dec
+            mem_extra = self._grow_tokens(patch_feats, n_steps)
+            # 逐步骤增读取（累计到本步为止）; `refiner_steps < T` 时后续步饱和读全量
+            extra_per_step = self.refiner_grow
+        # E-B2 臂 4: stop-gradient 需要解码器在循环内看到每步像素误差
+        halt_target = (target_pix.detach()
+                       if (self.dh_mode == 3 and self.recurrent) else None)
+        pix = self.decoder(z_cls, z_s, mem_extra=mem_extra,
+                           extra_per_step=extra_per_step,
+                           halt_target=halt_target, halt_quantile=self.dh_quantile)
         if pix.dim() == 3:
             pix = pix.unsqueeze(1)                           # (B,1,N,pp)
-        target_pix = image_to_patches(pixel_values, self.patch)
-        per_step = F.l1_loss(pix, target_pix.unsqueeze(1).expand_as(pix),
-                             reduction="none").mean(dim=(0, 2, 3))   # (T,)
+        if self.dh_mode == 0:
+            # ★默认路径（逐位不变）: 平权全图逐步 L1
+            per_step = F.l1_loss(pix, target_pix.unsqueeze(1).expand_as(pix),
+                                 reduction="none").mean(dim=(0, 2, 3))   # (T,)
+        else:
+            per_step = self._dh_step_loss(pix, target_pix)
+        loss = self._aggregate_loss(per_step)
         F_pix = pix[:, -1]                                   # 末步 = F_hat
         recon = F.l1_loss(F_pix, target_pix)
-        return {"loss": per_step.mean(), "recon": recon, "F_hat": F_pix,
+        return {"loss": loss, "recon": recon, "F_hat": F_pix,
                 "Y_pix": pix, "target_pix": target_pix,
                 "step_l1": per_step.detach()}
 
@@ -1025,17 +1371,24 @@ class SRPhase1LinAttn(nn.Module):
         B, C, H, W = x.shape
         assert H == self.img_size and W == self.img_size, \
             f"本实验版固定 {self.img_size}x{self.img_size} 输入, got {H}x{W}"
+        if self.refiner is not None:
+            # E-B3: 编码器额外回末层 patch 段给 GrowthBlock（默认关 ⇒ 走原两元组）
+            z_cls, z_s, patch_feats = self.encoder(x, return_seq=True)
+            return self.decode(z_cls, z_s, x, patch_feats=patch_feats)
         z_cls, z_s = self.encode(x)
         return self.decode(z_cls, z_s, x)
 
-    # ── 参数统计（编码器/解码器分开, 用于"同等体量"核对）──
+    # ── 参数统计（编码器/解码器/生长块分开, 用于"同等体量"核对）──
     def count_params(self) -> dict:
         def n(m):
             return sum(p.numel() for p in m.parameters())
         enc, dec = n(self.encoder), n(self.decoder)
-        return {"encoder": enc, "decoder": dec, "total": enc + dec,
+        ref = n(self.refiner) if self.refiner is not None else 0
+        return {"encoder": enc, "decoder": dec, "refiner": ref,
+                "total": enc + dec + ref,
                 "enc_M": round(enc / 1e6, 3), "dec_M": round(dec / 1e6, 3),
-                "total_M": round((enc + dec) / 1e6, 3),
+                "refiner_M": round(ref / 1e6, 3),
+                "total_M": round((enc + dec + ref) / 1e6, 3),
                 "enc_dec_ratio": round(dec / enc, 4)}
 
     @torch.no_grad()
@@ -1515,6 +1868,158 @@ if __name__ == "__main__":
     assert m_def3.count_params()["decoder"] == 31173376
     print(f"    默认回归: dec_attn='std' → {type(m_def2.decoder).__name__} "
           f"{m_def2.count_params()['decoder']:,} 参数 不变 OK")
+
+    print("[11] ★ALIT 自适应实验开关（E-B1 权重 / E-B2 停机 / E-B3 生长块 / E-B4 采样）")
+    # 11a. 权重解析 + region_slices 性质（500 组随机 (N,T) 扫描）
+    assert parse_loss_weights(None) == () and parse_loss_weights("") == ()
+    assert parse_loss_weights("2.5,2,1.5") == (2.5, 2.0, 1.5)
+    assert parse_loss_weights(["2.5 2", "1.5"]) == (2.5, 2.0, 1.5)
+    import random as _rnd
+    import itertools as _it
+    _rnd.seed(0)
+    for _ in range(500):
+        Nn, Tt = _rnd.randint(1, 300), 0
+        Tt = _rnd.randint(1, Nn)
+        rs = region_slices(Nn, Tt)
+        assert rs[0][0] == 0 and rs[-1][1] == Nn, (Nn, Tt, rs)
+        assert all(rs[i][1] == rs[i + 1][0] for i in range(Tt - 1))
+        assert all(b - a >= 1 for a, b in rs)
+        assert max(b - a for a, b in rs) - min(b - a for a, b in rs) <= 1
+    print("    parse_loss_weights + region_slices(500 组随机 N,T): 不相交/覆盖/非空/"
+          "大小差≤1 全部成立 OK")
+
+    _base = dict(img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+                 enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+                 dec_recurrent=True, dec_steps="1,4")
+    xw = torch.randn(2, 3, 64, 64)
+
+    # 11b. --loss_weights: 加权平均 == 手工值; 空 = 平权（默认路径逐位不变）
+    ow = SRPhase1LinAttn(LinAttnConfig(**_base, loss_weights=(1.0, 3.0)))(xw)
+    want_w = (ow["step_l1"][0] * 1.0 + ow["step_l1"][1] * 3.0) / 4.0
+    assert torch.allclose(ow["loss"], want_w), (float(ow["loss"]), float(want_w))
+    op = SRPhase1LinAttn(LinAttnConfig(**_base))(xw)
+    assert torch.equal(op["loss"], op["step_l1"].mean()), "空 loss_weights 未走原平权路径"
+    assert ow["loss"].shape == op["loss"].shape == (), "loss 形状应为标量"
+    print(f"    loss_weights=(1,3): loss={float(ow['loss']):.6f} == 手工加权 "
+          f"{float(want_w):.6f} OK; 空 ⇒ 平权 {float(op['loss']):.6f} 逐位一致 OK")
+
+    # 11c. --dh_mode 四档: 前向/反向有限; 臂 1 == 手工区域行区均值
+    for dm in (0, 1, 2, 3):
+        md = SRPhase1LinAttn(LinAttnConfig(**_base, dh_mode=dm, dh_quantile=0.5))
+        md.train()
+        od = md(xw)
+        assert od["Y_pix"].shape == (2, 2, 16, 768), od["Y_pix"].shape
+        assert torch.isfinite(od["loss"])
+        od["loss"].backward()
+        bad = [k for k, p in md.named_parameters()
+               if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())]
+        assert not bad, f"dh_mode={dm} 有参数无梯度/非有限: {bad[:5]}"
+    od1 = SRPhase1LinAttn(LinAttnConfig(**_base, dh_mode=1))(xw)
+    pp_err = (od1["Y_pix"] - od1["target_pix"].unsqueeze(1)).abs().mean(-1)
+    for t, (lo, hi) in enumerate(region_slices(16, 2)):
+        assert torch.allclose(od1["step_l1"][t], pp_err[:, t, lo:hi].mean().detach()), t
+    print("    dh_mode 0/1/2/3 前向+反向全部有限 OK; 臂1(硬区域掩码) == "
+          "region_slices 行区均值 OK")
+
+    # 11c-2. 臂 3 的 stop-grad 结构: 已完成 patch 的 carry 行梯度**精确为 0**
+    dec_h = RecurrentOutputQueryDecoder(
+        enc_dim=32, dim=32, depth=2, heads=4, patch=8, num_patches=16,
+        num_specials=8, pixel_hidden=32, steps=[1, 4])
+    dec_h.train()
+    ph = dec_h(torch.randn(2, 1, 32), torch.randn(2, 8, 32),
+               halt_target=torch.randn(2, 16, 3 * 8 * 8), halt_quantile=0.5)
+    keep0 = dec_h.last_halt_masks[0]
+    assert keep0.shape == (2, 16) and ph.shape[1] == 2
+    # 第 0 步 carry 行的 stop-grad 结构: 已完成 patch 的行 detach ⇒ 对第 1 步梯度精确 0
+    g = torch.autograd.grad(dec_h.last_Y_list[1].sum(), dec_h.last_Y_list[0],
+                            retain_graph=True)[0]
+    done = ~keep0
+    assert done.any() and keep0.any(), "halt 掩码退化（全保留或全丢弃）"
+    assert float(g[done].abs().max()) == 0.0, "已完成 patch 的 carry 未 stop-grad"
+    assert float(g[keep0].abs().max()) > 0.0, "保留 patch 的 carry 梯度为 0（异常）"
+    assert 0.3 <= float(keep0.float().mean()) <= 0.7, float(keep0.float().mean())
+    print("    dh_mode=3 stop-grad: 已完成 patch 的 carry 行对后步梯度精确 0、"
+          "保留行 >0 OK; halt 掩码≈50% 保留 OK")
+
+    # 11d. --sample_grad_iters: loss 必须等于"某个 2..N 迭代子集"的均值
+    _base4 = dict(_base, num_specials=16, dec_steps="1,4,9,16")
+    m_sg = SRPhase1LinAttn(LinAttnConfig(**_base4, sample_grad_iters=4))
+    per_ref = m_sg(xw)["step_l1"]
+    assert per_ref.shape == (4,), per_ref.shape
+    cands = [float(per_ref[list(s)].mean()) for k in (2, 3, 4)
+             for s in _it.combinations(range(4), k)]
+    # 容差 1e-4: 子集 mean 的加法顺序与候选(升序)不同 ⇒ fp32 结合律差 ~1e-5
+    hits = sum(any(abs(float(m_sg(xw)["loss"]) - c) < 1e-4 for c in cands)
+               for _ in range(15))
+    assert hits >= 10, f"sample_grad_iters 的 loss 不在子集均值集合内: {hits}/15"
+    m_sg.sample_grad_iters = 0                                  # 关掉采样 ⇒ 逐步 L1 应不变
+    assert torch.equal(m_sg(xw)["step_l1"], per_ref), "采样改变了逐步 L1（不应）"
+    m_sg.sample_grad_iters = 4
+    m_sg(xw)["loss"].backward()
+    print(f"    sample_grad_iters=4: 15 次抽样 loss 均落在 2..4 迭代子集均值集合内 "
+          f"({hits}/15) OK; 采样不改变逐步 L1 OK; 反向通 OK")
+
+    # 11e. --refiner_*: GrowthBlock 参数量预算 + 读出集合形状 + 端到端反传
+    n_gb = {}
+    for L in (1, 2):
+        gb = GrowthBlock(dim=256, heads=8, mlp_ratio=4.0, patch_dim=448,
+                         num_grow=16, out_dim=512, num_layers=L)
+        n_gb[L] = sum(p.numel() for p in gb.parameters())
+        assert 1.0e6 <= n_gb[L] <= 2.0e6, f"refiner_layers={L} 参数量 {n_gb[L]} 不在 1–2M"
+        pf = torch.randn(2, 16, 448)
+        g0 = gb(None, pf, 0)
+        assert g0.shape == (2, 16, 256), g0.shape          # 内部 refiner_dim
+        g1 = gb(g0, pf, 1)                                 # 第二步读已有记忆
+        assert g1.shape == (2, 16, 256)
+        assert gb.to_dec(g0).shape == (2, 16, 512)         # 读出集合用 dec_dim
+    mem_toy, extra_toy = torch.randn(2, 16, 8), torch.randn(2, 12, 8)
+    for si in range(3):
+        sm = _step_mem_with_extra(mem_toy, 0, 3, 4, extra_toy, 4, si)
+        assert sm.shape[1] == 4 + 4 * (si + 1), sm.shape   # 累计读集合 4/8/12……
+    assert _step_mem_with_extra(mem_toy, 0, 3, 4, None, 0, 0).shape[1] == 4
+    # refiner_steps < T 时后续步**饱和**读全量（不越界）
+    assert _step_mem_with_extra(mem_toy, 0, 3, 4, extra_toy[:, :4], 4, 5).shape[1] == 8
+    for da, rec in (("std", True), ("linear", True), ("std", False),
+                    ("linear", False)):
+        mr = SRPhase1LinAttn(LinAttnConfig(
+            img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+            enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4, pixel_hidden=128,
+            dec_recurrent=rec, dec_attn=da, refiner_layers=1, refiner_dim=64,
+            refiner_heads=4, refiner_grow=4))
+        mr.train()
+        orf = mr(xw)
+        assert orf["Y_pix"].shape[:2] == (2, 2 if rec else 1), orf["Y_pix"].shape
+        assert torch.isfinite(orf["loss"])
+        orf["loss"].backward()
+        bad = [k for k, p in mr.named_parameters()
+               if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())]
+        assert not bad, f"refiner {da}/{rec} 有参数无梯度/非有限: {bad[:5]}"
+        assert mr.count_params()["refiner"] > 0
+    print(f"    GrowthBlock(d=256): 1 层 {n_gb[1]:,} ({n_gb[1]/1e6:.2f}M) / "
+          f"2 层 {n_gb[2]:,} ({n_gb[2]/1e6:.2f}M) ∈ [1,2]M OK; "
+          f"每步输出 (B,16,256)内部 →(B,16,512)读出、累计读集合 +grow/步 OK")
+    print("    refiner std/linear × 单步/循环: 前向+反向+全参数有限梯度 OK")
+
+    # 11f. 旧 ckpt 语义 + 默认关回归
+    m_off = SRPhase1LinAttn(LinAttnConfig(**_base))
+    m_on = SRPhase1LinAttn(LinAttnConfig(**_base, refiner_layers=2, refiner_dim=64,
+                                         refiner_heads=4, refiner_grow=4))
+    missing2, unexpected2 = m_on.load_state_dict(m_off.state_dict(), strict=False)
+    assert not unexpected2, unexpected2
+    assert missing2 and all(k.startswith("refiner.") for k in missing2), missing2
+    sd_keys = set(m_on.state_dict().keys())
+    for pref in ("loss_weights", "dh_mode", "dh_quantile", "sample_grad_iters",
+                 "refiner_layers", "refiner_dim", "refiner_heads", "refiner_grow",
+                 "refiner_steps"):
+        assert not any(k.startswith(pref) for k in sd_keys), pref
+    c11 = LinAttnConfig()
+    assert (c11.loss_weights == () and c11.dh_mode == 0
+            and c11.sample_grad_iters == 0 and c11.refiner_layers == 0)
+    m_def11 = SRPhase1LinAttn(c11)
+    assert m_def11.refiner is None and m_def11.dh_mode == 0
+    assert m_def11.count_params()["refiner"] == 0
+    print(f"    refiner 关→开载入: unexpected=0, missing={len(missing2)} 全部 'refiner.*' "
+          f"OK; 新开关均不进 state_dict OK; 默认全关 OK")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")

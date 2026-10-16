@@ -1,0 +1,71 @@
+{
+ "steps": [
+  [
+   "a0b_gate_eval",
+   "0",
+   "22"
+  ],
+  [
+   "a0b_gate_diff",
+   "0",
+   "0"
+  ],
+  [
+   "a1_dump_std_rec",
+   "0",
+   "23"
+  ],
+  [
+   "a1_dump_lin_rec",
+   "0",
+   "26"
+  ],
+  [
+   "a2_analysis_std",
+   "0",
+   "6"
+  ],
+  [
+   "a2_analysis_lin",
+   "0",
+   "6"
+  ],
+  [
+   "a3_iid_std_rec",
+   "0",
+   "21"
+  ],
+  [
+   "a3_coco",
+   "0",
+   "22"
+  ],
+  [
+   "a3_far",
+   "0",
+   "14"
+  ],
+  [
+   "a3_ladder",
+   "0",
+   "16"
+  ],
+  [
+   "a5_zs_stats",
+   "0",
+   "317"
+  ]
+ ],
+ "artifacts": {
+  "baseline_four_arm_eval.json": "present",
+  "per_image_stdattn_k64_rec.json": "present",
+  "stepwise_stdattn_k64_rec.json": "present",
+  "tsc_stdattn_rec.json": "present",
+  "ood_in100_stdattn_rec.json": "present",
+  "ood_coco_stdattn_rec.json": "present",
+  "ood_far_stdattn_rec.json": "present",
+  "domain_ladder.json": "present",
+  "zs_redundancy_stdattn_rec.json": "present",
+  "gate_diff_stdattn_rec.json": "present"
+ }
+}

@@ -24,6 +24,7 @@
 
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -91,6 +92,124 @@ def per_patch_dc_baseline(target_01: torch.Tensor, patch: int = 16) -> torch.Ten
     p = target_01.reshape(B, C, gh, patch, gw, patch)
     dc = p.mean(dim=(3, 5), keepdim=True).expand_as(p)
     return psnr(dc.reshape(B, C, H, W), target_01)
+
+
+# ═══ E-A5: z_s 冗余度 ═══════════════════════════════════════════════════════
+
+def zs_stats(z_s: torch.Tensor, eps: float = 1e-8) -> dict:
+    """z_s 冗余度统计（E-A5 第 1 项, 零训练）。
+
+    `z_s`: `(K,D)` 单图 或 `(B,K,D)` 一批（如 `model.encode(x)[1]`）。
+    返回（标量对 batch 取均值, 两两 cos 对所有样本/所有 token 对池化）:
+      · `pair_cos_*`      两两 cosine 的 mean/std/min/max/q10/q50/q90/frac_gt_0.9;
+      · `effective_rank`  有效秩 `exp(H(σ))`（σ = 奇异值, 未去均值）及 `/K` 归一化;
+      · `effective_rank_centered` 去 token 均值版本（更接近"可用维度数"）;
+      · `token_var_mean/std` 逐 token 在 D 维上的方差（均值/标准差）;
+      · `token_mean_var`   token 均值在 K 个 token 间的方差（样本内 token 多样性）。
+
+    判据（PLAN §3 E-A5）: 有效秩 ≪ K 且 `pair_cos_mean > 0.9` ⇒ 冗余仍在。
+    """
+    with torch.no_grad():
+        z = torch.as_tensor(z_s).detach().float()
+        if z.dim() == 2:
+            z = z.unsqueeze(0)
+        assert z.dim() == 3, f"z_s 形状应为 (K,D) 或 (B,K,D), got {tuple(z.shape)}"
+        B, K, D = z.shape
+        out = {"n_samples": int(B), "K": int(K), "D": int(D)}
+        # ── 两两 cosine（上三角; 不比自己）──
+        if K >= 2:
+            zn = z / (z.norm(dim=-1, keepdim=True) + eps)
+            cos = zn @ zn.transpose(-1, -2)                      # (B,K,K)
+            iu = torch.triu_indices(K, K, offset=1)
+            pair = cos[:, iu[0], iu[1]].reshape(-1)
+            q = torch.quantile(pair, torch.tensor([0.1, 0.5, 0.9],
+                                                  device=pair.device))
+            out.update(
+                pair_cos_mean=float(pair.mean()), pair_cos_std=float(pair.std(unbiased=False)),
+                pair_cos_min=float(pair.min()), pair_cos_max=float(pair.max()),
+                pair_cos_q10=float(q[0]), pair_cos_q50=float(q[1]),
+                pair_cos_q90=float(q[2]),
+                pair_cos_frac_gt_0_9=float((pair > 0.9).float().mean()))
+        else:
+            out.update(pair_cos_mean=float("nan"), pair_cos_std=float("nan"),
+                       pair_cos_min=float("nan"), pair_cos_max=float("nan"),
+                       pair_cos_q10=float("nan"), pair_cos_q50=float("nan"),
+                       pair_cos_q90=float("nan"), pair_cos_frac_gt_0_9=float("nan"))
+        # ── 有效秩 exp(H(σ/sum σ))──
+        sv = torch.linalg.svdvals(z)                             # (B,min(K,D))
+        p = sv / (sv.sum(dim=-1, keepdim=True) + eps)
+        er = (-(p * (p + eps).log()).sum(dim=-1)).exp()
+        svc = torch.linalg.svdvals(z - z.mean(dim=1, keepdim=True))
+        pc = svc / (svc.sum(dim=-1, keepdim=True) + eps)
+        erc = (-(pc * (pc + eps).log()).sum(dim=-1)).exp()
+        out.update(effective_rank=float(er.mean()),
+                   effective_rank_norm=float((er / max(K, 1)).mean()),
+                   effective_rank_centered=float(erc.mean()))
+        # ── 逐 token 方差 ──
+        tv = z.var(dim=-1, unbiased=False)                       # (B,K)
+        out.update(token_var_mean=float(tv.mean()),
+                   token_var_std=float(tv.std(unbiased=False)))
+        tm = z.mean(dim=-1)                                      # (B,K)
+        out["token_mean_var"] = (float(tm.var(dim=-1, unbiased=False).mean())
+                                 if K >= 2 else float("nan"))
+        return out
+
+
+# ═══ E-A4: Spearman ρ + bootstrap CI ═══════════════════════════════════════
+
+def _average_ranks(a: np.ndarray) -> np.ndarray:
+    """平均秩（ties 取平均）, 纯 numpy / O(n log n), 不依赖 scipy。"""
+    a = np.asarray(a, dtype=np.float64)
+    n = a.shape[0]
+    order = np.argsort(a, kind="mergesort")
+    sa = a[order]
+    boundary = np.empty(n, dtype=bool)
+    boundary[0] = True
+    if n > 1:
+        boundary[1:] = sa[1:] != sa[:-1]
+    grp = np.cumsum(boundary) - 1
+    counts = np.bincount(grp)
+    sums = np.bincount(grp, weights=np.arange(1, n + 1, dtype=np.float64))
+    out = np.empty(n, dtype=np.float64)
+    out[order] = (sums / counts)[grp]
+    return out
+
+
+def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+    a = a - a.mean()
+    b = b - b.mean()
+    d = float(np.sqrt((a * a).sum()) * np.sqrt((b * b).sum()))
+    return float((a * b).sum() / d) if d > 0 else float("nan")
+
+
+def spearman_ci(x, y, n_boot: int = 1000, seed: int = 0, alpha: float = 0.05) -> dict:
+    """Spearman ρ + **配对 bootstrap** 百分位 CI（E-A4 复杂度相关性）。
+
+    `x`/`y` 可为 list / np.ndarray / torch.Tensor, 逐元素配对, 自动丢弃非有限值。
+    ρ 用平均秩（ties）的 Pearson 相关; CI 默认 1000 次配对重采样、95% 分位。
+    `p_boot` = bootstrap 中 ρ 跨 0 的经验双侧比例（只作参考, 不是精确 p 值）。
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    assert x.shape == y.shape, f"x/y 长度不一致: {x.shape} vs {y.shape}"
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    n = int(x.size)
+    out = {"rho": float("nan"), "ci_low": float("nan"), "ci_high": float("nan"),
+           "p_boot": float("nan"), "n": n, "n_boot": int(n_boot),
+           "alpha": float(alpha)}
+    if n < 3 or float(x.std()) == 0.0 or float(y.std()) == 0.0:
+        return out
+    out["rho"] = _pearson(_average_ranks(x), _average_ranks(y))
+    rng = np.random.default_rng(seed)
+    boots = np.empty(int(n_boot), dtype=np.float64)
+    for b in range(int(n_boot)):
+        idx = rng.integers(0, n, size=n)
+        boots[b] = _pearson(_average_ranks(x[idx]), _average_ranks(y[idx]))
+    lo, hi = np.nanpercentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    out.update(ci_low=float(lo), ci_high=float(hi),
+               p_boot=float(2 * min((boots <= 0).mean(), (boots >= 0).mean())))
+    return out
 
 
 # ═══ 自检（python metrics_linattn.py）═══

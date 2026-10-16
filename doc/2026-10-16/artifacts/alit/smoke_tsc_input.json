@@ -1,0 +1,1611 @@
+{
+ "per_image": [
+  {
+   "index": 0,
+   "filename": "0.png",
+   "path": "synthetic://val/0.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 1,
+   "filename": "1.png",
+   "path": "synthetic://val/1.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 2,
+   "filename": "2.png",
+   "path": "synthetic://val/2.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 3,
+   "filename": "3.png",
+   "path": "synthetic://val/3.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 4,
+   "filename": "4.png",
+   "path": "synthetic://val/4.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 5,
+   "filename": "5.png",
+   "path": "synthetic://val/5.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 6,
+   "filename": "6.png",
+   "path": "synthetic://val/6.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 7,
+   "filename": "7.png",
+   "path": "synthetic://val/7.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 8,
+   "filename": "8.png",
+   "path": "synthetic://val/8.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 9,
+   "filename": "9.png",
+   "path": "synthetic://val/9.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 10,
+   "filename": "10.png",
+   "path": "synthetic://val/10.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 11,
+   "filename": "11.png",
+   "path": "synthetic://val/11.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 12,
+   "filename": "12.png",
+   "path": "synthetic://val/12.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 13,
+   "filename": "13.png",
+   "path": "synthetic://val/13.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 14,
+   "filename": "14.png",
+   "path": "synthetic://val/14.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 15,
+   "filename": "15.png",
+   "path": "synthetic://val/15.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 16,
+   "filename": "16.png",
+   "path": "synthetic://val/16.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 17,
+   "filename": "17.png",
+   "path": "synthetic://val/17.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 18,
+   "filename": "18.png",
+   "path": "synthetic://val/18.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 19,
+   "filename": "19.png",
+   "path": "synthetic://val/19.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 20,
+   "filename": "20.png",
+   "path": "synthetic://val/20.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 21,
+   "filename": "21.png",
+   "path": "synthetic://val/21.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 22,
+   "filename": "22.png",
+   "path": "synthetic://val/22.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 23,
+   "filename": "23.png",
+   "path": "synthetic://val/23.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 24,
+   "filename": "24.png",
+   "path": "synthetic://val/24.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 25,
+   "filename": "25.png",
+   "path": "synthetic://val/25.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 26,
+   "filename": "26.png",
+   "path": "synthetic://val/26.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 27,
+   "filename": "27.png",
+   "path": "synthetic://val/27.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 28,
+   "filename": "28.png",
+   "path": "synthetic://val/28.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 29,
+   "filename": "29.png",
+   "path": "synthetic://val/29.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 30,
+   "filename": "30.png",
+   "path": "synthetic://val/30.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 31,
+   "filename": "31.png",
+   "path": "synthetic://val/31.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 32,
+   "filename": "32.png",
+   "path": "synthetic://val/32.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 33,
+   "filename": "33.png",
+   "path": "synthetic://val/33.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 34,
+   "filename": "34.png",
+   "path": "synthetic://val/34.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 35,
+   "filename": "35.png",
+   "path": "synthetic://val/35.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 36,
+   "filename": "36.png",
+   "path": "synthetic://val/36.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 37,
+   "filename": "37.png",
+   "path": "synthetic://val/37.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 38,
+   "filename": "38.png",
+   "path": "synthetic://val/38.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 39,
+   "filename": "39.png",
+   "path": "synthetic://val/39.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 40,
+   "filename": "40.png",
+   "path": "synthetic://val/40.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 41,
+   "filename": "41.png",
+   "path": "synthetic://val/41.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 42,
+   "filename": "42.png",
+   "path": "synthetic://val/42.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 43,
+   "filename": "43.png",
+   "path": "synthetic://val/43.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 44,
+   "filename": "44.png",
+   "path": "synthetic://val/44.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 45,
+   "filename": "45.png",
+   "path": "synthetic://val/45.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 46,
+   "filename": "46.png",
+   "path": "synthetic://val/46.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 47,
+   "filename": "47.png",
+   "path": "synthetic://val/47.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 48,
+   "filename": "48.png",
+   "path": "synthetic://val/48.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 49,
+   "filename": "49.png",
+   "path": "synthetic://val/49.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 50,
+   "filename": "50.png",
+   "path": "synthetic://val/50.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 51,
+   "filename": "51.png",
+   "path": "synthetic://val/51.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 52,
+   "filename": "52.png",
+   "path": "synthetic://val/52.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 53,
+   "filename": "53.png",
+   "path": "synthetic://val/53.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 54,
+   "filename": "54.png",
+   "path": "synthetic://val/54.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 55,
+   "filename": "55.png",
+   "path": "synthetic://val/55.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 56,
+   "filename": "56.png",
+   "path": "synthetic://val/56.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 57,
+   "filename": "57.png",
+   "path": "synthetic://val/57.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 58,
+   "filename": "58.png",
+   "path": "synthetic://val/58.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 59,
+   "filename": "59.png",
+   "path": "synthetic://val/59.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 60,
+   "filename": "60.png",
+   "path": "synthetic://val/60.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 61,
+   "filename": "61.png",
+   "path": "synthetic://val/61.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 62,
+   "filename": "62.png",
+   "path": "synthetic://val/62.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 63,
+   "filename": "63.png",
+   "path": "synthetic://val/63.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 64,
+   "filename": "64.png",
+   "path": "synthetic://val/64.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 65,
+   "filename": "65.png",
+   "path": "synthetic://val/65.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 66,
+   "filename": "66.png",
+   "path": "synthetic://val/66.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 67,
+   "filename": "67.png",
+   "path": "synthetic://val/67.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 68,
+   "filename": "68.png",
+   "path": "synthetic://val/68.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 69,
+   "filename": "69.png",
+   "path": "synthetic://val/69.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 70,
+   "filename": "70.png",
+   "path": "synthetic://val/70.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 71,
+   "filename": "71.png",
+   "path": "synthetic://val/71.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 72,
+   "filename": "72.png",
+   "path": "synthetic://val/72.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 73,
+   "filename": "73.png",
+   "path": "synthetic://val/73.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 74,
+   "filename": "74.png",
+   "path": "synthetic://val/74.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 75,
+   "filename": "75.png",
+   "path": "synthetic://val/75.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 76,
+   "filename": "76.png",
+   "path": "synthetic://val/76.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 77,
+   "filename": "77.png",
+   "path": "synthetic://val/77.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 78,
+   "filename": "78.png",
+   "path": "synthetic://val/78.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 79,
+   "filename": "79.png",
+   "path": "synthetic://val/79.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 80,
+   "filename": "80.png",
+   "path": "synthetic://val/80.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 81,
+   "filename": "81.png",
+   "path": "synthetic://val/81.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 82,
+   "filename": "82.png",
+   "path": "synthetic://val/82.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 83,
+   "filename": "83.png",
+   "path": "synthetic://val/83.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 84,
+   "filename": "84.png",
+   "path": "synthetic://val/84.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 85,
+   "filename": "85.png",
+   "path": "synthetic://val/85.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 86,
+   "filename": "86.png",
+   "path": "synthetic://val/86.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 87,
+   "filename": "87.png",
+   "path": "synthetic://val/87.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 88,
+   "filename": "88.png",
+   "path": "synthetic://val/88.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 89,
+   "filename": "89.png",
+   "path": "synthetic://val/89.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 90,
+   "filename": "90.png",
+   "path": "synthetic://val/90.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 91,
+   "filename": "91.png",
+   "path": "synthetic://val/91.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 92,
+   "filename": "92.png",
+   "path": "synthetic://val/92.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 93,
+   "filename": "93.png",
+   "path": "synthetic://val/93.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 94,
+   "filename": "94.png",
+   "path": "synthetic://val/94.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 95,
+   "filename": "95.png",
+   "path": "synthetic://val/95.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 96,
+   "filename": "96.png",
+   "path": "synthetic://val/96.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 97,
+   "filename": "97.png",
+   "path": "synthetic://val/97.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 98,
+   "filename": "98.png",
+   "path": "synthetic://val/98.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 99,
+   "filename": "99.png",
+   "path": "synthetic://val/99.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 100,
+   "filename": "100.png",
+   "path": "synthetic://val/100.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 101,
+   "filename": "101.png",
+   "path": "synthetic://val/101.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 102,
+   "filename": "102.png",
+   "path": "synthetic://val/102.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 103,
+   "filename": "103.png",
+   "path": "synthetic://val/103.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 104,
+   "filename": "104.png",
+   "path": "synthetic://val/104.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 105,
+   "filename": "105.png",
+   "path": "synthetic://val/105.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 106,
+   "filename": "106.png",
+   "path": "synthetic://val/106.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 107,
+   "filename": "107.png",
+   "path": "synthetic://val/107.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 108,
+   "filename": "108.png",
+   "path": "synthetic://val/108.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 109,
+   "filename": "109.png",
+   "path": "synthetic://val/109.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 110,
+   "filename": "110.png",
+   "path": "synthetic://val/110.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 111,
+   "filename": "111.png",
+   "path": "synthetic://val/111.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 112,
+   "filename": "112.png",
+   "path": "synthetic://val/112.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 113,
+   "filename": "113.png",
+   "path": "synthetic://val/113.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 114,
+   "filename": "114.png",
+   "path": "synthetic://val/114.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 115,
+   "filename": "115.png",
+   "path": "synthetic://val/115.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 116,
+   "filename": "116.png",
+   "path": "synthetic://val/116.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 117,
+   "filename": "117.png",
+   "path": "synthetic://val/117.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 118,
+   "filename": "118.png",
+   "path": "synthetic://val/118.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 119,
+   "filename": "119.png",
+   "path": "synthetic://val/119.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 120,
+   "filename": "120.png",
+   "path": "synthetic://val/120.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 121,
+   "filename": "121.png",
+   "path": "synthetic://val/121.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 122,
+   "filename": "122.png",
+   "path": "synthetic://val/122.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 123,
+   "filename": "123.png",
+   "path": "synthetic://val/123.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 124,
+   "filename": "124.png",
+   "path": "synthetic://val/124.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 125,
+   "filename": "125.png",
+   "path": "synthetic://val/125.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 126,
+   "filename": "126.png",
+   "path": "synthetic://val/126.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 127,
+   "filename": "127.png",
+   "path": "synthetic://val/127.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 128,
+   "filename": "128.png",
+   "path": "synthetic://val/128.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 129,
+   "filename": "129.png",
+   "path": "synthetic://val/129.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 130,
+   "filename": "130.png",
+   "path": "synthetic://val/130.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 131,
+   "filename": "131.png",
+   "path": "synthetic://val/131.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 132,
+   "filename": "132.png",
+   "path": "synthetic://val/132.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 133,
+   "filename": "133.png",
+   "path": "synthetic://val/133.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 134,
+   "filename": "134.png",
+   "path": "synthetic://val/134.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 135,
+   "filename": "135.png",
+   "path": "synthetic://val/135.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 136,
+   "filename": "136.png",
+   "path": "synthetic://val/136.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 137,
+   "filename": "137.png",
+   "path": "synthetic://val/137.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 138,
+   "filename": "138.png",
+   "path": "synthetic://val/138.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 139,
+   "filename": "139.png",
+   "path": "synthetic://val/139.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 140,
+   "filename": "140.png",
+   "path": "synthetic://val/140.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 141,
+   "filename": "141.png",
+   "path": "synthetic://val/141.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 142,
+   "filename": "142.png",
+   "path": "synthetic://val/142.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 143,
+   "filename": "143.png",
+   "path": "synthetic://val/143.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 144,
+   "filename": "144.png",
+   "path": "synthetic://val/144.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 145,
+   "filename": "145.png",
+   "path": "synthetic://val/145.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 146,
+   "filename": "146.png",
+   "path": "synthetic://val/146.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 147,
+   "filename": "147.png",
+   "path": "synthetic://val/147.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 148,
+   "filename": "148.png",
+   "path": "synthetic://val/148.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 149,
+   "filename": "149.png",
+   "path": "synthetic://val/149.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 150,
+   "filename": "150.png",
+   "path": "synthetic://val/150.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 151,
+   "filename": "151.png",
+   "path": "synthetic://val/151.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 152,
+   "filename": "152.png",
+   "path": "synthetic://val/152.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 153,
+   "filename": "153.png",
+   "path": "synthetic://val/153.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 154,
+   "filename": "154.png",
+   "path": "synthetic://val/154.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 155,
+   "filename": "155.png",
+   "path": "synthetic://val/155.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 156,
+   "filename": "156.png",
+   "path": "synthetic://val/156.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 157,
+   "filename": "157.png",
+   "path": "synthetic://val/157.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 158,
+   "filename": "158.png",
+   "path": "synthetic://val/158.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 159,
+   "filename": "159.png",
+   "path": "synthetic://val/159.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 160,
+   "filename": "160.png",
+   "path": "synthetic://val/160.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 161,
+   "filename": "161.png",
+   "path": "synthetic://val/161.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 162,
+   "filename": "162.png",
+   "path": "synthetic://val/162.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 163,
+   "filename": "163.png",
+   "path": "synthetic://val/163.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 164,
+   "filename": "164.png",
+   "path": "synthetic://val/164.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 165,
+   "filename": "165.png",
+   "path": "synthetic://val/165.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 166,
+   "filename": "166.png",
+   "path": "synthetic://val/166.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 167,
+   "filename": "167.png",
+   "path": "synthetic://val/167.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 168,
+   "filename": "168.png",
+   "path": "synthetic://val/168.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 169,
+   "filename": "169.png",
+   "path": "synthetic://val/169.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 170,
+   "filename": "170.png",
+   "path": "synthetic://val/170.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 171,
+   "filename": "171.png",
+   "path": "synthetic://val/171.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 172,
+   "filename": "172.png",
+   "path": "synthetic://val/172.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 173,
+   "filename": "173.png",
+   "path": "synthetic://val/173.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 174,
+   "filename": "174.png",
+   "path": "synthetic://val/174.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 175,
+   "filename": "175.png",
+   "path": "synthetic://val/175.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 176,
+   "filename": "176.png",
+   "path": "synthetic://val/176.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 177,
+   "filename": "177.png",
+   "path": "synthetic://val/177.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 178,
+   "filename": "178.png",
+   "path": "synthetic://val/178.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 179,
+   "filename": "179.png",
+   "path": "synthetic://val/179.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 180,
+   "filename": "180.png",
+   "path": "synthetic://val/180.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 181,
+   "filename": "181.png",
+   "path": "synthetic://val/181.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 182,
+   "filename": "182.png",
+   "path": "synthetic://val/182.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 183,
+   "filename": "183.png",
+   "path": "synthetic://val/183.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 184,
+   "filename": "184.png",
+   "path": "synthetic://val/184.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 185,
+   "filename": "185.png",
+   "path": "synthetic://val/185.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 186,
+   "filename": "186.png",
+   "path": "synthetic://val/186.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 187,
+   "filename": "187.png",
+   "path": "synthetic://val/187.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 188,
+   "filename": "188.png",
+   "path": "synthetic://val/188.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 189,
+   "filename": "189.png",
+   "path": "synthetic://val/189.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 190,
+   "filename": "190.png",
+   "path": "synthetic://val/190.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 191,
+   "filename": "191.png",
+   "path": "synthetic://val/191.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 192,
+   "filename": "192.png",
+   "path": "synthetic://val/192.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 193,
+   "filename": "193.png",
+   "path": "synthetic://val/193.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 194,
+   "filename": "194.png",
+   "path": "synthetic://val/194.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 195,
+   "filename": "195.png",
+   "path": "synthetic://val/195.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 196,
+   "filename": "196.png",
+   "path": "synthetic://val/196.png",
+   "k": 4,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 197,
+   "filename": "197.png",
+   "path": "synthetic://val/197.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 198,
+   "filename": "198.png",
+   "path": "synthetic://val/198.png",
+   "k": 16,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  },
+  {
+   "index": 199,
+   "filename": "199.png",
+   "path": "synthetic://val/199.png",
+   "k": 8,
+   "step": null,
+   "source": "SMOKE synthetic (no science)"
+  }
+ ],
+ "k_grid": [
+  4,
+  8,
+  16
+ ],
+ "tau": null,
+ "source": "SMOKE synthetic per_image (E-C1 --tsc_json 规范形态样例)"
+}

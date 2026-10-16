@@ -37,7 +37,8 @@ from torchvision.utils import make_grid, save_image
 from data_linattn import build_loaders
 from metrics_linattn import psnr, ssim, per_patch_dc_baseline
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
-                              SRPhase1LinAttn, patches_to_image)
+                              SRPhase1LinAttn, patches_to_image,
+                              parse_loss_weights)
 
 
 # ─────────────────────────── 工具 ───────────────────────────
@@ -191,6 +192,30 @@ def parse_args():
                          "全线性+BPTT 在 bs64 会 OOM, 置 1 可放进显存）")
     ap.add_argument("--freeze_encoder", type=int, default=0,
                     help="1 = 冻结编码器（只训解码器; 逐步精炼实验用）")
+    # ── E-B1..B4（全部「新增 + 默认关」; 见 PLAN_alit_adaptive_experiments.md §4/§6）──
+    ap.add_argument("--loss_weights", nargs="*", default=[],
+                    help="E-B1 逐迭代损失权重: 逗号或空格分隔（如 "
+                         "'2.5,2,1.5,1.25,1,1,1,1'）; 空 = 平权（现状）; "
+                         "也支持 '--loss_weights 2.5 2 1.5 ...'; 长度须 = T 或 1（广播）")
+    ap.add_argument("--dh_mode", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="E-B2 损失侧动态停机: 0=关(现状); 1=硬区域掩码(第t步只监督"
+                         "region_t 行区); 2=软停机(按上一步逐patch误差的每图分位); "
+                         "3=2 + 已完成 patch 的 carry stop-gradient")
+    ap.add_argument("--dh_quantile", type=float, default=0.5,
+                    help="dh_mode 2/3 的分位阈值: 0.5 = 保留误差最大的 50%% patch")
+    ap.add_argument("--sample_grad_iters", type=int, default=0,
+                    help="E-B4 随机预算采样: >0 时每步随机抽 2..N 个迭代算 loss "
+                         "（其余步只前向）; 0 = 全步（现状）")
+    ap.add_argument("--refiner_layers", type=int, default=0,
+                    help="E-B3 读侧生长 GrowthBlock 层数: 0=关(现状), 1–2 "
+                         "（d=256 时 1 层≈1.05M / 2 层≈1.84M）")
+    ap.add_argument("--refiner_dim", type=int, default=256, help="GrowthBlock 内部维度")
+    ap.add_argument("--refiner_heads", type=int, default=8)
+    ap.add_argument("--refiner_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--refiner_grow", type=int, default=16,
+                    help="每步新增的生长 token 数（解码器读集合 = [z_s; L_1..L_it]）")
+    ap.add_argument("--refiner_steps", type=int, default=0,
+                    help="生长步数; 0 = 跟随解码器步数 T")
     ap.add_argument("--init_from", default="",
                     help="warm start ckpt（循环版可从单步版 ckpt 热启动, 只缺零初始化 mem_pos）")
     # 解码器
@@ -228,6 +253,51 @@ def parse_args():
     return ap.parse_args()
 
 
+def build_cfg(args) -> LinAttnConfig:
+    """CLI args → `LinAttnConfig`（单独提出便于 CPU 单测: 不进 CUDA / 数据管线）。
+
+    E-B1..B4 的新参数全部「空/0 = 默认关」⇒ 与改造前的 cfg 逐字段相同。
+    """
+    return LinAttnConfig(
+        img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
+        enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
+        enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
+        enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
+        enc_std_qk_norm=bool(args.enc_std_qk_norm),
+        dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
+        dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
+        dec_grad_ckpt=bool(args.dec_grad_ckpt),
+        dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
+        dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
+        dropout=args.dropout,
+        # ── E-B1..B4（空/0 = 默认关 ⇒ 旧路径逐位不变）──
+        loss_weights=tuple(parse_loss_weights(args.loss_weights)),
+        dh_mode=int(args.dh_mode), dh_quantile=float(args.dh_quantile),
+        sample_grad_iters=int(args.sample_grad_iters),
+        refiner_layers=int(args.refiner_layers), refiner_dim=int(args.refiner_dim),
+        refiner_heads=int(args.refiner_heads),
+        refiner_mlp_ratio=float(args.refiner_mlp_ratio),
+        refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps))
+
+
+def load_init_from(model: nn.Module, path: str) -> dict:
+    """warm start: 允许缺 `decoder.mem_pos`（单步 → 循环）与 `refiner.*`（E-B3 新增块）。
+
+    其余 missing 一律报错（形状不符/配置不匹配必须立刻失败）; 有多余 key 也报错。
+    返回 `{"missing": [...], "unexpected": [...]}` 便于调用方记录。
+    """
+    ck0 = torch.load(path, map_location="cpu", weights_only=False)
+    missing, unexpected = model.load_state_dict(ck0["model"], strict=False)
+    print(f"[init_from] {path} → missing={list(missing)} "
+          f"unexpected={list(unexpected)}", flush=True)
+    assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
+    allowed = {"decoder.mem_pos"} | {k for k in missing if k.startswith("refiner.")}
+    assert set(missing) <= allowed, \
+        f"除 mem_pos/refiner.* 外还有未加载参数（形状不符?）: " \
+        f"{[k for k in missing if k not in allowed][:8]}"
+    return {"missing": list(missing), "unexpected": list(unexpected)}
+
+
 def main():
     args = parse_args()
     if args.smoke:
@@ -247,27 +317,10 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.benchmark = True
 
-    cfg = LinAttnConfig(
-        img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
-        enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
-        enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
-        enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
-        enc_std_qk_norm=bool(args.enc_std_qk_norm),
-        dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
-        dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
-        dec_grad_ckpt=bool(args.dec_grad_ckpt),
-        dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
-        dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
-        dropout=args.dropout)
+    cfg = build_cfg(args)
     model = SRPhase1LinAttn(cfg).cuda()
     if args.init_from:
-        ck0 = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        missing, unexpected = model.load_state_dict(ck0["model"], strict=False)
-        print(f"[init_from] {args.init_from} → missing={list(missing)} "
-              f"unexpected={list(unexpected)}", flush=True)
-        assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
-        assert set(missing) <= {"decoder.mem_pos"}, \
-            f"除 mem_pos 外还有未加载参数（形状不符?）: {list(missing)[:8]}"
+        load_init_from(model, args.init_from)
     if args.freeze_encoder:
         for prm in model.encoder.parameters():
             prm.requires_grad_(False)
@@ -283,6 +336,12 @@ def main():
     print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
           f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
           f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__}", flush=True)
+    print(f"[alit] loss_weights={model.loss_weights or '(平权)'} "
+          f"dh_mode={model.dh_mode} dh_quantile={model.dh_quantile} "
+          f"sample_grad_iters={model.sample_grad_iters} "
+          f"refiner={type(model.refiner).__name__ if model.refiner else 'off'} "
+          f"(layers={cfg.refiner_layers} dim={cfg.refiner_dim} grow={cfg.refiner_grow} "
+          f"steps={cfg.refiner_steps or 'T'})", flush=True)
     print(f"[params] {pc}", flush=True)
 
     tr_loader, va_loader, tr_ds, va_ds = build_loaders(

@@ -1,0 +1,14 @@
+{
+ "verdict": "PASS",
+ "a": "/root/AssocVTC/doc/2026-10-16/artifacts/alit/stepwise_stdattn_k64_rec_published_code.json",
+ "b": "/root/AssocVTC/doc/2026-10-16/artifacts/alit/stepwise_gate_stdattn_k64_rec.json",
+ "n_numeric_diffs": 0,
+ "n_struct_diffs": 0,
+ "n_nonnum_diffs": 0,
+ "max_abs_diff": 0.0,
+ "tol": 1e-09,
+ "verdict_rule": "PASS=逐位一致; PASS_TOLERANT=仅末位浮点差; FAIL=其它",
+ "structural_diffs": [],
+ "nonnum_diffs": [],
+ "numeric_diff_sample": []
+}

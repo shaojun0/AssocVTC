@@ -83,7 +83,7 @@ def main():
     arms.sort(key=lambda x: (x["recurrent"], x["enc"], x["dec"]))
     by = {(x["enc"], x["dec"], x["recurrent"]): x for x in arms}
 
-    out = ["# 六臂架构矩阵 — 编码器/解码器注意力形式 × 读出方式", ""]
+    out = [f"# {len(arms)} 臂架构矩阵 — 编码器/解码器注意力形式 × 读出方式", ""]
     out.append(f"- 归类依据 = checkpoint 里的 `cfg.enc_attn / cfg.dec_attn / cfg.dec_recurrent`（不靠文件名）")
     out.append(f"- 评测：**全量留出集，同一进程、同一批次**（n={arms[0]['n'] if arms else '?'}）")
     out.append(f"- PSNR 口径：逐图 PSNR 再平均（与 2026-10-15 报告同口径）")
@@ -127,12 +127,20 @@ def main():
     out.append("| 配对（A → B） | 变动的因素 | ΔPSNR (dB) | ΔSSIM | ΔL1(归一) |")
     out.append("|---|---|---|---|---|")
     pairs = [
-        (("linear", "std", False), ("std", "std", False), "编码器: 线性 → 普通 softmax（单步）"),
-        (("linear", "std", True), ("std", "std", True), "编码器: 线性 → 普通 softmax（BPTT）"),
-        (("linear", "std", False), ("linear", "linear", False), "解码器: 普通 softmax → 线性（单步）"),
-        (("linear", "std", True), ("linear", "linear", True), "解码器: 普通 softmax → 线性（**BPTT**）"),
+        # 编码器注意力（分别固定 softmax 解码器 / 线性解码器）
+        (("linear", "std", False), ("std", "std", False), "**编码器**: 线性 → 普通 softmax（softmax 解码器, 单步）"),
+        (("linear", "std", True), ("std", "std", True), "**编码器**: 线性 → 普通 softmax（softmax 解码器, BPTT）"),
+        (("linear", "linear", False), ("std", "linear", False), "**编码器**: 线性 → 普通 softmax（线性解码器, 单步）"),
+        (("linear", "linear", True), ("std", "linear", True), "**编码器**: 线性 → 普通 softmax（线性解码器, BPTT）"),
+        # 解码器注意力（分别固定线性编码器 / 普通编码器）
+        (("linear", "std", False), ("linear", "linear", False), "**解码器**: softmax → 线性（线性编码器, 单步）"),
+        (("linear", "std", True), ("linear", "linear", True), "**解码器**: softmax → 线性（线性编码器, BPTT）"),
+        (("std", "std", False), ("std", "linear", False), "**解码器**: softmax → 线性（普通编码器, 单步）"),
+        (("std", "std", True), ("std", "linear", True), "**解码器**: softmax → 线性（普通编码器, BPTT）"),
+        # 读出方式（四种架构各一条）
         (("std", "std", False), ("std", "std", True), "读出: 单步 → BPTT（全 softmax）"),
-        (("linear", "std", False), ("linear", "std", True), "读出: 单步 → BPTT（线性 enc）"),
+        (("linear", "std", False), ("linear", "std", True), "读出: 单步 → BPTT（线性 enc + softmax dec）"),
+        (("std", "linear", False), ("std", "linear", True), "读出: 单步 → BPTT（普通 enc + 线性 dec）"),
         (("linear", "linear", False), ("linear", "linear", True), "读出: 单步 → BPTT（**全线性**）"),
     ]
     for ka, kb, desc in pairs:

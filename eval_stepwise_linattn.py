@@ -7,6 +7,15 @@
 
     python eval_stepwise_linattn.py --ckpt <ckpt.pt> --out stepwise.json
 
+**E-A 零训练新增开关（默认关, 不加时输出与之前逐位相同）**:
+    · `--dump_per_image <json>`  E-A1: 每图每步 `L1_255`/`PSNR`/最优停步/类别索引/
+      文件名 + 复杂度弱代理（`file_bytes`/`edge_density`）落盘;
+    · `--data_dir_ood <dir>`     E-A3: 无标签 OOD 目录（递归扫描 flat/ImageFolder,
+      val transform）替 IID val; 配 `--domain <name>` 标注域。
+      典型: `--ckpt .../stdattn_k64_rec/ckpt_best.pt --data_dir_ood /path/coco/val2017
+             --num_images 0 --domain coco --dump_per_image .../ood_coco.json`
+    分析: `python tools/alit_adaptive_k.py --stepwise <json> --out <json>`
+
 对留出集逐图跑完整 |T| 步循环读出, 拿到**每一步的直接预测** `Y_pix[:, t]`,
 然后逐步算:
     · `L1_255[t]`  **0-255 像素 L1（不做 clamp）= 主线口径**, 可直接与
@@ -33,13 +42,25 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from data_linattn import build_datasets
+from data_linattn import build_datasets, build_ood_dataset
 from metrics_linattn import psnr
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
                               SRPhase1LinAttn, patches_to_image)
 
 MEAN_255 = tuple(v * 255.0 for v in IMAGENET_MEAN)
 STD_255 = tuple(v * 255.0 for v in IMAGENET_STD)
+
+
+def _edge_density(x01: torch.Tensor) -> torch.Tensor:
+    """(B,3,H,W) 灰度图的平均梯度幅值 → (B,); E-A4 图像复杂度**弱代理**。
+
+    只在前向差分上取均值（不引 Sobel 权重, 对代理而言无差别）, 与 JPEG 文件
+    大小一起作为 "复杂度 → 最优停步" 的相关性输入。**不是**感知复杂度。
+    """
+    g = x01.mean(dim=1, keepdim=True)                       # (B,1,H,W) 灰度
+    dx = (g[:, :, :, 1:] - g[:, :, :, :-1]).abs().mean(dim=(1, 2, 3))
+    dy = (g[:, :, 1:, :] - g[:, :, :-1, :]).abs().mean(dim=(1, 2, 3))
+    return 0.5 * (dx + dy)
 
 
 def load_model(ckpt_path: str, device="cuda"):
@@ -70,7 +91,20 @@ def run(args):
           f"  windows={windows}\n  cum_z_s={cum_z}  (K={cfg.num_specials}, N={cfg.num_patches})",
           flush=True)
 
-    _, va_ds = build_datasets(args.data_dir, img, args.val_per_class)
+    if args.data_dir_ood:
+        va_ds = build_ood_dataset(args.data_dir_ood, img)         # E-A3: 无标签 OOD
+        domain = args.domain or "ood"
+    else:
+        _, va_ds = build_datasets(args.data_dir, img, args.val_per_class)
+        domain = args.domain or "iid"
+    rec_paths, rec_labels = [], []
+    if args.dump_per_image:                                       # 默认关: 不建索引
+        if args.data_dir_ood:
+            rec_paths = list(va_ds.paths)
+            rec_labels = [-1] * len(va_ds)
+        else:
+            rec_paths = [p for p, _ in va_ds.items]
+            rec_labels = [c for _, c in va_ds.items]
     n = min(len(va_ds), args.num_images) if args.num_images > 0 else len(va_ds)
     stride = max(1, len(va_ds) // max(1, n))
     idx = list(range(0, len(va_ds), stride))[:n]
@@ -83,6 +117,7 @@ def run(args):
     sum_l1_01 = np.zeros(T)
     sum_psnr_img = np.zeros(T)   # 逐图 PSNR 再平均（与主报告 eval_linattn 同口径）
     per_img = []                # (n, T) 每图逐步 0-255 L1（算 oracle 用）
+    records = []                # E-A1: --dump_per_image 的每图记录
     sum_const = 0.0             # 常量灰基线（逐图去均值）0-255 L1
     n_img = 0
     for bi, (x, _) in enumerate(va):
@@ -117,9 +152,35 @@ def run(args):
         sum_l1_01 += (p01 - t01.unsqueeze(1)).abs().mean(dim=(2, 3, 4)).sum(0).cpu().numpy()
         sum_mse += ((p01 - t01.unsqueeze(1)) ** 2).mean(dim=(2, 3, 4)).sum(0).cpu().numpy()
         t01e = t01.unsqueeze(1).expand(B, T, 3, img, img).reshape(B * T, 3, img, img)
-        sum_psnr_img += psnr(p01.reshape(B * T, 3, img, img), t01e
-                             ).reshape(B, T).sum(0).cpu().numpy()
+        psnr_t = psnr(p01.reshape(B * T, 3, img, img), t01e).reshape(B, T)
+        sum_psnr_img += psnr_t.sum(0).cpu().numpy()
         n_img += B
+        if args.dump_per_image:                                   # E-A1: 每图逐步落盘
+            d_np = d.cpu().numpy()
+            p_np = psnr_t.cpu().numpy()
+            ed = _edge_density(t01).cpu().numpy()
+            off = bi * args.batch_size                            # shuffle=False ⇒ 顺序对齐
+            for j in range(B):
+                gi = idx[off + j]
+                k = int(d_np[j].argmin())
+                pth = rec_paths[gi]
+                try:
+                    nbytes = int(os.path.getsize(pth))
+                except OSError:
+                    nbytes = None
+                records.append({
+                    "index": int(gi), "path": pth,
+                    "file_name": os.path.basename(pth),
+                    "category": os.path.basename(os.path.dirname(pth)),
+                    "label": int(rec_labels[gi]),
+                    "L1_255": [float(v) for v in d_np[j]],
+                    "PSNR": [float(v) for v in p_np[j]],
+                    "best_step": k,                               # 0-based 最优停步
+                    "read_step": (int(steps[k]) if recurrent else 0),
+                    "best_L1_255": float(d_np[j][k]),
+                    "file_bytes": nbytes,                         # E-A4 复杂度代理 1
+                    "edge_density": float(ed[j]),                 # E-A4 复杂度代理 2
+                })
         if (bi + 1) % 10 == 0:
             print(f"    {n_img} 张…", flush=True)
 
@@ -175,6 +236,19 @@ def run(args):
               f"PSNR(平均MSE)={psnr_mean_mse[0]:.3f}dB  L1_01={L1_01[0]:.4f}")
     print(f"常量灰基线（逐图均色）0-255 L1 ≈ {res['const_baseline_255']:.3f}")
 
+    if args.dump_per_image:                                   # E-A1 产出
+        os.makedirs(os.path.dirname(args.dump_per_image) or ".", exist_ok=True)
+        dmp = {"ckpt": args.ckpt, "domain": domain, "recurrent": recurrent, "T": T,
+               "steps": steps, "cum_z_s": cum_z, "K": cfg.num_specials,
+               "num_patches": cfg.num_patches, "n_images": len(records),
+               "best_step_hist": res["best_step_hist"],
+               "aggregate_L1_255": L1.tolist(), "aggregate_PSNR": PSNR.tolist(),
+               "proxy_note": "file_bytes/edge_density 是图像复杂度弱代理, 非感知复杂度",
+               "images": records}
+        with open(args.dump_per_image, "w") as f:
+            json.dump(dmp, f, ensure_ascii=False)
+        print(f"[dump_per_image] {args.dump_per_image}  ({len(records)} 图)")
+
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         with open(args.out, "w") as f:
@@ -187,6 +261,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--data_dir", default="/root/autodl-tmp/datasets/imagenet100")
+    ap.add_argument("--data_dir_ood", default="",
+                    help="E-A3: 无标签 OOD 目录（flat 或 ImageFolder, 递归扫描）, "
+                         "给了它就替 IID val; 默认空 = 行为不变")
+    ap.add_argument("--domain", default="",
+                    help="域标签（写进 dump/tool 报告）; 空 = IID 时 'iid', OOD 时 'ood'")
+    ap.add_argument("--dump_per_image", default="",
+                    help="E-A1: 每图每步 L1_255/PSNR/最优停步/类别/文件名写 json; "
+                         "默认空 = 不落盘（原有输出逐位不变）")
     ap.add_argument("--val_per_class", type=int, default=50)
     ap.add_argument("--num_images", type=int, default=0)
     ap.add_argument("--batch_size", type=int, default=64)
