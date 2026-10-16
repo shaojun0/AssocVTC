@@ -16,6 +16,8 @@ SR-Diffusion Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
     解码器侧: **并行路径**（|T| 步一次算完 + 跨步 tgt_mask + query_mask_mode
     开关）自 2026-09-15 起被**循环架构**取代并整块删除; 需要复现旧结果时从
     git 取回（`git log -- model_v2.py`, 最后一个含并行路径的提交 = 043ef2a）。
+    循环 = 同一组解码器权重在 |T| 个采样步上反复施加、每步把上一步输出作为
+    下一步查询（looped transformer 口径, 见参考资料 [10]/[11]）。
 
 架构（register 式, 无选择、无预算）:
     specials 作为额外 token 直接拼进 DINOv2 输入序列
@@ -100,6 +102,18 @@ SR-Diffusion Phase 1 v2 — 训练脚手架（register 式, 无 ReEncoder）
     [9] Jaegle et al. (ICML 2022), Perceiver IO——输出查询定义输出结构的通用化;
         query_base 行 k↔patch k 的直接出处
         https://arxiv.org/abs/2107.14795
+    [10] Giannou et al. (ICML 2023), Looped Transformers as Programmable Computers
+        ——"looped transformer" 口径出处: 同一组权重被反复施加、输入序列承载
+        指令与中间状态; 对应本文解码器"同一个 OutputQueryDecoder 在 |T| 个
+        采样步上循环、carry 走 BPTT"的读出方式（架构段所引 looped transformer
+        即此文）
+        https://arxiv.org/abs/2301.13196
+        https://proceedings.mlr.press/v202/giannou23a/giannou23a.pdf
+    [11] Dehghani et al. (ICLR 2019), Universal Transformers——循环深度
+        （recurrent depth）+ 跨深度权重共享的原始出处; 循环读出"反复施加同一
+        解码器"的最早形式（该文另有 per-position halting / ACT, 本项目未用,
+        不构成依据）
+        https://arxiv.org/abs/1807.03819
 """
 
 import math
