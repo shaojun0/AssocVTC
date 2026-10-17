@@ -3,3 +3,7 @@ b1_lastonly	OK	rc_eval=0 rc_stepwise=0	2026-10-17T00:46:49+08:00
 b3_grow	OK	rc_eval=0 rc_stepwise=0	2026-10-17T02:36:57+08:00
 b2_dh1	OK	rc_eval=0 rc_stepwise=0	2026-10-17T04:12:50+08:00
 b2_dh2	OK	rc_eval=0 rc_stepwise=0	2026-10-17T05:48:52+08:00
+b2_dh3	OK	rc_eval=0 rc_stepwise=0	2026-10-17T07:21:54+08:00
+b4_sg	OK	rc_eval=0 rc_stepwise=0	2026-10-17T08:59:40+08:00
+b1_tail27	OK	rc_eval=0 rc_stepwise=0	2026-10-17T10:42:19+08:00
+b1_mean_nockpt	OK	rc_eval=0 rc_stepwise=0	2026-10-17T12:18:23+08:00

@@ -113,6 +113,30 @@ BPTT 循环读出在同预算下多为 **−0.5 ~ −2.6 dB**，**唯一的例�
 
 ![训练曲线 — 全线性臂](artifacts/alllinear/curves_rec.png)
 
+### 3.5 参数量与训练预算（8 臂；来源 `artifacts/eval_ablation8.json`）
+
+| 臂（目录） | 编码器 | 解码器 | 读出 | enc M | dec M | total M | batch / epoch / 步数 | 来源 |
+|---|---|---|---|---|---|---|---|---|
+| `stdattn_k64` | std | std | 单步 | 31.848 | 31.173 | **63.021** | 128 / 45 / 42,750 | `eval_ablation8.json` |
+| `stdattn_k64_rec` | std | std | BPTT | 31.848 | 31.207 | 63.055 | 64 / 6 / 11,406 | 同上 |
+| `k64` | lin | std | 单步 | 31.909 | 31.173 | 63.082 | 128 / 45 / 42,750 | 同上 |
+| `k64_rec` | lin | std | BPTT | 31.909 | 31.207 | 63.116 | 64 / 6 / 11,406 | 同上 |
+| `stdlin_k64` | std | lin | 单步 | 31.848 | 31.177 | 63.025 | 128 / 45 / 42,750 | 同上 |
+| `stdlin_k64_rec` | std | lin | BPTT | 31.848 | 31.210 | 63.058 | 64 / 6 / 11,406 | 同上 |
+| `alllinear_k64` | lin | lin | 单步 | 31.909 | 31.177 | 63.086 | 128 / 45 / 42,750 | 同上 |
+| `alllinear_k64_rec` | lin | lin | BPTT | 31.909 | 31.210 | 63.119 | 64 / 6 / 11,406 | 同上 |
+
+- **参数量是匹配的**：编码器 std vs lin 差 **0.061 M（0.19%）**；解码器 std vs lin 差 **0.004~0.037 M（<0.12%）**；总参数 63.02~63.12 M。⇒ 结论不能归因于「换了更大/更小的模型」（与 §6.2 的断言一致）。
+- ⚠️ 该表**只是参数与预算的登记**；PSNR/SSIM/L1 见 §3.2，逐步形态见 §5。`eval_ablation8.json` 的键是 ckpt **目录名**（`stdattn_k64/ckpt_best.pt` 等），历史四臂的 `cfg` 缺 `enc_attn`/`dec_attn`/`dec_grad_ckpt` 键，按历史默认（线性编码器 / softmax 解码器 / 无 gradient checkpointing）解读。
+
+### 3.6 精确值与自动聚合表（可复跑）
+
+- 本报告的主表/配对差/逐步形态由脚本从 json 直接生成（4 位小数，逐位可复核）：
+  [`artifacts/report_tables_ablation8.md`](artifacts/report_tables_ablation8.md)，
+  生成命令 `python3 tools/alit_report.py --ablation8`（默认读 `doc/2026-10-17/artifacts/eval_ablation8.json` + `stdlin/`、`alllinear/`，默认写回 `artifacts/report_tables_ablation8.md`）。
+- §3.3 的 12 条配对差在脚本里同样逐条重算，并额外给出**均值**：编码器方向 **+3.21 dB**（4/4 为正，范围 +2.12~+4.62）、解码器方向 **−4.73 dB**（4/4 为负，范围 −3.26~−6.50）。
+- ⚠️ 脚本把「同进程同批次才构成配对」写死在表头；§3.3 的读出组在脚本里被显式标为「两列预算不同，不可直接比」。
+
 ---
 
 ## 4. 训练开销与稳定性（实测）
@@ -201,7 +225,11 @@ python -u train_linattn.py --enc_attn std --dec_attn linear --dec_recurrent 1 --
     --num_specials 64 --batch_size 64 --epochs 6 --lr 2e-4 --init_from out/stdlin_k64/ckpt_best.pt \
     --output_dir out/stdlin_k64_rec
 
-# 8 臂矩阵表
+# 8 臂矩阵表（本报告 §3 的表由它生成，4 位小数逐位可复核）
+python3 tools/alit_report.py --ablation8
+#   → doc/2026-10-17/artifacts/report_tables_ablation8.md
+
+# 8 臂矩阵表（ablate_table.py 版，带架构矩阵 + 配对差）
 python ablate_table.py --eval doc/2026-10-17/artifacts/eval_ablation8.json \
   --stepwise-new "全线性"=doc/2026-10-17/artifacts/alllinear/stepwise.json \
   --stepwise-new "普通enc+线性dec"=doc/2026-10-17/artifacts/stdlin/stepwise.json \
@@ -226,3 +254,17 @@ python ablate_table.py --eval doc/2026-10-17/artifacts/eval_ablation8.json \
 6. **只到像素重建**（Phase 1 信息保持探针），未接 Phase 2 的 Qwen 文字生成验收。
 7. **PSNR 聚合口径**统一为"逐图 PSNR 再平均"（与 2026-10-15 报告同口径）；
    主线 `eval_stepwise.py` 的"先平均 MSE 再转 dB"口径约低 1.5 dB，**不可混用**。
+
+8. **配对规则：只有「同进程同批次评测」构成配对**。本报告的 8 臂都在同一进程、同一批次、
+   同一 5,000 张留出集上评测（`eval_linattn.py` 多臂入口）；跨批次重测会引入管线噪声
+   （本轮里重测的历史两臂与昨日存档差 2.9e-07 / 0.0 dB，见 §6.5）。跨**训练预算**、
+   跨**实例/代际**的格一律不可比。
+9. **`dec_grad_ckpt` 混淆（4 个 BPTT 臂）**：历史 `stdattn_k64_rec`（本仓库 10-16 线）与
+   `k64_rec`（10-15 线）的 `args.json` **没有该键**（= 默认 False，无 gradient checkpointing）；
+   新 `stdlin_k64_rec`、`alllinear_k64_rec` = **True**。⇒ 四个 BPTT 臂之间、以及 BPTT 与单步之间，
+   都存在**不可分离的**「开关效应 + 单种子重跑漂移」混淆（该漂移在 ALIT 报告
+   [`REPORT_alit_adaptive.md`](../2026-10-16/REPORT_alit_adaptive.md) §9.2 里量化到 **−0.173 dB** 量级）。
+10. **训练实例可能不同**：`k64` / `k64_rec`（10-15 线性线）与其余六臂**可能在不同 AutoDL 实例上训练**
+    （换机）；**只有评测是同机同进程**。⇒ 涉及这四臂的差异带实例混淆。
+11. **设定限定**：以上结论只针对 **224×224 / K=64 / 编码器 31.9 M + 解码器 31.2 M / ImageNet-100 / seed 0**；
+    不外推到其它分辨率、K、模型规模或数据集。

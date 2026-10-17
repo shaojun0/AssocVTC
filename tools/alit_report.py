@@ -50,6 +50,9 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_ART = os.path.join(REPO_ROOT, "doc", "2026-10-16", "artifacts", "alit")
 DEFAULT_OUT = os.path.join(DEFAULT_ART, "report_tables.md")
+# 八臂消融产物（Lead 2026-10-17 指令：统一到 doc/2026-10-17/artifacts/，仅 4.2MB、已提交）
+DEFAULT_AB8 = os.path.join(REPO_ROOT, "doc", "2026-10-17", "artifacts")
+DEFAULT_AB8_OUT = os.path.join(DEFAULT_AB8, "report_tables_ablation8.md")
 
 # PLAN §2.2 已发布（10-15/10-16 旧实例）四臂参照值 —— 仅用于「复现核对」列
 PLAN_REF = {
@@ -88,6 +91,14 @@ EXPECTED = [
     ("alit_b_arms.tsv", "E-B 臂执行状态表", "run_alit_b.sh"),
     ("eval_b1_mean.json", "E-B 基线复跑（b1_mean）全量评测", "run_alit_b.sh"),
     ("stepwise_b1_mean.json", "E-B 基线复跑（b1_mean）逐步", "run_alit_b.sh"),
+    ("eval_b2_dh1.json", "E-B2 硬区域掩码臂评测", "run_alit_b.sh"),
+    ("eval_b2_dh2.json", "E-B2 软停机臂评测", "run_alit_b.sh"),
+    ("eval_b2_dh3.json", "E-B2 软停机+stop-grad 臂评测", "run_alit_b.sh"),
+    ("eval_b4_sg.json", "E-B4 随机子集反传臂评测", "run_alit_b.sh"),
+    ("probe_region_all11.json", "E-B2 区域隔离/后步非平凡探针（11 臂，报告优先）", "probe_region_linattn.py"),
+    ("probe_region_all.json", "E-B2 探针（9 臂，旧版兜底）", "probe_region_linattn.py"),
+    ("eval_b1_mean_nockpt.json", "收尾探针：b1_mean grad-ckpt=0 归因", "run_alit_b.sh"),
+    ("stepwise_b1_mean_nockpt.json", "收尾探针：b1_mean grad-ckpt=0 逐步", "run_alit_b.sh"),
     ("task_fidelity_stdattn_rec.json", "E-C1 线性探针（主）", "E-C1 执行"),
     ("task_fidelity_stdattn_rec_cls.json", "E-C1 线性探针（cls 特征变体）", "E-C1 执行"),
     ("task_fidelity_stdattn_rec_lstsq.json", "E-C1 线性探针（lstsq 变体）", "E-C1 执行"),
@@ -179,6 +190,7 @@ def collect(art):
         "stepwise_b": {},         # arm -> json
         "tsv": None,
         "ec1": {},
+        "probe": None,
         "gate": None,
         "a_summary": None,
         "per_image": {},
@@ -248,6 +260,12 @@ def collect(art):
                 c["tsv"] = [ln.rstrip("\n").split("\t") for ln in f if ln.strip()]
         except OSError:
             c["tsv"] = None
+
+    for _pf in ("probe_region_all11.json", "probe_region_all.json"):
+        if os.path.exists(os.path.join(art, _pf)):
+            c["probe"] = load_json(os.path.join(art, _pf))
+            c["probe_file"] = _pf
+            break
 
     for p in g("*task_fidelity*.json"):
         d = load_json(p)
@@ -437,10 +455,12 @@ def verdict_b1(rows):
     arms = {k: v for k, v in rows.items() if k.startswith("b1_") and k != "b1_mean"}
     if not arms or base_last is None:
         return V_INSUFF, "缺 E-B1 非基线臂或末步 L1"
-    if len(arms) < 3:
-        lack = f"（仅 {len(arms)}/3 个非基线臂到位）"
-    else:
-        lack = ""
+    protocol = {"b1_decay", "b1_increasing", "b1_lastonly"}
+    n_proto = len([k for k in arms if k in protocol])
+    supp = sorted(k for k in arms if k not in protocol)
+    lack = (f"（仅 {n_proto}/3 个协议臂到位）" if n_proto < 3 else "")
+    if supp:
+        lack += f"；补充剂量臂: {','.join(supp)}"
     deltas = {k: base_last - v["L1_255_last"] for k, v in arms.items()
               if v.get("L1_255_last") is not None}
     if not deltas:
@@ -466,10 +486,112 @@ def verdict_b1(rows):
                 dose[k] = arms[k]["psnr"] - base["psnr"]
         order = " > ".join(f"{k} {v:+.3f}" for k, v in
                            sorted(dose.items(), key=lambda kv: -kv[1]))
+        tail_note = ""
+        def _s7(r):
+            b = (r or {}).get("L1_255_by_t")
+            return b[6] if b and len(b) >= 8 else None
+        s7_t = _s7(rows.get("b1_tail27"))
+        if s7_t is not None:
+            others7 = [v for v in (_s7(rows.get(k)) for k in ("b1_mean",) + tuple(protocol)) if v is not None]
+            if others7 and s7_t <= min(others7) + 1e-9:
+                tail_note = (f"；`b1_tail27` 的 **s7={s7_t:.4f} 为权重臂最优**"
+                             f"（末步 {rows['b1_tail27'].get('L1_255_last'):.4f}，"
+                             f"仅比 lastonly 差 {rows['b1_tail27'].get('L1_255_last') - rows['b1_lastonly']['L1_255_last']:.4f} px）"
+                             if rows.get("b1_lastonly", {}).get("L1_255_last") is not None else
+                             f"；`b1_tail27` 的 **s7={s7_t:.4f} 为权重臂最优**")
         return V_OK, (f"{','.join(sorted(good))} 末步改善 >0.10 px 且过冲未放大"
                       f"（{arms[g].get('overshoot', 0.0):.4f} ≤ 基线 {base_os:.4f}）"
-                      f"；{dirs}；**剂量（ΔPSNR dB 降序）= {order}** {lack}")
+                      f"；{dirs}；**剂量（ΔPSNR dB 降序）= {order}**{tail_note} {lack}")
     return V_INSUFF, f"最大差异 {mx:.3f} px ≥ 0.10 但方向/过冲不满足；{dirs} {lack}"
+
+
+def verdict_b2(rows, c):
+    """E-B2（README §4.1 三判据，**必须同时满足**）:
+      (1) 后步非平凡：`step_px_scale` 不随步坍缩。**尺度无关判据** = `scale_ratio_norm[-1] ≥ 1`
+          （绝对阈值 0.015 出自旧 `model_v2`/576 patch 探针空间，与本次 196 patch/8 区**不可假定同尺度**）;
+      (2) 真阶梯 + recon 不劣化：每个 dh 臂 PSNR ≥ `b1_mean − 0.10 dB` **且** 末步 L1 改善 > 0.10 px;
+      (3) 区域专精：`E_px_diag/offdiag` 显著 < 1（各步在自己区域更好）**且** 代价可接受（recon 不劣化）。
+    三条同时满足 ⇒ 成立; 否则 ⇒ 否证（主因写「任务同构」）。
+    """
+    probe = (c or {}).get("probe")
+    base = rows.get("b1_mean")
+    arms = [k for k in rows if k.startswith("b2_")]
+    if not probe or not probe.get("results"):
+        return V_INSUFF, "缺 probe_region_all.json（E-B2 判据 ①③ 无法核）"
+    if not base or not arms:
+        return V_INSUFF, "缺 b1_mean 或 b2_* 臂"
+    pr = probe["results"]
+    # (1) 后步非平凡（尺度无关）
+    ratios = []
+    for a in ["b1_mean"] + arms:
+        r = pr.get(a)
+        if r and r.get("scale_ratio_norm"):
+            ratios.append((a, r["scale_ratio_norm"][-1]))
+    c1 = bool(ratios) and min(v for _, v in ratios) >= 1.0
+    # (2) recon 不劣化 + 真阶梯
+    c2_rows = []
+    for a in arms:
+        r = rows[a]
+        dp = (r.get("psnr") - base.get("psnr")) if (r.get("psnr") is not None
+                                                    and base.get("psnr") is not None) else None
+        gain = ((base.get("L1_255_last") or 0) - (r.get("L1_255_last") or 0)
+                if r.get("L1_255_last") is not None and base.get("L1_255_last") is not None else None)
+        ok = (dp is not None and dp >= -0.10 and gain is not None and gain > 0.10)
+        c2_rows.append((a, dp, gain, ok))
+    c2 = all(x[3] for x in c2_rows) if c2_rows else False
+    # (3) 区域专精（diag/offdiag 显著 < 1）+ 代价可接受
+    spec = []
+    for a in ["b1_mean"] + arms:
+        r = pr.get(a)
+        if not r:
+            continue
+        m = r.get("E_px_diag_over_offdiag_mean")
+        if m is None:
+            continue
+        dp = None
+        if a in rows and base and rows[a].get("psnr") is not None and base.get("psnr") is not None:
+            dp = rows[a]["psnr"] - base["psnr"]
+        spec.append((a, m, dp))
+    specialized_ok = [x for x in spec if x[1] is not None and x[1] <= 0.90
+                      and (x[2] is None or x[2] >= -0.10)]
+    c3 = bool(specialized_ok)
+    facts = ("(1) 后步非平凡=" + ("满足" if c1 else "不满足")
+             + f"（scale_ratio(end/start) 最小 {min((v for _, v in ratios), default=float('nan')):.3f}；"
+             + "、" .join(f"{a} {v:.3f}" for a, v in ratios) + "）; "
+             + "(2) recon不劣化+真阶梯=" + ("满足" if c2 else "不满足")
+             + "（" + "、".join(f"{a} ΔPSNR={fsgn(dp,3)} 末步ΔL1={fsgn(g,3)}" for a, dp, g, _ in c2_rows) + "）; "
+             + "(3) 区域专精=" + ("满足" if c3 else "不满足")
+             + "（diag/offdiag 均值: " + "、".join(f"{a} {m:.3f}" for a, m, _ in spec) + "）")
+    if c1 and c2 and c3:
+        return V_OK, "三判据同时满足: " + facts
+    main = ("**主因=任务同构**：每步都在做同一全局精修，而不是各自负责一块 ⇒ 该结构下损失侧动态停机不成立"
+            if c2 is False or c3 is False else "")
+    return V_NO, "README §4.1 三判据**未同时满足** ⇒ 否证。" + facts + (("；" + main) if main else "")
+
+
+def verdict_b4(rows):
+    """E-B4（PLAN §8）分两个位置:
+      · **轴1「随机子集反传在等平均 token 数下追平全步反传」**: `b4_sg` vs `b1_mean`
+        ⇒ ΔPSNR ≥ −0.10 dB **且** 各截断档（t=3/5/7/8）≤ +0.10 px 才算追平; 否则 **否证**;
+      · **轴2「截断档 vs 专训档 <0.20 px」**: 专训档 K'=16/32/48 按成本裁剪不做 ⇒ **数据不足**（成本理由）。
+    """
+    base, arm = rows.get("b1_mean"), rows.get("b4_sg")
+    cost = ("专训档 K'=16/32/48 **不做**（从零训练 3×~5 h 超预算，2026-10-16 Lead 决定）"
+            "⇒ 「截断档 vs 专训档 <0.20 px」记数据不足 + 成本理由，**不是待补**")
+    if not base or not arm:
+        return V_INSUFF, "缺 b1_mean 或 b4_sg 臂；" + cost
+    dp = arm["psnr"] - base["psnr"]
+    gain = (base.get("L1_255_last") or 0) - (arm.get("L1_255_last") or 0)
+    trunc = None
+    if arm.get("L1_255_by_t") and base.get("L1_255_by_t"):
+        trunc = [arm["L1_255_by_t"][i] - base["L1_255_by_t"][i] for i in (2, 4, 6, 7)]
+    trunc_bad = bool(trunc) and max(trunc) > 0.10
+    if dp >= -0.10 and not trunc_bad:
+        return V_OK, (f"b4_sg ΔPSNR={fsgn(dp,4)} dB、末步 ΔL1={fsgn(gain,4)} px、"
+                      f"截断档 {[round(x,4) for x in (trunc or [])]} ⇒ 追平; " + cost)
+    return V_NO, (f"**随机子集反传不成立**: b4_sg ΔPSNR={fsgn(dp,4)} dB（>−0.10 才追平）、"
+                  f"末步 ΔL1={fsgn(gain,4)} px（正=更好）、截断档(15/35/63/64 tok)="
+                  f"{[round(x,4) for x in (trunc or [])]} **全档更差**; " + cost)
 
 
 def verdict_b3(rows):
@@ -963,6 +1085,7 @@ def sec_b(c):
                 "later_delta_mean": (sum(dlt[-4:]) / 4.0) if len(dlt) >= 4 else
                                     (sum(dlt) / len(dlt) if dlt else None),
                 "n_positive_steps": sw.get("n_positive_steps"),
+                "L1_255_by_t": L1,
                 "src_stepwise": f"stepwise_{arm}.json",
             })
         rows[arm] = row
@@ -1106,25 +1229,43 @@ def sec_b(c):
     have_b2 = any(k.startswith("b2_") for k in rows)
     have_b4 = any(k.startswith("b4_") for k in rows)
     have_b4_k = any(k.startswith("b4_k") for k in rows)
-    if have_b2:
-        base = rows.get("b1_mean") or {}
-        parts = []
-        for k in sorted(k for k in rows if k.startswith("b2_")):
-            r = rows[k]
-            parts.append(f"{k}: ΔPSNR={fsgn((r.get('psnr') or 0) - (base.get('psnr') or 0), 3)}"
-                         f" Δ末步L1={fsgn((base.get('L1_255_last') or 0) - (r.get('L1_255_last') or 0), 3)}")
-        b2 = ("数据不足", "README §4.1 三条判据需要 ‖W·Y_t‖ / 区域隔离 L1 / 真阶梯，"
-                          "现有产物只能给 PSNR+Δ_t 读数（" + "; ".join(parts) + "）")
-    else:
-        b2 = ("数据不足", "缺 b2_* 臂产物")
-    if not have_b4:
-        b4 = ("数据不足", "缺 b4_* 臂产物；" + EB4_COST_CUT)
-    elif not have_b4_k:
-        b4 = ("数据不足", "缺专训档 K'=16/32/48 等预算对照（截断档 t=3/5/7 评测亦未到位）"
-                          "⇒ 无法判 <0.20 px gap；" + EB4_COST_CUT)
-    else:
-        b4 = ("数据不足", "缺「截断档 t=3/5/7 vs 专训档」等预算评测产物"
-                          "（PLAN E-B4 判据 <0.20 px）")
+    b2 = verdict_b2(rows, c)
+    b4 = verdict_b4(rows)
+    # ── E-B2 探针（README §4.1 三判据；来源 probe_region_all.json）──
+    if c.get("probe") and c["probe"].get("results"):
+        pr = c["probe"]["results"]
+        L += ["", f"### 7.2d E-B2 探针：README §4.1 三判据（来源 `{c.get('probe_file', 'probe_region_all.json')}`，"
+                  f"{len(pr)} 臂、n=5,000）", "",
+              "> 口径：判据(1) 的绝对阈值 **0.015** 出自旧探针（`model_v2`/576 patch/5 区/另一 PixelHead 输出空间），"
+              "与本次 **196 patch/8 区**不可假定同尺度 ⇒ 主用**尺度无关比值**；绝对量级只作参考。", "",
+              "| 臂 | 组 | `scale` step1 → 末步 | 末步/首步 | diag/offdiag 均值（范围） | diag_cv | ΔPSNR vs mean | 末步 L1 增益 |",
+              "|---|---|---|---|---|---|---|---|"]
+        def _grp(a):
+            if a.startswith("b2_"):
+                return "监督口径"
+            if a.startswith("b3_"):
+                return "机制(生长)"
+            if a.startswith("b4_"):
+                return "采样"
+            return "权重/基线"
+        for a in sorted(pr):
+            r = pr[a]
+            sn = r.get("step_px_scale_norm") or []
+            sr = r.get("scale_ratio_norm") or []
+            dd = r.get("E_px_diag_over_offdiag") or []
+            dp = g = None
+            if a in rows and rows.get("b1_mean"):
+                b = rows["b1_mean"]
+                if rows[a].get("psnr") is not None and b.get("psnr") is not None:
+                    dp = rows[a]["psnr"] - b["psnr"]
+                if rows[a].get("L1_255_last") is not None and b.get("L1_255_last") is not None:
+                    g = b["L1_255_last"] - rows[a]["L1_255_last"]
+            L.append(f"| `{a}` | {_grp(a)} | {fnum(sn[0] if sn else None, 4)} → "
+                     f"{fnum(sn[-1] if sn else None, 4)} | **{fnum(sr[-1] if sr else None, 4)}** | "
+                     f"{fnum(r.get('E_px_diag_over_offdiag_mean'), 4)}"
+                     f"（{fnum(min(dd), 3) if dd else '—'}–{fnum(max(dd), 3) if dd else '—'}） | "
+                     f"{fnum(r.get('E_px_diag_cv'), 4)} | {fsgn(dp, 4)} | {fsgn(g, 4)} |")
+        L.append("")
     L += ["", "### 7.3 判决（PLAN §8）", "",
           "| 实验 | 判决 | 依据 |", "|---|---|---|",
           f"| E-B1 逐迭代损失权重 | **{b1[0]}** | {b1[1]} |",
@@ -1549,16 +1690,185 @@ def build(art, out_path, no_plots, emit_json=False):
     return md
 
 
+def build_ablation8(ab_dir, out_path):
+    """2×2×2 八臂架构矩阵表生成入口（task-7）。
+    读 `<ab_dir>/srdiff_final/eval_ablation8.json`（主表，同机同进程同批次全量 5000 张），
+    生成：8 臂主表（含参数量）+ 编码器/解码器/读出三组配对差 + 逐步形态表。
+    **只有同进程同批次评测构成配对**；跨预算/跨代际的格不可比（写入表头）。
+    产物: `report_tables_ablation8.md`。
+    """
+    ev = None
+    cand = [os.path.join(ab_dir, "eval_ablation8.json"),                     # 10-17 新布局
+            os.path.join(ab_dir, "srdiff_final", "eval_ablation8.json")]      # 旧收割目录（兜底）
+    ev_path = next((p for p in cand if os.path.exists(p)), None)
+    for p in sorted(glob.glob(os.path.join(ab_dir, "**", "eval_ablation*.json"),
+                              recursive=True)):
+        if ev_path is None and "eval_ablation8" in p:
+            ev_path = p
+    if ev_path:
+        ev = load_json(ev_path)
+    if not isinstance(ev, dict) or not ev:
+        print(f"[alit_report/ab8] 未见 eval_ablation8.json（{ab_dir}）⇒ 数据不足", file=sys.stderr)
+        return None
+
+    # cfg → (enc, dec, 读出)；历史 ckpt 缺键按历史默认（线性编码器 + 普通 softmax 解码器）
+    def cls(v):
+        cfg = v.get("cfg") or {}
+        enc = (cfg.get("enc_attn") or "linear").lower()
+        dec = (cfg.get("dec_attn") or "std").lower()
+        rec = bool(cfg.get("dec_recurrent"))
+        return ("std" if enc in ("std", "standard", "softmax") else "linear",
+                "std" if dec in ("std", "standard", "softmax") else "linear", rec)
+
+    def short(a):
+        return "std" if a == "std" else "lin"
+
+    arms = {}
+    for k, v in ev.items():
+        enc, dec, rec = cls(v)
+        name = os.path.basename(os.path.dirname(k))
+        arms[name] = {"enc": enc, "dec": dec, "rec": rec, "v": v, "key": k}
+    if len(arms) != 8:
+        print(f"[alit_report/ab8] ⚠️ 期望 8 臂, 实际 {len(arms)}: {sorted(arms)}")
+
+    def find(enc, dec, rec):
+        for n, a in arms.items():
+            if a["enc"] == enc and a["dec"] == dec and a["rec"] == rec:
+                return n, a
+        return None, None
+
+    L = ["# 八臂架构矩阵消融 — 聚合表（自动生成）", "",
+         f"> 由 `tools/alit_report.py --ablation8` 生成；来源 `{os.path.relpath(ev_path, REPO_ROOT)}`"
+         f"（`eval_linattn.py` 多臂**同进程同批次**评测，全量 5,000 张）。",
+         "> **配对规则：只有同进程同批次评测构成配对**；跨预算（6 ep 热启动 vs 45 ep 从零）、"
+         "跨实例/代际的格**不可直接比**。", "",
+         "## 1. 八臂主表", "",
+         "| 臂（目录） | enc attn | dec attn | 读出 | PSNR ↑ | SSIM ↑ | L1_norm ↓ | "
+         "enc M | dec M | total M | step / epoch | 来源 |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    order = sorted(arms, key=lambda n: (-arms[n]["v"]["psnr"]))
+    for n in order:
+        a = arms[n]; v = a["v"]; p = v.get("params") or {}
+        L.append(f"| `{n}` | {short(a['enc'])} | {short(a['dec'])} | "
+                 f"{'BPTT' if a['rec'] else '单步'} | {fnum(v.get('psnr'))} | "
+                 f"{fnum(v.get('ssim'), 4)} | {fnum(v.get('l1_norm'), 5)} | "
+                 f"{fnum(p.get('enc_M'))} | {fnum(p.get('dec_M'))} | {fnum(p.get('total_M'))} | "
+                 f"{v.get('step')} / {v.get('epoch')} | `{os.path.basename(ev_path)}` |")
+
+    # ── 配对差：编码器注意力 ──
+    L += ["", "## 2. 配对差（同一格内只动一个因素）", "",
+          "### 2.1 编码器注意力：std − lin（同解码器、同读出；正 = std 更好）", "",
+          "| 解码器 | 读出 | std PSNR | lin PSNR | **ΔPSNR** | ΔSSIM |", "|---|---|---|---|---|---|"]
+    for dec in ("std", "linear"):
+        for rec in (False, True):
+            ns, as_ = find("std", dec, rec)
+            nl, al = find("linear", dec, rec)
+            if not (ns and nl):
+                continue
+            ds = as_["v"]["psnr"] - al["v"]["psnr"]
+            L.append(f"| {short(dec)} | {'BPTT' if rec else '单步'} | {fnum(as_['v']['psnr'])} "
+                     f"(`{ns}`) | {fnum(al['v']['psnr'])} (`{nl}`) | **{fsgn(ds, 4)}** | "
+                     f"{fsgn((as_['v']['ssim'] or 0) - (al['v']['ssim'] or 0), 4)} |")
+    L += ["", "### 2.2 解码器注意力：lin − std（同编码器、同读出；负 = 线性解码器代价）", "",
+          "| 编码器 | 读出 | std dec PSNR | lin dec PSNR | **ΔPSNR** | ΔSSIM |", "|---|---|---|---|---|---|"]
+    for enc in ("std", "linear"):
+        for rec in (False, True):
+            n1, a1 = find(enc, "std", rec)
+            n2, a2 = find(enc, "linear", rec)
+            if not (n1 and n2):
+                continue
+            d = a2["v"]["psnr"] - a1["v"]["psnr"]
+            L.append(f"| {short(enc)} | {'BPTT' if rec else '单步'} | {fnum(a1['v']['psnr'])} "
+                     f"(`{n1}`) | {fnum(a2['v']['psnr'])} (`{n2}`) | **{fsgn(d, 4)}** | "
+                     f"{fsgn((a2['v']['ssim'] or 0) - (a1['v']['ssim'] or 0), 4)} |")
+    L += ["", "### 2.3 读出方式：BPTT − 单步——⚠️ **两列预算不同，不可直接比**", "",
+          "> BPTT 臂 = 从各自单步版**热启动 6 ep / 11,406 步**；单步臂 = **45 ep / 42,750 步从零**。"
+          "该表的差**不是**「BPTT 的收益」，只能读作「不同预算/协议下的两个交付点」。"
+          "BPTT 是否有效要看 §3 的**同臂内逐步形态**。", "",
+          "| enc | dec | 单步 PSNR | BPTT PSNR | 差(BPTT−单步) |", "|---|---|---|---|---|"]
+    for enc in ("std", "linear"):
+        for dec in ("std", "linear"):
+            n1, a1 = find(enc, dec, False)
+            n2, a2 = find(enc, dec, True)
+            if not (n1 and n2):
+                continue
+            L.append(f"| {short(enc)} | {short(dec)} | {fnum(a1['v']['psnr'])} (`{n1}`) | "
+                     f"{fnum(a2['v']['psnr'])} (`{n2}`) | {fsgn(a2['v']['psnr'] - a1['v']['psnr'], 4)} |")
+
+    # ── 逐步形态（BPTT 臂；同臂内，与预算无关）──
+    sw_found = []
+    # 逐步文件：优先新布局（相对 ab_dir），其它相对仓库根（都是已提交、会长期存在的产物）
+    for rel in ("stdlin/stepwise.json", "alllinear/stepwise.json",
+                "doc/2026-10-16/artifacts/alit/stepwise_stdattn_k64_rec.json",
+                "doc/2026-10-16/artifacts/alit/stepwise_linattn_k64_rec.json",
+                # 旧收割目录（兜底；最终提交前会被移出仓库）
+                "srdiff_stdattn/stepwise_stdattn_rec.json",
+                "srdiff_linattn/k64_rec/stepwise.json",
+                "srdiff_final/stepwise_stdlin_rec.json",
+                "srdiff_alllinear/stepwise_alllinear_rec.json"):
+        p = os.path.join(ab_dir, rel)
+        if not os.path.exists(p):
+            p = os.path.join(REPO_ROOT, rel)
+        if os.path.exists(p):
+            d = load_json(p)
+            if isinstance(d, dict):
+                sw_found.append((rel, d))
+    if sw_found:
+        L += ["", "## 3. 逐步形态（BPTT 臂；同臂内比较，与训练预算无关）", "",
+              "| BPTT 臂（来源） | L1_255 step1 → 最优 → step8 | 总落差 | Δ₁ 占比 | "
+              "正增量步 | 均值曲线最优步 | 每图众数档（占比） |", "|---|---|---|---|---|---|---|"]
+        for rel, d in sw_found:
+            L1 = d.get("L1_255") or []
+            if not L1:
+                continue
+            hist = d.get("best_step_hist") or []
+            n = d.get("n_images") or sum(hist) or 1
+            mstep, mshare = (hist.index(max(hist)) + 1, max(hist) / n * 100) if hist else (None, float("nan"))
+            name = d.get("ckpt", rel).split("/")[-2]
+            L.append(f"| `{name}`（`{rel}`） | {fnum(L1[0])} → {fnum(min(L1))} → {fnum(L1[-1])} | "
+                     f"{fnum(d.get('total_drop_255'))} px | "
+                     f"{fnum((d.get('delta1_share') or 0) * 100, 2)}% | "
+                     f"{d.get('n_positive_steps')}/{max((d.get('T') or 1) - 1, 1)} | "
+                     f"step {int(d.get('best_step', 0)) + 1} | "
+                     f"step {mstep}（{fnum(mshare, 2)}%） |")
+        L += ["", "**读出**：只有 **std 解码器**的 BPTT 臂出现「多步持续精修」；"
+                  "线性解码器两臂的 Δ₁ 占比 ≥84% ⇒ 链式循环**基本不动**（详见报告 §4）。"]
+    else:
+        L += ["", "## 3. 逐步形态", "", "**数据不足**（未找到 stepwise_*_rec.json）。"]
+
+    md = "\n".join(L) + "\n"
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(md)
+    print(f"[alit_report/ab8] 来源: {ev_path}")
+    print(f"[alit_report/ab8] 臂数: {len(arms)}  写入: {out_path}")
+    for n in order:
+        a = arms[n]
+        print(f"  {n:20s} {short(a['enc']):4s}+{short(a['dec']):4s} "
+              f"{'BPTT' if a['rec'] else '单步':5s} PSNR={a['v']['psnr']:.4f} "
+              f"SSIM={a['v']['ssim']:.4f} L1={a['v']['l1_norm']:.5f}")
+    return md
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="ALIT 实验报告聚合器（CPU-only，缺文件优雅跳过）",
+        description="ALIT 实验报告聚合器（CPU-only，缺文件优雅跳过）"
+                    " + 8 臂架构矩阵表生成入口（--ablation8）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--artifacts", default=DEFAULT_ART, help="产物目录")
     ap.add_argument("--out", default=DEFAULT_OUT, help="输出 markdown")
     ap.add_argument("--no-plots", action="store_true", help="不生成 png")
     ap.add_argument("--json", action="store_true", dest="emit_json",
                     help="额外打印一行机器可读 JSON 摘要")
+    ap.add_argument("--ablation8", action="store_true",
+                    help="只生成 2×2×2 八臂架构矩阵表（artifacts/ablation8/）")
+    ap.add_argument("--ablation8-dir", default=DEFAULT_AB8, help="八臂产物目录")
+    ap.add_argument("--ablation8-out", default=DEFAULT_AB8_OUT, help="八臂表输出 markdown")
     a = ap.parse_args()
+    if a.ablation8:
+        build_ablation8(os.path.abspath(a.ablation8_dir),
+                        os.path.abspath(a.ablation8_out))
+        return 0
     build(os.path.abspath(a.artifacts), os.path.abspath(a.out), a.no_plots,
           a.emit_json)
     return 0

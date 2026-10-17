@@ -99,7 +99,10 @@ def main():
         T = len(model.decoder.windows)
         regions = region_slices(cfg.num_patches, T)
         p = cfg.patch
-        s255 = torch.tensor(STD_255, device=dev).view(1, 1, 1, 3, 1, 1)
+        # ⚠️ 两个不同维数的 scale 张量: pr 是 6 维 (B,T,N,3,p,p), tg 是 5 维 (B,N,3,p,p);
+        #    用 6 维 scale 乘 5 维 tg 会在**前面插入一维** ⇒ 广播时 N 与 T 错位。
+        s6 = torch.tensor(STD_255, device=dev).view(1, 1, 1, 3, 1, 1)
+        s5 = torch.tensor(STD_255, device=dev).view(1, 1, 3, 1, 1)
 
         sum_scale_norm = np.zeros(T)
         sum_scale_255 = np.zeros(T)
@@ -117,8 +120,8 @@ def main():
             N = cfg.num_patches
             pr = pred.reshape(B, T, N, 3, p, p)
             tg = tgt.reshape(B, N, 3, p, p)
-            pr255 = pr * s255
-            tg255 = tg * s255
+            pr255 = pr * s6
+            tg255 = tg * s5
             # 逐步尺度（坍缩判据）
             sum_scale_norm += pr.abs().mean(dim=(2, 3, 4, 5)).sum(0).cpu().numpy()
             sum_scale_255 += pr255.abs().mean(dim=(2, 3, 4, 5)).sum(0).cpu().numpy()
@@ -175,14 +178,33 @@ def main():
             torch.cuda.empty_cache()
 
     if args.check_stepwise:
-        ref = json.load(open(args.check_stepwise))
+        # 自洽校验: prog_curve 必须与 eval_stepwise 的 L1_255 逐位一致（同口径）。
+        # 传目录 ⇒ 按 `stepwise_<arm>.json` 自动逐臂匹配; 传文件 ⇒ 仅比对同名臂。
+        import glob
+        refs = {}
+        if os.path.isdir(args.check_stepwise):
+            for p in glob.glob(os.path.join(args.check_stepwise, "stepwise_*.json")):
+                arm = os.path.basename(p)[len("stepwise_"):-len(".json")]
+                refs[arm] = p
+        else:
+            arm = os.path.basename(args.check_stepwise)
+            arm = arm[len("stepwise_"):-len(".json")] if arm.startswith("stepwise_") else arm
+            refs[arm] = args.check_stepwise
         for key, res in out["results"].items():
+            if key not in refs:
+                print(f"[check] {key}: 无对应 stepwise json, 跳过")
+                continue
+            ref = json.load(open(refs[key]))
             a = np.asarray(res["prog_curve_L1_255"])
             b = np.asarray(ref["L1_255"])
             d = float(np.abs(a - b).max()) if a.shape == b.shape else float("nan")
-            print(f"[check] {key} prog_curve vs stepwise L1_255: max|Δ|={d:.3e} "
-                  f"(应≈0: 同口径)")
-            out[f"check_{key}"] = {"max_abs_diff_vs_stepwise": d}
+            print(f"[check] {key} prog_curve vs stepwise L1_255: max|Δ|={d:.3e} (应≈0: 同口径)")
+            out[f"check_{key}"] = {"max_abs_diff_vs_stepwise": d,
+                                   "ref": refs[key]}
+        worst = max([abs(v["max_abs_diff_vs_stepwise"]) for k, v in out.items()
+                     if k.startswith("check_")], default=0.0)
+        print(f"[check] 全部臂 worst max|Δ| = {worst:.3e}")
+        out["check_worst_max_abs_diff"] = worst
 
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

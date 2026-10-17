@@ -60,6 +60,10 @@ EXTRA[b1_mean]="";              REQ[b1_mean]="";                 NOTE[b1_mean]="
 EXTRA[b1_decay]="--loss_weights 2.5,2,1.5,1.25,1,1,1,1"; REQ[b1_decay]="--loss_weights"; NOTE[b1_decay]="ALIT 原版递减"
 EXTRA[b1_increasing]="--loss_weights 1,1,1,1,1.25,1.5,2,2.5"; REQ[b1_increasing]="--loss_weights"; NOTE[b1_increasing]="递增（让后步干活）"
 EXTRA[b1_lastonly]="--loss_weights 0,0,0,0,0,0,0,1"; REQ[b1_lastonly]="--loss_weights"; NOTE[b1_lastonly]="last-only"
+# Lead 2026-10-17 追加: E-B1 剂量点（在 increasing 与 last-only 之间）
+EXTRA[b1_tail27]="--loss_weights 0,0,0,0,0,0,1,3"; REQ[b1_tail27]="--loss_weights"; NOTE[b1_tail27]="E-B1 剂量点: step7 25% / step8 75%"
+# 收尾探针: 关 grad-ckpt。注意 BASE 里已有 --dec_grad_ckpt 1，argparse 后出现者生效 ⇒ 此处 0 覆盖
+EXTRA[b1_mean_nockpt]="--dec_grad_ckpt 0"; REQ[b1_mean_nockpt]=""; NOTE[b1_mean_nockpt]="收尾探针: 分离 grad-ckpt 开关效应 vs 重跑漂移"
 EXTRA[b2_dh1]="--dh_mode 1";                 REQ[b2_dh1]="--dh_mode";        NOTE[b2_dh1]="硬区域掩码"
 EXTRA[b2_dh2]="--dh_mode 2 --dh_quantile 0.5"; REQ[b2_dh2]="--dh_quantile";  NOTE[b2_dh2]="软停机 50%"
 EXTRA[b2_dh3]="--dh_mode 3 --dh_quantile 0.5"; REQ[b2_dh3]="--dh_quantile";  NOTE[b2_dh3]="软停机+stop-grad"
@@ -72,7 +76,7 @@ EXTRA[b4_sg]="--sample_grad_iters 3";        REQ[b4_sg]="--sample_grad_iters"; N
 # 不做 b4_k16/k32/k48 专训档（无法热启动, 3 臂从零 ≈15h 超预算 ⇒ 报告记"数据不足+成本理由"）。
 # E-B4 的"截断档 t=3/5/7"**不需要额外训练**: b4_sg 的 stepwise json 已含 L1_255[t] 全档,
 # 直接读 t=3/5/7 即截断档指标（与专训档对照则因上述理由不做）。
-DEFAULT_ORDER="b1_mean b1_decay b1_increasing b1_lastonly b3_grow b2_dh1 b2_dh2 b2_dh3 b4_sg"
+DEFAULT_ORDER="b1_mean b1_decay b1_increasing b1_lastonly b3_grow b2_dh1 b2_dh2 b2_dh3 b4_sg b1_tail27 b1_mean_nockpt"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 log "########## run_alit_b.sh START arms='${ARMS:-default}' budget=${BUDGET_H}h timeout=${TIMEOUT_H}h ##########"
