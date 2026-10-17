@@ -1,0 +1,9 @@
+[alit_tiny] trainable=52.8M total=125.0M
+bs= 4 grad_iters=-1:    353 ms/step |   11.3 img/s | peak   5.1 GiB
+bs= 8 grad_iters=-1:    377 ms/step |   21.2 img/s | peak   8.9 GiB
+bs=12 grad_iters=-1:    410 ms/step |   29.3 img/s | peak  12.7 GiB
+bs=16 grad_iters=-1:    477 ms/step |   33.6 img/s | peak  16.5 GiB
+bs=20 grad_iters=-1:    583 ms/step |   34.3 img/s | peak  20.3 GiB
+bs=24 grad_iters=-1:    704 ms/step |   34.1 img/s | peak  24.1 GiB
+bs= 8 grad_iters= 2:    222 ms/step |   36.0 img/s | peak   6.1 GiB
+bs=16 grad_iters= 2:    311 ms/step |   51.4 img/s | peak  10.9 GiB

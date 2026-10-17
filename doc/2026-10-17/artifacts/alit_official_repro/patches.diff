@@ -1,0 +1,161 @@
+--- a/main_pretrain.py
++++ b/main_pretrain.py
+@@ -30,6 +30,7 @@
+     parser.add_argument('--batch_size', default=64, type=int,
+                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
+     parser.add_argument('--epochs', default=400, type=int)
++    parser.add_argument('--save_freq', default=1, type=int, help='save extra checkpoint every N epochs')
+     parser.add_argument('--accum_iter', default=1, type=int,
+                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
+     parser.add_argument('--weight_decay', type=float, default=0.05, help='weight decay')
+@@ -94,7 +95,8 @@
+             # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0)),
+             transforms.RandomResizedCrop(args.input_size, scale=(0.8, 1.0)),
+             transforms.RandomHorizontalFlip(),
+-            transforms.ToTensor()])
++            transforms.ToTensor(),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5])])
+     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+ 
+     if True:  # args.distributed:
+@@ -152,7 +154,7 @@
+         model_without_ddp = model.module
+     
+     # following timm: set wd as 0 for bias and norm layers
+-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
++    param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
+     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+     loss_scaler = NativeScaler()
+ 
+@@ -174,7 +176,7 @@
+             args=args
+         )
+ 
+-        if args.output_dir and (epoch % 40 == 0 or epoch + 1 == args.epochs):
++        if args.output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
+             misc.save_model(
+                 args=args, model_without_ddp=model_without_ddp, ema=ema, optimizer=optimizer,
+                 loss_scaler=loss_scaler, epoch=epoch)
+--- a/main_full_finetuning.py
++++ b/main_full_finetuning.py
+@@ -95,7 +95,8 @@
+             # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0)),
+             transforms.RandomResizedCrop(args.input_size, scale=(0.8, 1.0)),
+             transforms.RandomHorizontalFlip(),
+-            transforms.ToTensor()])
++            transforms.ToTensor(),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5])])
+     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+ 
+     if True:  # args.distributed:
+@@ -153,7 +154,7 @@
+         model_without_ddp = model.module
+     
+     # following timm: set wd as 0 for bias and norm layers
+-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
++    param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
+     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+     optimizer_discriminator = torch.optim.AdamW(model_without_ddp.gan_losses.parameters(), lr=args.lr, betas=(0.9, 0.95))
+     loss_scaler = NativeScaler()
+@@ -177,7 +178,7 @@
+             args=args
+         )
+ 
+-        if args.output_dir and (epoch % 40 == 0 or epoch + 1 == args.epochs):
++        if args.output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
+             misc.save_model(
+                 args=args, model_without_ddp=model_without_ddp, ema=ema, optimizer=optimizer,
+                 optimizer_discriminator=optimizer_discriminator,
+--- a/evaluate_rfid.py
++++ b/evaluate_rfid.py
+@@ -156,14 +156,18 @@
+         assert(os.path.exists(os.path.join(args.data_path, 'val')))
+         transform_val = transforms.Compose([
+             transforms.CenterCrop(args.input_size),
+-            transforms.ToTensor()
++            transforms.ToTensor(),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5]),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5])
+         ])
+         dataset_val = misc.ImageFolderWithFilenames(os.path.join(args.data_path, 'val'), transform=transform_val)
+     else:
+         transform_val = transforms.Compose([
+             transforms.Resize(args.input_size, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
+             transforms.CenterCrop(args.input_size),
+-            transforms.ToTensor()
++            transforms.ToTensor(),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5]),
++            transforms.Normalize([0.5,0.5,0.5], [0.5,0.5,0.5])
+         ])
+         dataset_val = misc.ImageFolderWithFilenames(os.path.join(args.data_path), transform=transform_val)
+     
+@@ -184,7 +188,7 @@
+         train_stage="full_finetuning")
+     
+     model.to(args.device)
+-    checkpoint = torch.load(args.ckpt, map_location='cpu')
++    checkpoint = torch.load(args.ckpt, map_location='cpu', weights_only=False)
+     model.load_state_dict(checkpoint['ema'], strict=True)
+     print(sum(p.numel() for p in model.parameters()), "num params")
+ 
+--- a/utils/misc.py
++++ b/utils/misc.py
+@@ -329,7 +329,7 @@
+             checkpoint = torch.hub.load_state_dict_from_url(
+                 args.finetune, map_location='cpu', check_hash=True)
+         else:
+-            checkpoint = torch.load(args.finetune, map_location='cpu')
++            checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
+         msg = model_without_ddp.load_state_dict(checkpoint['ema'], strict=False)
+         for key in set(msg.missing_keys): 
+             assert('gan_losses' in key)
+@@ -343,7 +343,7 @@
+             checkpoint = torch.hub.load_state_dict_from_url(
+                 args.resume, map_location='cpu', check_hash=True)
+         else:
+-            checkpoint = torch.load(args.resume, map_location='cpu')
++            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+         model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
+         ema.load_state_dict(checkpoint['ema'], strict=True)
+         print("Resumed checkpoint %s" % args.resume)
+--- a/base_tokenizers/taming/models/vqgan.py
++++ b/base_tokenizers/taming/models/vqgan.py
+@@ -24,6 +24,8 @@
+         self.decoder = Decoder(**ddconfig)
+         self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,
+                                         remap=remap, sane_index_shape=sane_index_shape)
++        self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
++        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+         if ckpt_path is not None:
+             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
+         self.image_key = image_key
+@@ -34,11 +36,14 @@
+             self.monitor = monitor
+ 
+     def init_from_ckpt(self, path, ignore_keys=list()):
+-        sd = torch.load(path, map_location="cpu")
++        sd = torch.load(path, map_location="cpu", weights_only=False)
+         if "state_dict" in sd.keys():
+             sd = sd["state_dict"]
+         keys = list(sd.keys())
+         for k in keys:
++            if k.startswith("loss."):   # 官方 taming ckpt 里的感知损失/判别器，ALIT 不需要
++                del sd[k]
++                continue
+             for ik in ignore_keys:
+                 if k.startswith(ik):
+                     print("Deleting key {} from state_dict.".format(k))
+@@ -49,11 +54,11 @@
+ 
+     def encode(self, x):
+         h = self.encoder(x)
+-        quant, emb_loss, info = self.quantize(h)
++        quant, emb_loss, info = self.quantize(self.quant_conv(h))
+         return h, quant, emb_loss, info
+ 
+     def decode(self, quant):
+-        dec = self.decoder(quant)
++        dec = self.decoder(self.post_quant_conv(quant))
+         return dec
+ 
+     def decode_code(self, code_b):

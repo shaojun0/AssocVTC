@@ -1,0 +1,2 @@
+[driver] found last ckpt epoch=0
+[driver] launch Sat Oct 17 20:28:23 CST 2026 resume=--resume /root/autodl-tmp/alit_out/s1_tiny_in100/checkpoint-last.pth

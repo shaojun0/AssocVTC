@@ -1,0 +1,50 @@
+{
+ "started": "2026-10-17T19:18:43+08:00",
+ "stopped_for_shutdown": "2026-10-17T20:40+08:00",
+ "config": {
+  "model": "alit_tiny(=Ours-S, enc/dec 8层x512)",
+  "trainable_params": 52800000.0,
+  "total_params": 125000000.0,
+  "img_size": 256,
+  "dataset": "ImageNet-100 train (126,689)",
+  "batch_size": 16,
+  "accum_iter": 16,
+  "effective_batch": 256,
+  "blr": 0.00015,
+  "epochs_planned": 30,
+  "warmup_epochs": 3,
+  "save_freq": 5,
+  "max_rollout_iters": 8,
+  "num_init_latent_tokens": 32,
+  "quantize_latent": true,
+  "factorize_latent": true
+ },
+ "measured": {
+  "sec_per_iter": 0.478,
+  "iters_per_epoch": 7918,
+  "hours_per_epoch": 1.05,
+  "gpu_util_pct": 91,
+  "power_w": 275,
+  "peak_mem_gb": 20.3,
+  "img_per_s": 33.6,
+  "effective_tflops": 44,
+  "epochs_completed": 1
+ },
+ "checkpoints": [
+  {
+   "file": "checkpoint-0.pth",
+   "size_gb": 1.325
+  },
+  {
+   "file": "checkpoint-last.pth",
+   "size_gb": 1.325
+  }
+ ],
+ "epoch_avg": [
+  {
+   "epoch": 0,
+   "line": " lr: 0.000050  nll_loss_0: 5.9383 (6.2065)  code_loss_0: 0.5642 (0.5867)  nll_loss_1: 5.9390 (6.2070)  code_loss_1: 0.5644 (0.5864)  nll_loss_2: 5.9397 (6.2073)  code_loss_2: 0.5650 (0.5863)  nll_loss"
+  }
+ ],
+ "last_log_line": "[21:06:59.327817] Epoch: [1]  [4720/7918]  eta: 0:25:44  lr: 0.000080  nll_loss_0: 5.8830 (5.9051)  code_loss_0: 0.5502 (0.5525)  nll_loss_1: 5.8810 (5.9046)  c"
+}
