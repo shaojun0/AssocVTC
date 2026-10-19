@@ -1,0 +1,81 @@
+{
+ "note": "T=1 (single-step) reference points from eval_ablation8.json (same-process, same-batch, 5,000 val images). L1_255 = l1_norm × 0.226 × 255.",
+ "arms": {
+  "std": {
+   "label": "Standard Transformer (softmax enc + softmax dec)",
+   "eval_key": "stdattn_k64/ckpt_best.pt",
+   "config": {
+    "img_size": 224,
+    "patch": 16,
+    "num_specials": 64,
+    "enc_dim": 448,
+    "enc_depth": 13,
+    "enc_heads": 8,
+    "enc_mlp_ratio": 4.0,
+    "enc_dwconv": true,
+    "enc_qk_norm": true,
+    "enc_attn": "std",
+    "enc_std_qk_norm": false,
+    "dec_recurrent": false,
+    "dec_steps": "",
+    "dec_dim": 512,
+    "dec_depth": 7,
+    "dec_heads": 8,
+    "dec_mlp_ratio": 4.0,
+    "pixel_hidden": 1024,
+    "dropout": 0.0,
+    "num_patches": 196,
+    "enc_patch_px": 768
+   },
+   "params": {
+    "encoder": 31847872,
+    "decoder": 31173376,
+    "total": 63021248,
+    "enc_M": 31.848,
+    "dec_M": 31.173,
+    "total_M": 63.021,
+    "enc_dec_ratio": 0.9788
+   },
+   "n_images": 5000,
+   "psnr_db": 31.21858,
+   "l1_255": 5.194373,
+   "ssim": 0.903678
+  },
+  "linear": {
+   "label": "Linear Transformer (linear enc + softmax dec)",
+   "eval_key": "k64/ckpt_best.pt",
+   "config": {
+    "img_size": 224,
+    "patch": 16,
+    "num_specials": 64,
+    "enc_dim": 448,
+    "enc_depth": 13,
+    "enc_heads": 8,
+    "enc_mlp_ratio": 4.0,
+    "enc_dwconv": true,
+    "enc_qk_norm": true,
+    "dec_dim": 512,
+    "dec_depth": 7,
+    "dec_heads": 8,
+    "dec_mlp_ratio": 4.0,
+    "pixel_hidden": 1024,
+    "dropout": 0.0,
+    "num_patches": 196,
+    "enc_patch_px": 768
+   },
+   "params": {
+    "encoder": 31909024,
+    "decoder": 31173376,
+    "total": 63082400,
+    "enc_M": 31.909,
+    "dec_M": 31.173,
+    "total_M": 63.082,
+    "enc_dec_ratio": 0.9769
+   },
+   "n_images": 5000,
+   "psnr_db": 26.602025,
+   "l1_255": 8.432145,
+   "ssim": 0.765428
+  }
+ }
+}
