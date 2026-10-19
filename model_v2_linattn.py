@@ -594,6 +594,34 @@ def square_block_starts(num_patches: int) -> list:
     return [k * k for k in range(1, K + 1)]
 
 
+def scaled_square_cumsum(num_specials: int, num_steps: int) -> list:
+    """「固定 T 步 × 总预算 K」的 square 形状缩放假定（2026-10-19 K-sweep 消融）。
+
+    原生 square 计划在 T 步下的块尺寸是 `2i+1`（首步另含 z_cls），全部读完时
+    累计 = (T+1)²−1 个 z_s。把它**按比例缩放到总预算 K**:
+        C_i = round(K · ((i+1)²−1) / ((T+1)²−1))   (i = 1..T, C_T = K)
+    再做「每步 ≥1、严格递增、C_T=K」的确定性修正。
+    · K = T² 时近似原生 square（原生在 K=T² 处把末块裁成 1 个 token, 是边界裁剪）;
+    · 用途: K 与步数解耦的受控消融（K=8/12/16/24/32 都固定 T=8 步）。
+    返回长度 T 的累计 z_s 数列表, 直接喂给 `step_windows(..., plan="cumulative")`。
+    """
+    assert num_steps >= 1, f"num_steps={num_steps} 须 ≥1"
+    assert num_specials >= num_steps, \
+        f"固定 {num_steps} 步每步至少 1 个 token ⇒ 须 K≥T, got K={num_specials}"
+    denom = (num_steps + 1) ** 2 - 1
+    cs = [int(math.floor(num_specials * ((i + 1) ** 2 - 1) / denom + 0.5))
+          for i in range(1, num_steps + 1)]
+    cs = [max(1, c) for c in cs]
+    for i in range(1, num_steps):                       # 严格递增（前向修正）
+        cs[i] = max(cs[i], cs[i - 1] + 1)
+    cs[-1] = int(num_specials)
+    for i in range(num_steps - 2, -1, -1):              # 尾部贴 K 后回压
+        cs[i] = min(cs[i], cs[i + 1] - 1)
+    assert cs[0] >= 1 and cs[-1] == num_specials, cs
+    assert all(cs[i] < cs[i + 1] for i in range(num_steps - 1)), cs
+    return cs
+
+
 def step_windows(num_specials: int, steps, plan: str = "square",
                  block: int = 0) -> list:
     """每个采样步在 A 坐标（0=z_cls, 1..K=z_s）下的读窗口 `[(lo, hi), …]`。
@@ -602,10 +630,22 @@ def step_windows(num_specials: int, steps, plan: str = "square",
       · `plan="square"`（默认）: k=⌊√t⌋, hi=min((k+1)²−1, K);
         非首步 lo=max(k²,1); 首步 lo=0（额外含 z_cls）。
       · `plan="fixed"`: k=t, hi=min(k·block, K); 非首步 lo=(k−1)·block+1。
+      · `plan="cumulative"`（新增, 2026-10-19）: `steps` 直接是**每步累计读入的
+        z_s 数** C_1<…<C_T=K（见 `scaled_square_cumsum`）; 首步窗口 [0,C_1]
+        （额外含 z_cls）, 其余 [C_{i−1}+1, C_i]。用于「固定 T 步 + 总预算 K」
+        的受控消融。⚠️ 只有本仓库实验版支持, 主线 model_v2 无此 plan。
     """
-    assert plan in ("square", "fixed"), f"未知 plan={plan}"
+    assert plan in ("square", "fixed", "cumulative"), f"未知 plan={plan}"
     if plan == "fixed":
         assert block >= 1, f"plan=fixed 须 block ≥1, got {block}"
+    if plan == "cumulative":
+        cum = [int(x) for x in steps]
+        assert len(cum) >= 1, "plan=cumulative 须给出非空累计步集"
+        assert all(cum[i] < cum[i + 1] for i in range(len(cum) - 1)), \
+            f"plan=cumulative 的 steps 须严格递增, got {cum}"
+        assert cum[0] >= 1 and cum[-1] == num_specials, \
+            f"plan=cumulative 须首项≥1 且末项=K={num_specials}, got {cum}"
+        return [(0 if i == 0 else cum[i - 1] + 1, c) for i, c in enumerate(cum)]
     out = []
     for i, t in enumerate(steps):
         if plan == "fixed":
@@ -1097,6 +1137,13 @@ class LinAttnConfig:
     # ── 解码器（普通 softmax 注意力; dec_recurrent=True 时走循环读出）──
     dec_recurrent: bool = False   # 循环读出（主线口径; 单步版 = False）
     dec_steps: str = ""           # 逗号分隔采样步; 空 = square_block_starts(K)
+    # ── 固定步数 × token 预算消融（2026-10-19 K-sweep; 默认 square/0 = 原有行为）──
+    #   dec_step_plan = "square"(默认) | "fixed" | "cumulative"
+    #   cumulative: dec_steps 解释为**每步累计读入的 z_s 数**（首项≥1、严格递增、
+    #               末项=K），用于「固定 T 步 + 总预算 K」的受控消融（K 与 T 解耦）。
+    #               生成工具: `scaled_square_cumsum(K, T)`。
+    dec_step_plan: str = "square"
+    dec_block: int = 0            # 仅 plan="fixed" 时使用（每步读入的 z_s 数）
     # ── 解码器注意力形式（消融开关; 2026-10-16 "全线性"臂）──
     #   "std"（默认, 昨日与普通编码器臂）= nn.TransformerDecoder 的 softmax 注意力;
     #   "linear" = 自注意力与交叉注意力都用核形式线性注意力（φ=elu+1）。
@@ -1183,9 +1230,14 @@ class SRPhase1LinAttn(nn.Module):
         self.recurrent = bool(cfg.dec_recurrent)
         self.dec_attn = str(cfg.dec_attn).lower()
         _steps = [int(x) for x in str(cfg.dec_steps).split(",") if x.strip()]
+        _plan, _block = str(cfg.dec_step_plan), int(cfg.dec_block)
+        if _plan == "cumulative":
+            assert _steps, \
+                "dec_step_plan='cumulative' 必须显式给 --dec_steps（每步累计 z_s 数）"
         if self.dec_attn == "std":
             if self.recurrent:
-                self.decoder = RecurrentOutputQueryDecoder(steps=_steps or None, **_dec_kw)
+                self.decoder = RecurrentOutputQueryDecoder(
+                    steps=_steps or None, step_plan=_plan, block=_block, **_dec_kw)
             else:
                 self.decoder = StandardAttentionDecoder(**_dec_kw)
         elif self.dec_attn == "linear":
@@ -1193,7 +1245,8 @@ class SRPhase1LinAttn(nn.Module):
                            grad_ckpt=bool(cfg.dec_grad_ckpt))
             if self.recurrent:
                 self.decoder = LinearRecurrentDecoder(
-                    steps=_steps or None, **_dec_kw, **_lin_kw)
+                    steps=_steps or None, step_plan=_plan, block=_block,
+                    **_dec_kw, **_lin_kw)
             else:
                 self.decoder = LinearAttentionDecoder(**_dec_kw, **_lin_kw)
         else:
@@ -1631,6 +1684,30 @@ if __name__ == "__main__":
     print(f"    K=64: Y_pix{tuple(o64['Y_pix'].shape)} (T=8), "
           f"读窗口 {m64.decoder.windows[0]}…{m64.decoder.windows[-1]}, "
           f"decoder 参数 {m64.count_params()['dec_M']}M")
+
+    # 8e. 「固定 T 步 × 总预算 K」cumulative plan（2026-10-19 K-sweep 消融）
+    #     A 坐标窗口必须连续无缝覆盖 0..K; 每步至少 1 个 z_s; K=T² 时与原生的形状同族。
+    for K in (8, 12, 16, 24, 32, 64):
+        cum = scaled_square_cumsum(K, 8)
+        win = step_windows(K, cum, "cumulative", 0)
+        assert win[0][0] == 0 and win[-1][1] == K, (K, win)
+        assert all(win[i][1] + 1 == win[i + 1][0]
+                   for i in range(len(win) - 1)), (K, win)
+        sizes = [hi - lo + 1 for lo, hi in win]
+        assert all(s >= 1 for s in sizes) and sum(sizes) == K + 1, (K, sizes)
+    mc = SRPhase1LinAttn(LinAttnConfig(num_specials=32, dec_recurrent=True,
+                                       dec_steps=",".join(
+                                           map(str, scaled_square_cumsum(32, 8))),
+                                       dec_step_plan="cumulative")).eval()
+    assert len(mc.decoder.steps) == 8 and mc.decoder.windows[-1][1] == 32
+    with torch.no_grad():
+        oc = mc(torch.randn(1, 3, 224, 224))
+    assert oc["Y_pix"].shape == (1, 8, 196, 768), oc["Y_pix"].shape
+    for K in (8, 12, 16, 24, 32):
+        cs = scaled_square_cumsum(K, 8)
+        print(f"    K={K:>2} × T=8 cumulative: steps={cs} "
+              f"windows={step_windows(K, cs, 'cumulative')}")
+    print("    cumulative plan: 8 步 × K∈{8,12,16,24,32} 覆盖 0..K 无缝, 形状同族 OK")
 
     # 9e. 普通 transformer 编码器的 13 层参数体量必须与线性臂对齐（消融可归因的前提）
     print("[9] ★消融臂: 普通 (softmax) 注意力编码器（enc_attn='std'）")

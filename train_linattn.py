@@ -182,6 +182,13 @@ def parse_args():
                     help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
     ap.add_argument("--dec_steps", default="",
                     help="逗号分隔采样步; 空 = square_block_starts(K)（K=64 → 8 步）")
+    ap.add_argument("--step_plan", default="square",
+                    choices=["square", "fixed", "cumulative"],
+                    help="读窗口计划: square=默认主线口径; fixed=每步固定 block 个; "
+                         "cumulative=dec_steps 解释为每步累计 z_s 数（固定 T 步 × 总预算 K "
+                         "的消融, 生成器 model_v2_linattn.scaled_square_cumsum）")
+    ap.add_argument("--block", type=int, default=0,
+                    help="plan=fixed 时每步读入的 z_s 数（默认 0 = 不用）")
     ap.add_argument("--dec_attn", default="std", choices=["std", "linear"],
                     help="解码器注意力形式: std=nn.TransformerDecoder softmax（默认）; "
                          "linear=自注意力与交叉注意力都用线性注意力（**全线性**臂）")
@@ -265,6 +272,7 @@ def build_cfg(args) -> LinAttnConfig:
         enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
         enc_std_qk_norm=bool(args.enc_std_qk_norm),
         dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
+        dec_step_plan=args.step_plan, dec_block=int(args.block),
         dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
         dec_grad_ckpt=bool(args.dec_grad_ckpt),
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,

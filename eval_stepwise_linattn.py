@@ -84,9 +84,9 @@ def run(args):
     steps = list(model.decoder.steps) if recurrent else [None]
     windows = (model.decoder.windows if recurrent else [None])
     T = len(steps)
-    # 累计读入的 z_s 数（square 计划: 第 k 步读完前 (k+1)²−1 个）
-    cum_z = ([min((int(np.sqrt(int(t))) + 1) ** 2 - 1, cfg.num_specials)
-              for t in steps] if recurrent else [cfg.num_specials])
+    # 累计读入的 z_s 数 = 各步读窗口的 hi（A 坐标里 1..K 就是 z_s）。对 square /
+    # fixed / cumulative 三种 plan 都成立（旧口径 (⌊√t⌋+1)²−1 只对 square 成立）。
+    cum_z = ([int(hi) for (lo, hi) in windows] if recurrent else [cfg.num_specials])
     print(f"[stepwise] {args.ckpt}\n  recurrent={recurrent} T={T} steps={steps}\n"
           f"  windows={windows}\n  cum_z_s={cum_z}  (K={cfg.num_specials}, N={cfg.num_patches})",
           flush=True)
