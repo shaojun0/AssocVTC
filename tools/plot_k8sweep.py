@@ -62,8 +62,11 @@ def collect(ev, ks):
             r["t8_step_l1"] = d["L1_255"]
             r["t8_step_psnr"] = d["PSNR"]
             r["t8_delta1_share"] = d.get("delta1_share")
-            r["t8_best_step"] = d.get("best_step")
+            r["t8_best_step"] = d.get("best_step")          # 0-based
             r["t8_total_drop"] = d.get("total_drop_255")
+            ps = d["PSNR"]
+            r["t8_best_psnr"] = float(max(ps))               # oracle 最优步 PSNR
+            r["t8_best_psnr_step"] = int(np.argmax(ps)) + 1  # 1-based
         rows[k] = r
     return rows
 
@@ -107,21 +110,22 @@ def main():
     # ── 1. 汇总表 ──
     lines = [
         "| K (token) | T=1 PSNR | T=1 L1_255 | T=1 SSIM | T=8 PSNR | T=8 L1_255 | "
-        "T=8 SSIM | Δ₁占比 | 最优步 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "T=8 SSIM | T=8 oracle PSNR | Δ₁占比 | L1 最优步(1-based) |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for k in args.ks:
         r = rows[k]
         if "t8_psnr" not in r and "t1_psnr" not in r:
             continue
-        f = lambda v, fmt=".3f": (fmt % v) if isinstance(v, float) else "—"
+        f = lambda v, fmt=".3f": (("%" + fmt) % v) if isinstance(v, float) else "—"
         d1 = r.get("t8_delta1_share")
         lines.append(
             f"| {k} | {f(r.get('t1_psnr'))} | {f(r.get('t1_l1'))} | "
             f"{f(r.get('t1_ssim'), '.4f')} | {f(r.get('t8_psnr'))} | "
             f"{f(r.get('t8_l1'))} | {f(r.get('t8_ssim'), '.4f')} | "
+            f"{f(r.get('t8_best_psnr'))} | "
             f"{(('%.1f%%' % (100 * d1)) if isinstance(d1, float) else '—')} | "
-            f"{r.get('t8_best_step', '—')} |")
+            f"{r.get('t8_best_psnr_step', '—')} |")
     tbl = "\n".join(lines)
     with open(os.path.join(od, "k8sweep_table.md"), "w") as f:
         f.write("# 固定 8 步 × K token（ImageNet-100 val 5,000）\n\n" + tbl + "\n")
@@ -137,12 +141,16 @@ def main():
     plt.plot(x8, y8, "s-", color="#C44E52", label="T=8 (BPTT, 6 ep warm start)")
     if "t1_psnr" in hist:
         plt.scatter([64], [hist["t1_psnr"]], marker="o", s=70, facecolors="none",
-                    edgecolors="#4C72B0", linestyles="none",
+                    edgecolors="#4C72B0",
                     label="T=1 native square K=64 (historical)")
     if "t8_psnr" in hist:
         plt.scatter([64], [hist["t8_psnr"]], marker="s", s=70, facecolors="none",
-                    edgecolors="#C44E52", linestyles="none",
+                    edgecolors="#C44E52",
                     label="T=8 native square K=64 (historical)")
+    if "t8_step_psnr" in hist:
+        plt.plot(hist["cum_z_s"], hist["t8_step_psnr"], ":", color="#7F7F7F",
+                 marker="x", ms=4, lw=1.2,
+                 label="K=64 native, zero-training early stop")
     for xx, yy in list(zip(x1, y1)) + list(zip(x8, y8)):
         plt.annotate(f"{yy:.2f}", (xx, yy), textcoords="offset points",
                      xytext=(0, 6), ha="center", fontsize=7)

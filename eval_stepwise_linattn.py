@@ -63,10 +63,19 @@ def _edge_density(x01: torch.Tensor) -> torch.Tensor:
     return 0.5 * (dx + dy)
 
 
-def load_model(ckpt_path: str, device="cuda"):
+def load_model(ckpt_path: str, device="cuda", dec_steps: str = "",
+               step_plan: str = ""):
+    """载入 ckpt。`dec_steps`/`step_plan` 非空时**覆盖** ckpt 里的读窗口计划
+    （零训练「截断档」评测: 用 K=64 的 ckpt 只读前 K' 个 z_s, 与专训 K' 对照;
+    读窗口不改变任何参数形状, 所以可直接复用权重）。默认空 = 用 ckpt 原配置。"""
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    cfg = LinAttnConfig(**{k: v for k, v in ck["cfg"].items()
-                           if k in LinAttnConfig.__dataclass_fields__})
+    cfgd = {k: v for k, v in ck["cfg"].items()
+            if k in LinAttnConfig.__dataclass_fields__}
+    if dec_steps:
+        cfgd["dec_steps"] = dec_steps
+        cfgd["dec_step_plan"] = step_plan or "cumulative"
+        cfgd["dec_recurrent"] = True
+    cfg = LinAttnConfig(**cfgd)
     model = SRPhase1LinAttn(cfg).to(device)
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
@@ -78,7 +87,9 @@ def load_model(ckpt_path: str, device="cuda"):
 @torch.no_grad()
 def run(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, cfg, ck = load_model(args.ckpt, device)
+    model, cfg, ck = load_model(args.ckpt, device,
+                                dec_steps=args.override_dec_steps,
+                                step_plan=args.override_step_plan)
     patch, img = cfg.patch, cfg.img_size
     recurrent = getattr(model, "recurrent", False)
     steps = list(model.decoder.steps) if recurrent else [None]
@@ -200,6 +211,9 @@ def run(args):
     best_t = int(L1.argmin())
 
     res = {"ckpt": args.ckpt, "step": ck.get("step"), "epoch": ck.get("epoch"),
+           "K": cfg.num_specials, "dec_step_plan": cfg.dec_step_plan,
+           "override_dec_steps": args.override_dec_steps,
+           "override_step_plan": args.override_step_plan,
            "recurrent": recurrent, "T": T, "steps": steps, "windows": windows,
            "cum_z_s": cum_z, "n_images": n_img,
            "L1_255": L1.tolist(), "L1_01": L1_01.tolist(),
@@ -274,6 +288,12 @@ def main():
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=10)
     ap.add_argument("--amp", type=int, default=1)
+    ap.add_argument("--override_dec_steps", default="",
+                    help="零训练「截断档」: 用本 ckpt 的权重, 但把读窗口计划换成给定的"
+                         "累计 z_s 数（如 K=64 ckpt 只读前 32 个 ⇒ 与专训 K=32 对照）; "
+                         "默认空 = 用 ckpt 原配置（逐位不变）")
+    ap.add_argument("--override_step_plan", default="",
+                    help="配合 --override_dec_steps 的 plan（默认 cumulative）")
     ap.add_argument("--out", default="")
     run(ap.parse_args())
 

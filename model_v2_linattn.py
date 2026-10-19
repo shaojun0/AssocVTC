@@ -643,8 +643,10 @@ def step_windows(num_specials: int, steps, plan: str = "square",
         assert len(cum) >= 1, "plan=cumulative 须给出非空累计步集"
         assert all(cum[i] < cum[i + 1] for i in range(len(cum) - 1)), \
             f"plan=cumulative 的 steps 须严格递增, got {cum}"
-        assert cum[0] >= 1 and cum[-1] == num_specials, \
-            f"plan=cumulative 须首项≥1 且末项=K={num_specials}, got {cum}"
+        # 末项 ≤ K: 允许「截断档」（只读前 C_T 个 z_s, 零训练复用 K=64 ckpt 评小预算）;
+        # 训练脚本给的是 scaled_square_cumsum(K,T) ⇒ 末项恰好 = K。
+        assert cum[0] >= 1 and cum[-1] <= num_specials, \
+            f"plan=cumulative 须首项≥1 且末项≤K={num_specials}, got {cum}"
         return [(0 if i == 0 else cum[i - 1] + 1, c) for i, c in enumerate(cum)]
     out = []
     for i, t in enumerate(steps):
