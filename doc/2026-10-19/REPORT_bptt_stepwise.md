@@ -234,3 +234,8 @@ python3 tools/plot_bptt_stepwise.py --metric l1
    解释为什么线性解码器臂有 39%/29% 的图最优步落在 step 4–5 之后。
 5. **K-sweep 的逐步形态**（目前只有 K=64）：报告 §8.4 已列为未验证项。
 6. **论文用图**：主文用**四臂 PSNR**（或 L1）图讲机制；两臂简版可放附录或用于"线性编码器"单因素对比。
+7. ✅ **复杂度维度的外部验证（同日完成）**：用公开 SAVOIAS 人评复杂度（OOD）复刻 ALIT Fig.4/11/12，
+   证明「图越复杂 → 同 token 预算下 L1 越高、越需要更多 token」在我们的模型上成立
+   （std 臂 ρ=+0.33~+0.58）⇒ [`REPORT_savoias_complexity.md`](REPORT_savoias_complexity.md)。
+   注意它**不改变**本报告的四臂结论；且「复杂度相关」≠「oracle 停步有收益」
+   （后者见 `doc/2026-10-16/REPORT_alit_adaptive.md` 的 E-A1/E-A2）。
