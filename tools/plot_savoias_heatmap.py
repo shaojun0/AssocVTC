@@ -92,16 +92,25 @@ def matrix(S, L, h):
     return M
 
 
-def make_grid_figure(mats, out, h, cmap):
+def make_grid_figure(mats, out, h, cmap, mode="relative"):
+    """mode='relative': 全局 min-max 归一化到 0–1（对齐 ALIT 的 0–1 colorbar）；
+    mode='absolute': 直接用 pixel L1（0–255）色标。"""
     allv = np.concatenate([m.ravel() for m in mats.values()])
-    vmin, vmax = float(np.nanmin(allv)), float(np.nanmax(allv))
-    norm = Normalize(vmin=vmin, vmax=vmax)
+    lo, hi = float(np.nanmin(allv)), float(np.nanmax(allv))
+    if mode == "relative":
+        def transform(m):
+            return (m - lo) / (hi - lo + 1e-12)
+        norm = Normalize(0.0, 1.0)
+    else:
+        def transform(m):
+            return m
+        norm = Normalize(lo, hi)
 
     fig, axes = plt.subplots(2, 3, figsize=(10.4, 6.6))
     for ri, (arm, arm_label) in enumerate(ARMS):
         for ci, (sub, pretty, _) in enumerate(SUBSETS):
             ax = axes[ri, ci]
-            M = mats[(arm, sub)]
+            M = transform(mats[(arm, sub)])
             ax.imshow(M, aspect="auto", cmap=cmap, norm=norm, origin="lower",
                       interpolation="nearest")
             ax.set_xticks(range(len(CENTERS)))
@@ -122,15 +131,23 @@ def make_grid_figure(mats, out, h, cmap):
                         wspace=0.14, hspace=0.22)
     cax = fig.add_axes([0.905, 0.16, 0.016, 0.70])
     cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
-    cbar.set_label("L1 Reconstruction Loss  (pixel L1, 0–255)  →  worse",
-                   fontsize=9.5)
-    kind = (f"Gaussian-smoothed (σ={h:g} score points)" if h > 0
-            else "raw 10-point bins")
+    if mode == "relative":
+        cbar.set_ticks(np.linspace(0, 1, 6))
+        cbar.set_label("L1 Reconstruction Loss  (normalized 0–1)  →  worse",
+                       fontsize=9.5)
+        sub = (f"normalized per figure to [0,1]; absolute pixel L1 range "
+               f"{lo:.1f}–{hi:.1f} / 255")
+    else:
+        cbar.set_label("L1 Reconstruction Loss  (pixel L1, 0–255)  →  worse",
+                       fontsize=9.5)
+        sub = "absolute pixel L1 (0–255)"
+    kind = (f"Gaussian-smoothed, σ={h:g}" if h > 0 else "raw 10-point bins")
     fig.suptitle("Image complexity vs. number of tokens — SAVOIAS human scores, "
-                 f"BPTT reconstruction ({kind})", fontsize=11, y=0.975)
+                 f"BPTT reconstruction ({kind})", fontsize=10.5, y=0.975)
     fig.text(0.01, 0.012,
-             "Colormap sampled from ALIT Fig. 4 (YlOrRd). Model trained on ImageNet-100; "
-             "SAVOIAS is out-of-distribution. Lower is better.",
+             f"{sub}. Colormap sampled from ALIT Fig. 4 (YlOrRd). "
+             "Model trained on ImageNet-100; SAVOIAS is out-of-distribution. "
+             "Lower is better.",
              fontsize=7.2, color="#555")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
@@ -191,8 +208,12 @@ def main():
         for sub, _, _ in SUBSETS:
             S, L, _ = join(data_dir, arm, sub, scores[sub])
             mats[(arm, sub)] = matrix(S, L, a.smooth_h)
+    # 主图：0–1 归一化 colorbar（对齐 ALIT Fig.4 的 0.0–1.0 色标）
     make_grid_figure(mats, out / "savoias_complexity_heatmap.png",
-                     a.smooth_h, cmap)
+                     a.smooth_h, cmap, mode="relative")
+    # 绝对 pixel L1（0–255）版本
+    make_grid_figure(mats, out / "savoias_complexity_heatmap_abs.png",
+                     a.smooth_h, cmap, mode="absolute")
 
     # 原始分箱版（透明性对照；不做平滑）
     mats_raw = {}
@@ -201,7 +222,7 @@ def main():
             S, L, _ = join(data_dir, arm, sub, scores[sub])
             mats_raw[(arm, sub)] = matrix(S, L, 0.0)
     make_grid_figure(mats_raw, out / "savoias_complexity_heatmap_raw.png",
-                     0.0, cmap)
+                     0.0, cmap, mode="absolute")
 
     make_per_image_figure(data_dir, scores,
                           out / "savoias_complexity_heatmap_per_image.png", cmap)

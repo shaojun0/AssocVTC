@@ -148,13 +148,24 @@ MSCOCO +0.416→+0.368），方向与 std 臂一致。
 
 - **版式按原论文**：x 轴 = **Image Complexity Human Score**（刻度 **15, 25, …, 85**，8 档 10 分宽）；
   y 轴 = **Number of Tokens**（用本仓库自己的 8 档 `3, 8, 15, 24, 35, 48, 63, 64`，自下而上、
-  等距排列、标签为实际 token 数）；颜色 = L1 Reconstruction Loss（pixel L1，0–255，越亮越差）。
+  等距排列、标签为实际 token 数）；颜色 = L1 Reconstruction Loss，**colorbar 归一到 0–1**
+  （刻度 0.0 / 0.2 / … / 1.0，与 ALIT Fig.4 一致）。
 - **颜色条直接从 ALIT Fig.4 的 colorbar 采样**（17 个锚点，见脚本 `ALIT_YlOrRd`；
   与 matplotlib `YlOrRd` 几乎逐位一致，mean|err| ≈ 0.6/255）。
-- 上排 std、下排 lin；三列 = 三个子集；**共享色标**，可跨臂/跨子集直接比较。
+- **为什么论文是 0–1、我们上一版是 5–25？** 同一物理量、不同单位：
+  ALIT 的 loss 是 `|rec_img − img|.mean()`，图像在 VQGAN 的 **[-1,1]** 空间；我们上一版画的是
+  仓库主线的 **pixel L1 (0–255)**。换算关系：
+  - `[0,1]` 像素 L1 = `L1_255 / 255`：我们 5–25 px ↔ **0.020–0.098**
+  - ImageNet 归一化空间（训练损失口径 `l1_norm`）= `L1_255 / (0.226×255) = /57.63`：**0.087–0.434**
+  - ALIT 的 `[-1,1]` 空间 = `L1_255 / 127.5`：**0.039–0.196**
+
+  ⇒ 论文的 0–1 是他们的显示量纲；**归一到 0–1 只用于版式对齐，跨图/跨模型不可直接比数值**
+  （不同模型、重建通路、token 预算）。绝对 pixel L1 版本另存
+  `savoias_complexity_heatmap_abs.png`。
+- 上排 std、下排 lin；三列 = 三个子集；**共享色标**，可跨臂/跨子集直接比较（同一归一化下）。
 - **读法（与原文同向）**：固定 token 时，复杂度 15→85 时 L1 单调升高；固定复杂度时，
-  token 3→64 时 L1 单调下降。例 std 臂 People-Art：x=15 时 **13.1 → 5.1 px**（3→63 tok），
-  x=85 时 **22.2 → 9.3 px**；到 63 token 高复杂度仍比低复杂度差约 4 px。
+  token 3→64 时 L1 单调下降。例 std 臂 People-Art（绝对 pixel L1）：x=15 时 **13.1 → 5.1 px**
+  （3→63 tok），x=85 时 **22.2 → 9.3 px**；到 63 token 高复杂度仍比低复杂度差约 4 px。
 - 两排梯度形状一致（线性编码器整排更亮、更平）⇒ 复杂度效应不是某一种注意力形式造成的。
 - 主图用 **Gaussian 核平滑（σ=5 复杂度分）** 复现原论文的光滑曲面；**原始 10 分箱均值**
   另存 `savoias_complexity_heatmap_raw.png` 供核对（Art 每格 n=37–64，Places/Objects n=8–38，
@@ -273,8 +284,9 @@ python3 tools/render_savoias_grid.py \
 | `artifacts/savoias_complexity/savoias_l1_vs_tokens.png` / `.pdf` | 复杂度三分位 → L1 vs token（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_needed_step.png` / `.pdf` | 复杂度 → 所需步数（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_recon_grid.png` / `.pdf` | 低/中/高复杂度重建网格（ALIT Fig.4-left 对照） |
-| `artifacts/savoias_complexity/savoias_complexity_heatmap.png` / `.pdf` | **论文版式热力图**：x=Image Complexity Human Score（15–85），y=我们的 token 数，颜色条取色自 ALIT Fig.4（两臂 × 3 子集，Gaussian σ=5 平滑） |
-| `artifacts/savoias_complexity/savoias_complexity_heatmap_raw.png` / `.pdf` | 同上但用**原始 10 分箱均值**（不光滑，核对用） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap.png` / `.pdf` | **论文版式热力图**：x=Image Complexity Human Score（15–85），y=我们的 token 数，颜色条取色自 ALIT Fig.4、**归一到 0–1**（两臂 × 3 子集，Gaussian σ=5 平滑） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap_abs.png` / `.pdf` | 同上但 colorbar 用**绝对 pixel L1（0–255）**（数值核对用） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap_raw.png` / `.pdf` | 同上但用**原始 10 分箱均值**（不光滑，核对用；绝对 pixel L1） |
 | `artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png` / `.pdf` | 逐图热力图（按 human complexity 排序） |
 | `artifacts/savoias_complexity/savoias_complexity_summary.json` | 全部数字：ρ/三分位/needed-step/均值曲线 |
 | `artifacts/savoias_complexity/savoias_per_image_joined.csv` | 逐图 join 后的原始数值（1,640 行 = 2 臂 × 820 图） |
