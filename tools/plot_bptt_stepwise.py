@@ -81,6 +81,14 @@ ARMS = {
     },
 }
 
+# 四臂同图时用的紧凑图例标签（避免图例过宽）
+COMPACT = {
+    "std": "std enc + std dec (standard)",
+    "linear": "lin enc + std dec (linear)",
+    "stdlin": "std enc + lin dec",
+    "alllinear": "lin enc + lin dec (all-linear)",
+}
+
 EVAL_JSON = "doc/2026-10-17/artifacts/eval_ablation8.json"
 
 METRICS = {
@@ -108,23 +116,29 @@ def load(repo, arm, eval_json):
     return d, ev
 
 
-def make_figure(repo, out_dir, arms, baseline_arm, metric, show_linear_t1, point_labels):
+def make_figure(repo, out_dir, arms, baseline_arm, metric, show_linear_t1,
+                point_labels, tag=None):
     spec = METRICS[metric]
+    many = len(arms) > 2
     curves = {}
     for arm in arms:
         d, ev = load(repo, arm, EVAL_JSON)
         curves[arm] = {"d": d, "ev": ev}
     ref = curves[baseline_arm]
     base = spec["baseline"](ref["ev"])
-    base_label = (f'{ARMS[baseline_arm]["short"]}, single-step (T=1): '
-                  f'{base:.2f} {"dB" if metric == "psnr" else "px"}')
+    unit = "dB" if metric == "psnr" else "px"
+    if many:
+        base_label = f"standard single-step (T=1): {base:.2f} {unit}"
+    else:
+        base_label = (f'{ARMS[baseline_arm]["short"]}, single-step (T=1): '
+                      f'{base:.2f} {unit}')
 
     steps = ref["d"]["steps"]
     cum = ref["d"]["cum_z_s"]
     T = ref["d"]["T"]
     xs = list(range(1, T + 1))
 
-    fig, ax = plt.subplots(figsize=(7.0, 5.05))
+    fig, ax = plt.subplots(figsize=(7.2, 5.15) if many else (7.0, 5.05))
     fig.subplots_adjust(left=0.105, right=0.985, bottom=0.215, top=0.795)
 
     # 先定 x 轴，再建顶轴，保证上下两套 tick 严格对齐
@@ -135,8 +149,10 @@ def make_figure(repo, out_dir, arms, baseline_arm, metric, show_linear_t1, point
     for arm in arms:
         m = ARMS[arm]
         y = curves[arm]["d"][spec["field"]]
-        ax.plot(xs, y, "-", color=m["color"], marker=m["marker"], lw=2.0,
-                ms=5.5, mec="white", mew=0.8, label=m["label"], zorder=4)
+        ax.plot(xs, y, "-", color=m["color"], marker=m["marker"],
+                lw=1.8 if many else 2.0, ms=5.0 if many else 5.5,
+                mec="white", mew=0.8,
+                label=(COMPACT[arm] if many else m["label"]), zorder=4)
 
     # ── 数值标注 ──────────────────────────────────────────────────────────
     # PSNR（越大越好）: 上方曲线标上、下方曲线标下，避开两条曲线之间的空隙;
@@ -183,21 +199,31 @@ def make_figure(repo, out_dir, arms, baseline_arm, metric, show_linear_t1, point
     ax.grid(True, which="major", axis="y", alpha=0.30)
     ax.grid(True, which="major", axis="x", alpha=0.12)
 
-    # 基线在纵轴方向的留白
+    # 基线在纵轴方向的留白；四臂时给图例额外留出空间
     lo = min(min(curves[a]["d"][spec["field"]]) for a in arms)
     hi = max(max(curves[a]["d"][spec["field"]]) for a in arms)
     baselines = [base]
     if show_linear_t1 and "linear" in curves and baseline_arm != "linear":
         baselines.append(spec["baseline"](curves["linear"]["ev"]))
-    pad = 0.08 * (max(hi, *baselines) - min(lo, *baselines) + 1e-9)
-    ax.set_ylim(min(lo, *baselines) - 1.6 * pad, max(hi, *baselines) + 1.6 * pad)
+    span = max(hi, *baselines) - min(lo, *baselines) + 1e-9
+    pad = 0.08 * span
+    lo_pad = hi_pad = 1.6 * pad
+    if many and spec["better_high"]:            # 图例放右下 → 底部多留白
+        lo_pad += 0.05 * span
+    if many and not spec["better_high"]:        # 图例放右上 → 顶部多留白
+        hi_pad += 0.02 * span
+    ax.set_ylim(min(lo, *baselines) - lo_pad, max(hi, *baselines) + hi_pad)
 
     ax.legend(loc="lower right" if metric == "psnr" else "upper right",
-              fontsize=8.0, framealpha=0.92, borderpad=0.6, handlelength=2.8)
+              fontsize=7.6 if many else 8.0, framealpha=0.92,
+              borderpad=0.55, handlelength=2.6,
+              ncol=2 if many else 1)
 
     metric_name = "PSNR (dB)" if metric == "psnr" else "pixel L1 (0-255)"
-    fig.suptitle("BPTT step-wise reconstruction: Linear vs. Standard Transformer",
-                 y=0.985, fontsize=12.0)
+    title = ("BPTT step-wise reconstruction: encoder × decoder attention forms"
+             if many else
+             "BPTT step-wise reconstruction: Linear vs. Standard Transformer")
+    fig.suptitle(title, y=0.985, fontsize=12.0)
     fig.text(0.5, 0.932,
              f"{metric_name}  ·  K=64 (196→64 tokens)  ·  224×224  ·  "
              "ImageNet-100 val (n=5,000)  ·  seed 0",
@@ -210,7 +236,7 @@ def make_figure(repo, out_dir, arms, baseline_arm, metric, show_linear_t1, point
         "steps). The dashed line is a reference point, NOT a paired ablation. Single seed.",
         ha="left", va="bottom", fontsize=6.8, color="#555", linespacing=1.35)
 
-    suffix = f'bptt_stepwise_{"_".join(arms)}_{metric}'
+    suffix = f'bptt_stepwise_{tag or "_".join(arms)}_{metric}'
     if show_linear_t1:
         suffix += "_with_linear_t1"
     png = out_dir / f"{suffix}.png"
@@ -279,7 +305,12 @@ def main():
     ap.add_argument("--metric", default="both", choices=["psnr", "l1", "both"])
     ap.add_argument("--show-linear-t1", action="store_true",
                     help="额外画线性臂自己的 T=1 参考线（点线）")
-    ap.add_argument("--no-point-labels", action="store_true")
+    ap.add_argument("--point-labels", dest="point_labels", action="store_true",
+                    default=None, help="强制在点旁标数值")
+    ap.add_argument("--no-point-labels", dest="point_labels", action="store_false",
+                    help="不标数值（>2 臂时默认关闭）")
+    ap.add_argument("--tag", default=None,
+                    help="产物文件名里的标签（默认用臂名拼接）")
     a = ap.parse_args()
 
     repo = Path(a.repo)
@@ -288,13 +319,14 @@ def main():
     arms = [x.strip() for x in a.arms.split(",") if x.strip()]
     for arm in arms:
         assert arm in ARMS, f"未知臂: {arm}（可选 {list(ARMS)}）"
+    point_labels = (len(arms) <= 2) if a.point_labels is None else a.point_labels
 
     metrics = ["psnr", "l1"] if a.metric == "both" else [a.metric]
     rows = None
     for metric in metrics:
         curves, base, suffix = make_figure(
             repo, out_dir, arms, a.baseline_arm, metric,
-            a.show_linear_t1, not a.no_point_labels)
+            a.show_linear_t1, point_labels, a.tag)
         if rows is None:
             rows = write_data(repo, out_dir, arms, curves)
 
