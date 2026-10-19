@@ -142,26 +142,30 @@ MSCOCO +0.416→+0.368），方向与 std 臂一致。
 - 复杂度 89（人物密集的古典绘画）：3 token 严重糊，24→63 token 持续改善但仍偏软
   —— 与 ALIT Fig. 4 左的定性对照同构。
 
-### 3.5 热力图汇总（复杂度 × token 预算）
+### 3.5 热力图（版式对齐 ALIT Fig.4 / Fig.11 / Fig.12）
 
 ![complexity heatmap](artifacts/savoias_complexity/savoias_complexity_heatmap.png)
 
-- **行** = 人评复杂度固定区间（0–25 / 25–50 / 50–75 / 75–100），**列** = token 预算（3→64），
-  **颜色** = 该格平均 pixel L1（0–255，越亮越差）；上排 std 臂、下排 lin 臂，三列 = 三个子集；
-  两排共用同一色标（跨臂可比）。
-- **读法**：沿行向下（复杂度↑）整行变亮；沿列向右（预算↑）整行变暗——这就是 §3.1/§3.2 的 2D 汇总。
-  例：std 臂 People-Art，0–25 区间 **12.9 → 5.0 px**（3→63 tok），75–100 区间 **22.6 → 9.5 px**；
-  高复杂度整行始终更亮，且**到 63 token 仍未追平低复杂度**。
-- 线性编码器臂（下排）整行更亮（同预算更差），但**梯度形状不变** ⇒ 复杂度效应不是某一种注意力形式的产物。
+- **版式按原论文**：x 轴 = **Image Complexity Human Score**（刻度 **15, 25, …, 85**，8 档 10 分宽）；
+  y 轴 = **Number of Tokens**（用本仓库自己的 8 档 `3, 8, 15, 24, 35, 48, 63, 64`，自下而上、
+  等距排列、标签为实际 token 数）；颜色 = L1 Reconstruction Loss（pixel L1，0–255，越亮越差）。
+- **颜色条直接从 ALIT Fig.4 的 colorbar 采样**（17 个锚点，见脚本 `ALIT_YlOrRd`；
+  与 matplotlib `YlOrRd` 几乎逐位一致，mean|err| ≈ 0.6/255）。
+- 上排 std、下排 lin；三列 = 三个子集；**共享色标**，可跨臂/跨子集直接比较。
+- **读法（与原文同向）**：固定 token 时，复杂度 15→85 时 L1 单调升高；固定复杂度时，
+  token 3→64 时 L1 单调下降。例 std 臂 People-Art：x=15 时 **13.1 → 5.1 px**（3→63 tok），
+  x=85 时 **22.2 → 9.3 px**；到 63 token 高复杂度仍比低复杂度差约 4 px。
+- 两排梯度形状一致（线性编码器整排更亮、更平）⇒ 复杂度效应不是某一种注意力形式造成的。
+- 主图用 **Gaussian 核平滑（σ=5 复杂度分）** 复现原论文的光滑曲面；**原始 10 分箱均值**
+  另存 `savoias_complexity_heatmap_raw.png` 供核对（Art 每格 n=37–64，Places/Objects n=8–38，
+  边缘 bin 最稀）。
 
 ![per-image heatmap](artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png)
 
-- 每个子集把图按复杂度排序（行，低→高），列 = token 预算，颜色 = 单图 L1；
-- 上段（低复杂度）在 3 token 就偏暗、几列内趋饱和；下段（高复杂度）到 63 token 仍偏亮
+- 逐图版：行 = 图（按复杂度低→高排序），列 = Number of Tokens，颜色 = 单图 L1（稳健色标 2–98%）；
+- 上段（低复杂度）3 token 已偏暗、几列内趋饱和；下段（高复杂度）到 63 token 仍偏亮
   ⇒ 结论不是"均值曲线"造成的假象，**逐图分布**同样如此；列内条纹 = 复杂度之外的图间差异
   （内容/纹理/尺寸）。
-- ⚠️ 固定分箱的每格 n 不同（Art 88/150/123/59；Scenes 45/85/50/20；Objects 30/82/67/21）；
-  75–100 箱最小（n=20~59），均值噪声比中间箱略大。
 
 ---
 
@@ -269,8 +273,9 @@ python3 tools/render_savoias_grid.py \
 | `artifacts/savoias_complexity/savoias_l1_vs_tokens.png` / `.pdf` | 复杂度三分位 → L1 vs token（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_needed_step.png` / `.pdf` | 复杂度 → 所需步数（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_recon_grid.png` / `.pdf` | 低/中/高复杂度重建网格（ALIT Fig.4-left 对照） |
-| `artifacts/savoias_complexity/savoias_complexity_heatmap.png` / `.pdf` | **热力图**：复杂度分箱 × token 预算（两臂 × 3 子集） |
-| `artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png` / `.pdf` | 逐图热力图（按复杂度排序） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap.png` / `.pdf` | **论文版式热力图**：x=Image Complexity Human Score（15–85），y=我们的 token 数，颜色条取色自 ALIT Fig.4（两臂 × 3 子集，Gaussian σ=5 平滑） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap_raw.png` / `.pdf` | 同上但用**原始 10 分箱均值**（不光滑，核对用） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png` / `.pdf` | 逐图热力图（按 human complexity 排序） |
 | `artifacts/savoias_complexity/savoias_complexity_summary.json` | 全部数字：ρ/三分位/needed-step/均值曲线 |
 | `artifacts/savoias_complexity/savoias_per_image_joined.csv` | 逐图 join 后的原始数值（1,640 行 = 2 臂 × 820 图） |
 | `artifacts/savoias_complexity/per_image_*.json` | `--dump_per_image` 原始产物（两臂） |
@@ -289,4 +294,5 @@ python3 tools/render_savoias_grid.py \
    检验「复杂度轴」在极端类（极简 Suprematism vs 信息图）上的形状。
 4. **任务保真版本**：把 SAVOIAS 图接到 Phase 2 captioning/分类探针，看「按复杂度给 token」
    是否在任务指标上兑现——这是 ALIT Fig. 6 / 我们 E-C1 的落点。
-5. 论文用图：主文放 §3.1 主图 + §3.4 网格（与 ALIT Fig. 4 同构），§3.2/§3.3 放附录。
+5. 论文用图：主文放 **§3.5 论文版式热力图**（x=复杂度 15–85，y=token，颜色条取色自 ALIT Fig.4）
+   + §3.4 网格；§3.1/§3.2/§3.3 放附录或补充材料。
