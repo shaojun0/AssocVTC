@@ -7,7 +7,7 @@
 > 代码/数据：<https://github.com/esaraee/Savoias-Dataset>
 > **模型**：本仓库 `stdattn_k64_rec`（标准 Transformer，BPTT T=8，ImageNet-100 训练）
 > **脚本**：`tools/fetch_savoias.sh` / `tools/run_savoias_eval.sh` /
-> `tools/plot_savoias_complexity.py` / `tools/render_savoias_grid.py`
+> `tools/plot_savoias_complexity.py` / `tools/plot_savoias_heatmap.py` / `tools/render_savoias_grid.py`
 > **产物**：`doc/2026-10-19/artifacts/savoias_complexity/`
 
 ---
@@ -142,6 +142,27 @@ MSCOCO +0.416→+0.368），方向与 std 臂一致。
 - 复杂度 89（人物密集的古典绘画）：3 token 严重糊，24→63 token 持续改善但仍偏软
   —— 与 ALIT Fig. 4 左的定性对照同构。
 
+### 3.5 热力图汇总（复杂度 × token 预算）
+
+![complexity heatmap](artifacts/savoias_complexity/savoias_complexity_heatmap.png)
+
+- **行** = 人评复杂度固定区间（0–25 / 25–50 / 50–75 / 75–100），**列** = token 预算（3→64），
+  **颜色** = 该格平均 pixel L1（0–255，越亮越差）；上排 std 臂、下排 lin 臂，三列 = 三个子集；
+  两排共用同一色标（跨臂可比）。
+- **读法**：沿行向下（复杂度↑）整行变亮；沿列向右（预算↑）整行变暗——这就是 §3.1/§3.2 的 2D 汇总。
+  例：std 臂 People-Art，0–25 区间 **12.9 → 5.0 px**（3→63 tok），75–100 区间 **22.6 → 9.5 px**；
+  高复杂度整行始终更亮，且**到 63 token 仍未追平低复杂度**。
+- 线性编码器臂（下排）整行更亮（同预算更差），但**梯度形状不变** ⇒ 复杂度效应不是某一种注意力形式的产物。
+
+![per-image heatmap](artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png)
+
+- 每个子集把图按复杂度排序（行，低→高），列 = token 预算，颜色 = 单图 L1；
+- 上段（低复杂度）在 3 token 就偏暗、几列内趋饱和；下段（高复杂度）到 63 token 仍偏亮
+  ⇒ 结论不是"均值曲线"造成的假象，**逐图分布**同样如此；列内条纹 = 复杂度之外的图间差异
+  （内容/纹理/尺寸）。
+- ⚠️ 固定分箱的每格 n 不同（Art 88/150/123/59；Scenes 45/85/50/20；Objects 30/82/67/21）；
+  75–100 箱最小（n=20~59），均值噪声比中间箱略大。
+
 ---
 
 ## 4. 与 ALIT 原论文的对照
@@ -222,6 +243,11 @@ python3 tools/plot_savoias_complexity.py \
     --data-dir /root/autodl-tmp/savoias_eval \
     --out-dir  doc/2026-10-19/artifacts/savoias_complexity
 
+# ── 3b) 热力图（聚合 + 逐图）────────────────────────────────────────────
+python3 tools/plot_savoias_heatmap.py \
+    --data-dir /root/autodl-tmp/savoias_eval \
+    --out-dir  doc/2026-10-19/artifacts/savoias_complexity
+
 # ── 4) 定性重建网格（需要 GPU + ckpt）────────────────────────────────────
 python3 tools/render_savoias_grid.py \
     --images /root/autodl-tmp/savoias/Art \
@@ -243,11 +269,13 @@ python3 tools/render_savoias_grid.py \
 | `artifacts/savoias_complexity/savoias_l1_vs_tokens.png` / `.pdf` | 复杂度三分位 → L1 vs token（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_needed_step.png` / `.pdf` | 复杂度 → 所需步数（两臂 × 3 子集） |
 | `artifacts/savoias_complexity/savoias_recon_grid.png` / `.pdf` | 低/中/高复杂度重建网格（ALIT Fig.4-left 对照） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap.png` / `.pdf` | **热力图**：复杂度分箱 × token 预算（两臂 × 3 子集） |
+| `artifacts/savoias_complexity/savoias_complexity_heatmap_per_image.png` / `.pdf` | 逐图热力图（按复杂度排序） |
 | `artifacts/savoias_complexity/savoias_complexity_summary.json` | 全部数字：ρ/三分位/needed-step/均值曲线 |
 | `artifacts/savoias_complexity/savoias_per_image_joined.csv` | 逐图 join 后的原始数值（1,640 行 = 2 臂 × 820 图） |
 | `artifacts/savoias_complexity/per_image_*.json` | `--dump_per_image` 原始产物（两臂） |
 | `artifacts/savoias_complexity/stepwise_*.json` | 逐步聚合（两臂） |
-| `tools/{fetch_savoias.sh,run_savoias_eval.sh,plot_savoias_complexity.py,render_savoias_grid.py}` | 数据/评测/分析/画图脚本 |
+| `tools/{fetch_savoias.sh,run_savoias_eval.sh,plot_savoias_complexity.py,plot_savoias_heatmap.py,render_savoias_grid.py}` | 数据/评测/分析/画图脚本 |
 
 ---
 
