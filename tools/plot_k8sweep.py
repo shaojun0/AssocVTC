@@ -28,7 +28,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-KS_DEFAULT = [8, 12, 16, 24, 32, 64]
+KS_DEFAULT = [8, 12, 16, 24, 32, 48, 64, 96, 128]
 HIST_T1 = os.path.join("doc", "2026-10-17", "artifacts", "eval_ablation8.json")
 HIST_STEPWISE = os.path.join("doc", "2026-10-16", "artifacts", "alit",
                              "stepwise_stdattn_k64_rec.json")
@@ -101,6 +101,12 @@ def main():
     ap.add_argument("--eval_dir", required=True)
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--ks", type=int, nargs="*", default=KS_DEFAULT)
+    ap.add_argument("--zs_json", default="",
+                    help="diag_zs_rank.py 的 json（默认取 out_dir/diag_zs_rank.json）")
+    ap.add_argument("--lr_csv", default="",
+                    help="K=128 lr 敏感性 csv（默认取 out_dir/k128_lr_sensitivity.csv）")
+    ap.add_argument("--train_csv", default="",
+                    help="train_summary.csv（默认取 out_dir/train_summary.csv）")
     args = ap.parse_args()
     ev, od = args.eval_dir, args.out_dir
     os.makedirs(od, exist_ok=True)
@@ -196,6 +202,66 @@ def main():
     for ext in ("png", "pdf"):
         plt.savefig(os.path.join(od, f"k8sweep_stepwise_l1.{ext}"), dpi=200)
     plt.close()
+
+    # ── 4. 高 K 诊断图（K=128 lr 敏感性 / A 相 train loss / z_s 有效秩 / z_s 余弦）──
+    zs_p = args.zs_json or os.path.join(od, "diag_zs_rank.json")
+    lr_p = args.lr_csv or os.path.join(od, "k128_lr_sensitivity.csv")
+    tr_p = args.train_csv or os.path.join(od, "train_summary.csv")
+    if any(os.path.isfile(q) for q in (zs_p, lr_p, tr_p)):
+        fig, ax = plt.subplots(2, 2, figsize=(11.0, 7.6))
+        # (a) K=128 lr 敏感性
+        if os.path.isfile(lr_p):
+            lr_rows = [r.strip().split(",") for r in open(lr_p).read().splitlines()[1:]]
+            for tag, color in (("lr2e-4_stalled", "#C44E52"), ("lr1e-4", "#4C72B0")):
+                pts = [(int(a[1]), float(a[2])) for a in lr_rows if a[0] == tag]
+                if pts:
+                    ax[0, 0].plot(*zip(*pts), "-o", ms=3, color=color, label=tag)
+            ax[0, 0].set_xlabel("epoch (A phase)")
+            ax[0, 0].set_ylabel("val PSNR (dB)")
+            ax[0, 0].set_title("K=128: learning-rate sensitivity")
+            ax[0, 0].legend(fontsize=7)
+            ax[0, 0].grid(alpha=0.3)
+        # (b) A 相 final train loss vs K
+        if os.path.isfile(tr_p):
+            tr = [r.strip().split(",") for r in open(tr_p).read().splitlines()[1:]]
+            pts = [(int(a[0]), float(a[5])) for a in tr
+                   if len(a) > 6 and a[1] == "1" and a[5] not in ("?", "")]
+            pts.sort()
+            ax[0, 1].plot(*zip(*pts), "-s", color="#55A868")
+            ax[0, 1].set_xscale("log", base=2)
+            ax[0, 1].set_xticks(ks, [str(k) for k in ks])
+            ax[0, 1].set_xlabel("K")
+            ax[0, 1].set_ylabel("final train L1 (last step)")
+            ax[0, 1].set_title("A phase (T=1): final train L1 -- K>64 underfits")
+            ax[0, 1].grid(alpha=0.3)
+        # (c) z_s 有效秩 + (d) 两两余弦
+        if os.path.isfile(zs_p):
+            with open(zs_p) as f:
+                zs = json.load(f)
+            pts = sorted((d["K"], d["eff_rank"], d["eff_rank_over_K"], d["pairwise_cos"])
+                         for d in zs.values())
+            ks_z, eff, effr, cos = zip(*pts)
+            ax[1, 0].plot(ks_z, eff, "-o", color="#8172B2", label="effective rank")
+            ax[1, 0].plot(ks_z, [K for K in ks_z], "--", color="gray", lw=0.8,
+                          label="K (upper bound)")
+            ax[1, 0].set_xscale("log", base=2)
+            ax[1, 0].set_xticks(ks_z, [str(k) for k in ks_z])
+            ax[1, 0].set_xlabel("K")
+            ax[1, 0].set_ylabel("effective rank of z_s")
+            ax[1, 0].set_title("effective rank of z_s (K=96 < K=64 in absolute)")
+            ax[1, 0].legend(fontsize=7)
+            ax[1, 0].grid(alpha=0.3)
+            ax[1, 1].plot(ks_z, cos, "-o", color="#C44E52")
+            ax[1, 1].set_xscale("log", base=2)
+            ax[1, 1].set_xticks(ks_z, [str(k) for k in ks_z])
+            ax[1, 1].set_xlabel("K")
+            ax[1, 1].set_ylabel("mean pairwise cos(z_s)")
+            ax[1, 1].set_title("mean pairwise cos(z_s): higher = more redundant")
+            ax[1, 1].grid(alpha=0.3)
+        plt.tight_layout()
+        for ext in ("png", "pdf"):
+            plt.savefig(os.path.join(od, f"k8sweep_highk_diagnostics.{ext}"), dpi=200)
+        plt.close()
 
     out = {"rows": {str(k): rows[k] for k in args.ks},
            "native_square_k64_reference": hist,

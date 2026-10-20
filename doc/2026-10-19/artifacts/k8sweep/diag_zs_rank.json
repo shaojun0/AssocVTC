@@ -1,0 +1,80 @@
+{
+ "stdattn_k32_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k32_t1/ckpt_best.pt",
+  "K": 32,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 28.72833133544922,
+  "n_images": 128,
+  "pairwise_cos": 0.07213171571493149,
+  "frac_cos_gt_0.9": 0.0,
+  "eff_rank": 22.69854736328125,
+  "eff_rank_over_K": 0.7093296051025391,
+  "token_var_mean": 0.31447499990463257
+ },
+ "stdattn_k48_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k48_t1/ckpt_best.pt",
+  "K": 48,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 29.607709677124024,
+  "n_images": 128,
+  "pairwise_cos": 0.08713614195585251,
+  "frac_cos_gt_0.9": 6.925974957994185e-06,
+  "eff_rank": 32.044151306152344,
+  "eff_rank_over_K": 0.6675864855448405,
+  "token_var_mean": 0.32386595010757446
+ },
+ "stdattn_k64_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k64_t1/ckpt_best.pt",
+  "K": 64,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 31.027114889526366,
+  "n_images": 128,
+  "pairwise_cos": 0.11540542542934418,
+  "frac_cos_gt_0.9": 0.0005657862639054656,
+  "eff_rank": 41.87351989746094,
+  "eff_rank_over_K": 0.6542737483978271,
+  "token_var_mean": 0.3572331368923187
+ },
+ "stdattn_k96_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k96_t1/ckpt_best.pt",
+  "K": 96,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 26.812295794677734,
+  "n_images": 128,
+  "pairwise_cos": 0.18361428380012512,
+  "frac_cos_gt_0.9": 0.012027138844132423,
+  "eff_rank": 36.34056854248047,
+  "eff_rank_over_K": 0.37854758898417157,
+  "token_var_mean": 0.16274109482765198
+ },
+ "stdattn_k128_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k128_t1/ckpt_best.pt",
+  "K": 128,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 25.653168084716796,
+  "n_images": 128,
+  "pairwise_cos": 0.24344120919704437,
+  "frac_cos_gt_0.9": 0.0016349732177332044,
+  "eff_rank": 62.22093963623047,
+  "eff_rank_over_K": 0.48610109090805054,
+  "token_var_mean": 0.5492647290229797
+ },
+ "stdattn_k128_t1_lr2e-4_stalled/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_k8sweep/stdattn_k128_t1_lr2e-4_stalled/ckpt_best.pt",
+  "K": 128,
+  "epoch": 13,
+  "tag": "best",
+  "best_psnr": 20.67014729003906,
+  "n_images": 128,
+  "pairwise_cos": 0.24012000858783722,
+  "frac_cos_gt_0.9": 0.00878617912530899,
+  "eff_rank": 50.40741729736328,
+  "eff_rank_over_K": 0.39380794763565063,
+  "token_var_mean": 0.5112130641937256
+ }
+}

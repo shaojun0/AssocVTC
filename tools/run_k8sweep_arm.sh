@@ -27,6 +27,9 @@ T=${T:-8}
 DATA=${DATA:-/root/autodl-tmp/datasets/imagenet100}
 OUT=${OUT:-/root/autodl-tmp/srdiff_k8sweep}
 SKIP_STAGE1=${SKIP_STAGE1:-0}
+# 学习率（默认 2e-4 = 与既有臂逐项同协议；K=128 在 2e-4 下 A 相不收敛 ⇒ 允许覆盖，须在报告里标注）
+LR1=${LR1:-2e-4}
+LR2=${LR2:-2e-4}
 A1=$OUT/stdattn_k${K}_t1
 A2=$OUT/stdattn_k${K}_t${T}
 mkdir -p "$OUT"
@@ -38,11 +41,11 @@ DEC_STEPS=$($PY -c "from model_v2_linattn import scaled_square_cumsum as f; prin
 echo "[k8sweep] K=$K GPU=$GPU T=$T dec_steps=$DEC_STEPS start=$(date -Is)"
 
 if [ "$SKIP_STAGE1" != "1" ]; then
-  # ── A 相：单步 T=1（45 ep / bs128 / lr2e-4）────────────────────────────────
-  echo "[k8sweep] K=$K A相 T=1 → $A1"
+  # ── A 相：单步 T=1（45 ep / bs128 / lr 默认 2e-4）───────────────────────────
+  echo "[k8sweep] K=$K A相 T=1 lr=$LR1 → $A1"
   $PY -u train_linattn.py \
     --data_dir "$DATA" --output_dir "$A1" \
-    --enc_attn std --num_specials "$K" --batch_size 128 --epochs 45 --lr 2e-4 \
+    --enc_attn std --num_specials "$K" --batch_size 128 --epochs 45 --lr "$LR1" \
     --dec_recurrent 0 --time_budget_h 12 --num_workers 16 --seed 0 \
     >> "$OUT/k${K}_stage1.log" 2>&1
   RC1=$?
@@ -53,10 +56,10 @@ if [ "$SKIP_STAGE1" != "1" ]; then
 fi
 
 # ── B 相：循环 T=8（6 ep / bs64 / lr2e-4 / cumulative 读窗口 / 热启动）──────
-echo "[k8sweep] K=$K B相 T=$T → $A2"
+echo "[k8sweep] K=$K B相 T=$T lr=$LR2 → $A2"
 $PY -u train_linattn.py \
   --data_dir "$DATA" --output_dir "$A2" \
-  --enc_attn std --num_specials "$K" --batch_size 64 --epochs 6 --lr 2e-4 \
+  --enc_attn std --num_specials "$K" --batch_size 64 --epochs 6 --lr "$LR2" \
   --dec_recurrent 1 --step_plan cumulative --dec_steps "$DEC_STEPS" \
   --init_from "$A1/ckpt_best.pt" --time_budget_h 8 --num_workers 16 --seed 0 \
   >> "$OUT/k${K}_stage2.log" 2>&1
