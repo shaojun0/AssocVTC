@@ -189,6 +189,9 @@ def parse_args():
                          "的消融, 生成器 model_v2_linattn.scaled_square_cumsum）")
     ap.add_argument("--block", type=int, default=0,
                     help="plan=fixed 时每步读入的 z_s 数（默认 0 = 不用）")
+    ap.add_argument("--allow_k_gt_n", type=int, default=0,
+                    help="1 = 显式允许 K>N（预算超过 patch 数, 已不是压缩; "
+                         "仅 2026-10-21 的 K=256 探针臂）")
     ap.add_argument("--dec_attn", default="std", choices=["std", "linear"],
                     help="解码器注意力形式: std=nn.TransformerDecoder softmax（默认）; "
                          "linear=自注意力与交叉注意力都用线性注意力（**全线性**臂）")
@@ -273,6 +276,7 @@ def build_cfg(args) -> LinAttnConfig:
         enc_std_qk_norm=bool(args.enc_std_qk_norm),
         dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
         dec_step_plan=args.step_plan, dec_block=int(args.block),
+        allow_k_gt_n=bool(args.allow_k_gt_n),
         dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
         dec_grad_ckpt=bool(args.dec_grad_ckpt),
         dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,

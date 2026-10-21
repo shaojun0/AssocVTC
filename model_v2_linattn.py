@@ -1146,6 +1146,10 @@ class LinAttnConfig:
     #               生成工具: `scaled_square_cumsum(K, T)`。
     dec_step_plan: str = "square"
     dec_block: int = 0            # 仅 plan="fixed" 时使用（每步读入的 z_s 数）
+    #   K>N 的探针臂（2026-10-21「固定 8 步 × 每步均匀 n 个 z_s」消融的 K=256 臂）:
+    #   N=196 时 K=192 仍 <N（1.02× 压缩, 擦边可行）, K=256>N 已不属于"压缩"
+    #   （K/N=1.31>1, 预算超过 patch 数）⇒ 必须**显式**开启, 默认仍然拒绝。
+    allow_k_gt_n: bool = False
     # ── 解码器注意力形式（消融开关; 2026-10-16 "全线性"臂）──
     #   "std"（默认, 昨日与普通编码器臂）= nn.TransformerDecoder 的 softmax 注意力;
     #   "linear" = 自注意力与交叉注意力都用核形式线性注意力（φ=elu+1）。
@@ -1220,8 +1224,13 @@ class SRPhase1LinAttn(nn.Module):
         self.patch = cfg.patch
         self.num_patches = cfg.num_patches
         self.num_specials = cfg.num_specials
-        assert 1 <= cfg.num_specials <= self.num_patches, \
-            f"num_specials(K)={cfg.num_specials} 越界 (须 1 ≤ K ≤ N={self.num_patches})"
+        assert cfg.num_specials >= 1, \
+            f"num_specials(K)={cfg.num_specials} 须 ≥1"
+        if cfg.num_specials > self.num_patches:
+            assert cfg.allow_k_gt_n, (
+                f"num_specials(K)={cfg.num_specials} > N={self.num_patches}: "
+                "预算超过 patch 数 ⇒ 不再是压缩（K/N>1）; "
+                "若确为「预算超过 N」的探针臂, 须显式 allow_k_gt_n=True")
 
         self.encoder = self._build_encoder(cfg)
         _dec_kw = dict(
@@ -1710,6 +1719,36 @@ if __name__ == "__main__":
         print(f"    K={K:>2} × T=8 cumulative: steps={cs} "
               f"windows={step_windows(K, cs, 'cumulative')}")
     print("    cumulative plan: 8 步 × K∈{8,12,16,24,32} 覆盖 0..K 无缝, 形状同族 OK")
+
+    # 8f. 「固定 8 步 × 每步均匀 n 个 z_s」fixed plan（2026-10-21 用户指定）
+    #     与 8e 的 cumulative（递增分配）唯一差别 = 每步读入的 z_s 数是否相等:
+    #     fixed 每步恰好 n=K/8 个（首步另含 z_cls）, 8 步读满全部 K 个。
+    for K in (64, 96, 128, 192, 256):
+        n = K // 8
+        win = step_windows(K, list(range(1, 9)), "fixed", n)
+        assert win[0] == (0, n) and win[-1][1] == K, (K, win)
+        assert all(win[i][1] + 1 == win[i + 1][0] for i in range(7)), (K, win)
+        sizes = [hi - lo + 1 for lo, hi in win]
+        # 首步窗口含 z_cls ⇒ n+1 个条目; 其余步恰好 n 个 z_s
+        assert sizes == [n + 1] + [n] * 7, (K, sizes)
+        assert sum(sizes) == K + 1, (K, sizes)
+        print(f"    K={K:>3} × T=8 fixed(n={n:>2}): windows={win}")
+    # K=256 > N=196: 必须 allow_k_gt_n=True 才允许; 不加必须拒绝（语义护栏）
+    m256 = SRPhase1LinAttn(LinAttnConfig(
+        num_specials=256, allow_k_gt_n=True, dec_recurrent=True,
+        dec_steps="1,2,3,4,5,6,7,8", dec_step_plan="fixed", dec_block=32)).eval()
+    assert m256.num_specials == 256 and m256.decoder.windows[-1] == (225, 256)
+    with torch.no_grad():
+        o256 = m256(torch.randn(1, 3, 224, 224))
+    assert o256["Y_pix"].shape == (1, 8, 196, 768), o256["Y_pix"].shape
+    try:
+        SRPhase1LinAttn(LinAttnConfig(num_specials=256))
+    except AssertionError as e:
+        assert "allow_k_gt_n" in str(e), str(e)
+    else:
+        raise AssertionError("K=256>N=196 未显式 allow_k_gt_n 却未被拒绝")
+    print("    fixed plan: K∈{64,96,128,192,256} 每步均匀读 n=K/8 个 z_s, "
+          "覆盖 0..K; K>N 需 allow_k_gt_n 显式开启 OK")
 
     # 9e. 普通 transformer 编码器的 13 层参数体量必须与线性臂对齐（消融可归因的前提）
     print("[9] ★消融臂: 普通 (softmax) 注意力编码器（enc_attn='std'）")
