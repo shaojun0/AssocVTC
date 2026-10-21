@@ -116,6 +116,7 @@ C_i = round( K · ((i+1)²−1) / ((T+1)²−1) )   (i=1..T, C_T=K)
 | `eval_linattn.py` | 末步（第 8 步）像素 **PSNR / SSIM / L1_norm**（与主报告同口径；PSNR 逐图再平均） |
 | `eval_stepwise_linattn.py` | 逐步 1–8 的 **L1_255（不 clamp）**、PSNR、Δ_t、每图最优停步 |
 | `tools/diag_zs_rank.py`（新增） | `z_s` 冗余度诊断：两两余弦 / frac(cos>0.9) / **有效秩**（SVD 熵指数）/ token 方差 |
+| `tools/eval_rfid.py`（新增，2026-10-21） | **rFID**（ALIT 口径：pytorch-fid 0.3.0 / InceptionV3 pool3 / dims=2048，GT dir vs recon dir）+ 逐步 PSNR/L1 交叉校验 |
 
 代码改动（默认路径逐位不变，已回归）：
 1. `model_v2_linattn.py`：新增 `step_plan="cumulative"` + `scaled_square_cumsum(K,T)` + 自检 §8e
@@ -247,6 +248,30 @@ T=1 的 −0.19 dB 可完全由**单种子重跑漂移**解释（架构/超参�
 则是**计划差异 + 漂移**的叠加（本计划前几步读得更少），不能单独归因。原生 K=64 的
 28.58 dB **仍是本仓库 K=64/T=8 的权威数字**，本表 K=64 只用于本消融内部的**同协议参照**。
 
+### 3.7 K=64 的 rFID（ALIT 指标口径，2026-10-21 补）
+
+ALIT（[arXiv:2411.02393](https://arxiv.org/abs/2411.02393)）报告重建质量用的是 **rFID**
+（官方口径：`python -m pytorch_fid {recon_dir} {gt_dir}`，pytorch-fid 0.3.0 / InceptionV3
+pool3 / `dims=2048`）。为了与论文指标对齐，本报告 K=64 的三臂补测了**同一口径**的 rFID
+（全量 5,000 张 val；实现与逐臂/eval json 见
+[`doc/2026-10-21/REPORT_rfid_k64.md`](../2026-10-21/REPORT_rfid_k64.md)）：
+
+| 臂（K=64） | 读窗口计划 | T | PSNR (dB) | L1_255 | **rFID ↓** |
+|---|---|---|---|---|---|
+| `stdattn_k64_rec`（native square） | 递增（与 ALIT 的 rollout 同构） | 8 | 28.582 | 6.613 | **15.89** |
+| `stdattn_k64_t8`（本报告主表 K=64） | cumulative（前少后多） | 8 | 27.760 | 7.190 | **19.86** |
+| `stdattn_k64_t1`（本报告主表 K=64 的 T=1 列） | cumulative A 相（单步读全 64） | 1 | 31.027 | 5.293 | **8.32** |
+
+- **与 PSNR 同向**：rFID 也在 **K=64 最低**，K=96/128 回升（**35.10 / 48.80**，比 K=64 高
+  **+76.7% / +145.7%**），且 rFID 的相对惩罚远大于 PSNR（K=8→64：rFID **−84.5%** vs PSNR +5.98 dB）
+  ⇒ §3.4「K=64 是本协议下的实际最优操作点」**不依赖像素口径**。
+- **与 ALIT IN-100 @64 token 同量级**（ALIT Ours-S 16.17 / Ours-B 15.88 vs 本仓库 native 15.89），
+  ⚠️ 但数据划分、分辨率（224 vs 256）、重建器（连续 z_s + 线性注意力 vs VQGAN + 量化 1D + GAN）
+  全不同，**只能作量级参照、不可宣称追平**；低 token 段（≤32）本仓库 rFID 约差 1.6×，
+  与「本仓库训练无 GAN 阶段」一致。
+- 同一 native 模型的**逐 step rFID 曲线**（3→64 token，与 ALIT「同一模型不同 token 预算」同构）
+  及 cumulative K-sweep 的 rFID 表见 `REPORT_rfid_k64.md` §3.2–3.3。
+
 ---
 
 ## 4. 结论、可写进论文的点与诚实边界
@@ -315,6 +340,9 @@ T=1 的 −0.19 dB 可完全由**单种子重跑漂移**解释（架构/超参�
 | `tools/{run_k8sweep_arm,launch_k8sweep,eval_k8sweep}.sh` | 训练/启动/评测脚本（`LR1/LR2` 可覆盖 lr） |
 | `tools/plot_k8sweep.py` | 汇总表/图（纯 json，不加载模型） |
 | `tools/diag_zs_rank.py` | z_s 冗余度/有效秩诊断 |
+| `../2026-10-21/artifacts/rfid_k64/eval/<arm>/eval_rfid.json` | K=64 三臂 + K-sweep 9 臂的 **rFID**（ALIT 口径）；表/图/summary 见 `doc/2026-10-21/REPORT_rfid_k64.md` |
+| `tools/eval_rfid.py` | **rFID 评测**（pytorch-fid 0.3.0 / GT 落盘 / 逐步重建落盘 / PSNR 交叉校验 / scipy shim） |
+| `tools/plot_rfid_k64.py` | rFID 汇总表/图（纯 json，不加载模型） |
 
 ```bash
 # 训练（2 卡；首轮 6 臂: GPU0=32/16/8, GPU1=24/12/64）
