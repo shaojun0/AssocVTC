@@ -271,7 +271,7 @@ python tools/plot_rfid_k64.py --eval_dir doc/2026-10-21/artifacts/rfid_k64/eval 
    （见 `REPORT_k8sweep.md` §3.4），rFID 的回升不能解释为「更多 token 对感知无用」。
 6. **感知指标 ≠ 任务保真**：本项目唯一验收仍是 Phase 2 文字/下游任务；rFID 只是重建侧的
    感知代理（PSNR 的补充，不是替代）。
-7. **重建 PNG 未入库**：5,000 张 × 18 个重建目录 + GT ≈ 7.5 GB，留在 `/root/autodl-tmp/rfid_k64/`，
+7. **重建 PNG 未入库**：5,000 张 × 18 个重建目录 + GT ≈ 6.2 GB（实测），留在 `/root/autodl-tmp/rfid_k64/`，
    **实例收尾后已关机**（AutoDL 关机保留数据盘，但若日后释放实例则 PNG 丢失）；入库的是每臂 `eval_rfid.json`、
    `gt_stats.npz` 的生成方式、表与图，按 §2.4 可完整重算。
 8. **scipy shim**：远程 scipy 1.18.1 与 pytorch-fid 0.3.0 的 API 不兼容，已用语义等价的
