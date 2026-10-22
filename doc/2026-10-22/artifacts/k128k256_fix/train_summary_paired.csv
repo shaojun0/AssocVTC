@@ -1,0 +1,2 @@
+K,stage,lr,best_val_psnr,wall_min,final_train_loss,total_skips,plan,block,allow_k_gt_n
+128,2,0.0002,30.47,69.3,0.1545,0,cumulative,0,0

@@ -1,0 +1,15 @@
+{
+ "stdattn_k256_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_qknorm/stdattn_k256_t1/ckpt_best.pt",
+  "K": 256,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 36.766408508300785,
+  "n_images": 128,
+  "pairwise_cos": 0.39539939165115356,
+  "frac_cos_gt_0.9": 0.0161539725959301,
+  "eff_rank": 121.57341003417969,
+  "eff_rank_over_K": 0.4748961329460144,
+  "token_var_mean": 0.36093685030937195
+ }
+}

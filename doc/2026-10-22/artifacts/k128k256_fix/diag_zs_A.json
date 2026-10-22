@@ -1,0 +1,67 @@
+{
+ "stdattn_k64_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_fixedk/stdattn_k64_t1/ckpt_best.pt",
+  "K": 64,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 31.354379498291017,
+  "n_images": 128,
+  "pairwise_cos": 0.07301679253578186,
+  "frac_cos_gt_0.9": 3.100198591710068e-05,
+  "eff_rank": 40.25188064575195,
+  "eff_rank_over_K": 0.6289356350898743,
+  "token_var_mean": 0.3153352737426758
+ },
+ "stdattn_k96_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_fixedk/stdattn_k96_t1/ckpt_best.pt",
+  "K": 96,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 32.306557760620116,
+  "n_images": 128,
+  "pairwise_cos": 0.10067414492368698,
+  "frac_cos_gt_0.9": 0.006901041604578495,
+  "eff_rank": 50.621551513671875,
+  "eff_rank_over_K": 0.5273078282674154,
+  "token_var_mean": 0.2979547381401062
+ },
+ "stdattn_k128_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_fixedk/stdattn_k128_t1/ckpt_best.pt",
+  "K": 128,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 26.166579016113282,
+  "n_images": 128,
+  "pairwise_cos": 0.26826512813568115,
+  "frac_cos_gt_0.9": 0.0024990772362798452,
+  "eff_rank": 57.45578384399414,
+  "eff_rank_over_K": 0.4488733112812042,
+  "token_var_mean": 0.3321349322795868
+ },
+ "stdattn_k192_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_fixedk/stdattn_k192_t1/ckpt_best.pt",
+  "K": 192,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 32.50501961364746,
+  "n_images": 128,
+  "pairwise_cos": 0.19666863977909088,
+  "frac_cos_gt_0.9": 0.006829120218753815,
+  "eff_rank": 67.86075592041016,
+  "eff_rank_over_K": 0.35344143708546955,
+  "token_var_mean": 0.30370911955833435
+ },
+ "stdattn_k256_t1/ckpt_best.pt": {
+  "ckpt": "/root/autodl-tmp/srdiff_fixedk/stdattn_k256_t1/ckpt_best.pt",
+  "K": 256,
+  "epoch": 45,
+  "tag": "best",
+  "best_psnr": 26.356358779907225,
+  "n_images": 128,
+  "pairwise_cos": 0.38736850023269653,
+  "frac_cos_gt_0.9": 0.007204542402178049,
+  "eff_rank": 79.97135925292969,
+  "eff_rank_over_K": 0.3123881220817566,
+  "token_var_mean": 0.44748005270957947
+ }
+}

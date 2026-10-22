@@ -1,0 +1,5 @@
+K,stage,lr,best_val_psnr,wall_min,final_train_loss,total_skips,plan,block,allow_k_gt_n
+128,1,0.0002,34.0,171.5,0.0668,0,square,0,0
+128,2,0.0002,31.25,69.3,0.1224,0,fixed,16,0
+256,1,0.0002,36.77,218.3,0.0488,0,square,0,1
+256,2,0.0002,33.86,75.2,0.1107,570,fixed,32,1
