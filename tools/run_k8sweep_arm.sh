@@ -30,6 +30,7 @@ SKIP_STAGE1=${SKIP_STAGE1:-0}
 # 学习率（默认 2e-4 = 与既有臂逐项同协议；K=128 在 2e-4 下 A 相不收敛 ⇒ 允许覆盖，须在报告里标注）
 LR1=${LR1:-2e-4}
 LR2=${LR2:-2e-4}
+EXTRA_ARGS=${EXTRA_ARGS:-}   # 附加 CLI 覆盖（如 "--enc_std_qk_norm 1"）; 默认空 = 原行为
 A1=$OUT/stdattn_k${K}_t1
 A2=$OUT/stdattn_k${K}_t${T}
 mkdir -p "$OUT"
@@ -46,7 +47,7 @@ if [ "$SKIP_STAGE1" != "1" ]; then
   $PY -u train_linattn.py \
     --data_dir "$DATA" --output_dir "$A1" \
     --enc_attn std --num_specials "$K" --batch_size 128 --epochs 45 --lr "$LR1" \
-    --dec_recurrent 0 --time_budget_h 12 --num_workers 16 --seed 0 \
+    --dec_recurrent 0 --time_budget_h 12 --num_workers 16 --seed 0 $EXTRA_ARGS \
     >> "$OUT/k${K}_stage1.log" 2>&1
   RC1=$?
   echo "[k8sweep] K=$K A相 rc=$RC1 end=$(date -Is)"
@@ -61,7 +62,7 @@ $PY -u train_linattn.py \
   --data_dir "$DATA" --output_dir "$A2" \
   --enc_attn std --num_specials "$K" --batch_size 64 --epochs 6 --lr "$LR2" \
   --dec_recurrent 1 --step_plan cumulative --dec_steps "$DEC_STEPS" \
-  --init_from "$A1/ckpt_best.pt" --time_budget_h 8 --num_workers 16 --seed 0 \
+  --init_from "$A1/ckpt_best.pt" --time_budget_h 8 --num_workers 16 --seed 0 $EXTRA_ARGS \
   >> "$OUT/k${K}_stage2.log" 2>&1
 RC2=$?
 echo "[k8sweep] K=$K B相 rc=$RC2 end=$(date -Is)"

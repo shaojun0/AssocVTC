@@ -33,6 +33,7 @@ OUT=${OUT:-/root/autodl-tmp/srdiff_fixedk}
 SKIP_STAGE1=${SKIP_STAGE1:-0}
 LR1=${LR1:-2e-4}
 LR2=${LR2:-2e-4}
+EXTRA_ARGS=${EXTRA_ARGS:-}   # 附加 CLI 覆盖（如 "--enc_std_qk_norm 1"）; 默认空 = 原行为
 
 if [ $((K % T)) -ne 0 ]; then
   echo "[fixedk] K=$K 不能被 T=$T 整除（本消融要求每步 n=K/T 为整数）"; exit 3
@@ -57,7 +58,7 @@ if [ "$SKIP_STAGE1" != "1" ]; then
   $PY -u train_linattn.py \
     --data_dir "$DATA" --output_dir "$A1" \
     --enc_attn std --num_specials "$K" --batch_size 128 --epochs 45 --lr "$LR1" \
-    --dec_recurrent 0 --time_budget_h 12 --num_workers 16 --seed 0 $EXTRA \
+    --dec_recurrent 0 --time_budget_h 12 --num_workers 16 --seed 0 $EXTRA $EXTRA_ARGS \
     >> "$OUT/k${K}_stage1.log" 2>&1
   RC1=$?
   echo "[fixedk] K=$K A相 rc=$RC1 end=$(date -Is)"
@@ -72,7 +73,7 @@ $PY -u train_linattn.py \
   --data_dir "$DATA" --output_dir "$A2" \
   --enc_attn std --num_specials "$K" --batch_size 64 --epochs 6 --lr "$LR2" \
   --dec_recurrent 1 --step_plan fixed --block "$BLOCK" --dec_steps "$DEC_STEPS" \
-  --init_from "$A1/ckpt_best.pt" --time_budget_h 8 --num_workers 16 --seed 0 $EXTRA \
+  --init_from "$A1/ckpt_best.pt" --time_budget_h 8 --num_workers 16 --seed 0 $EXTRA $EXTRA_ARGS \
   >> "$OUT/k${K}_stage2.log" 2>&1
 RC2=$?
 echo "[fixedk] K=$K B相 rc=$RC2 end=$(date -Is)"

@@ -300,7 +300,8 @@ class LinearAttentionEncoder(nn.Module):
     def __init__(self, dim: int = 448, depth: int = 13, heads: int = 8,
                  mlp_ratio: float = 4.0, patch: int = 16, img_size: int = 224,
                  num_specials: int = 64, dwconv: bool = True,
-                 qk_norm: bool = True, drop_rate: float = 0.0):
+                 qk_norm: bool = True, drop_rate: float = 0.0,
+                 special_init_std: float = 0.02):
         super().__init__()
         assert img_size % patch == 0, f"img_size={img_size} 须被 patch={patch} 整除"
         self.patch = patch
@@ -311,7 +312,8 @@ class LinearAttentionEncoder(nn.Module):
 
         self.patch_embed = nn.Conv2d(3, dim, kernel_size=patch, stride=patch)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
-        self.special_tokens = nn.Parameter(torch.randn(1, num_specials, dim) * 0.02)
+        self.special_tokens = nn.Parameter(
+            torch.randn(1, num_specials, dim) * special_init_std)
         self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, dim) * 0.02)
         self.pos_drop = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
         self.blocks = nn.ModuleList([
@@ -320,7 +322,7 @@ class LinearAttentionEncoder(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.special_tokens, std=0.02)
+        nn.init.trunc_normal_(self.special_tokens, std=special_init_std)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def _pos(self, n: int) -> Tensor:
@@ -436,7 +438,7 @@ class StandardAttentionEncoder(nn.Module):
     def __init__(self, dim: int = 448, depth: int = 13, heads: int = 8,
                  mlp_ratio: float = 4.0, patch: int = 16, img_size: int = 224,
                  num_specials: int = 64, qk_norm: bool = False,
-                 drop_rate: float = 0.0):
+                 drop_rate: float = 0.0, special_init_std: float = 0.02):
         super().__init__()
         assert img_size % patch == 0, f"img_size={img_size} 须被 patch={patch} 整除"
         self.patch = patch
@@ -447,7 +449,8 @@ class StandardAttentionEncoder(nn.Module):
 
         self.patch_embed = nn.Conv2d(3, dim, kernel_size=patch, stride=patch)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
-        self.special_tokens = nn.Parameter(torch.randn(1, num_specials, dim) * 0.02)
+        self.special_tokens = nn.Parameter(
+            torch.randn(1, num_specials, dim) * special_init_std)
         self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, dim) * 0.02)
         self.pos_drop = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
         self.blocks = nn.ModuleList([
@@ -456,7 +459,7 @@ class StandardAttentionEncoder(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.special_tokens, std=0.02)
+        nn.init.trunc_normal_(self.special_tokens, std=special_init_std)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def _pos(self, n: int) -> Tensor:
@@ -1122,6 +1125,10 @@ class LinAttnConfig:
     img_size: int = 224
     patch: int = 16
     num_specials: int = 64          # K: z_s 压缩 token 数（N=196; K<N 即真压缩）
+    #   specials 初始化标准差（默认 0.02 = 原行为逐位不变）。2026-10-22 诊断用:
+    #   K≥128 的 A 相会落进「z_s 冗余坍缩」差盆地; 结构上 K 个 special 在序列里
+    #   **没有位置编码、初始化又几乎相同**（排列对称）⇒ 调大 init std 是「打破对称」探针。
+    special_init_std: float = 0.02
     # ── 编码器（线性注意力, 从零训练）──
     enc_dim: int = 448
     enc_depth: int = 13
@@ -1304,13 +1311,14 @@ class SRPhase1LinAttn(nn.Module):
                 dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
                 mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
                 num_specials=cfg.num_specials, dwconv=cfg.enc_dwconv,
-                qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout)
+                qk_norm=cfg.enc_qk_norm, drop_rate=cfg.dropout,
+                special_init_std=cfg.special_init_std)
         if kind == "std":
             return StandardAttentionEncoder(
                 dim=cfg.enc_dim, depth=cfg.enc_depth, heads=cfg.enc_heads,
                 mlp_ratio=cfg.enc_mlp_ratio, patch=cfg.patch, img_size=cfg.img_size,
                 num_specials=cfg.num_specials, qk_norm=cfg.enc_std_qk_norm,
-                drop_rate=cfg.dropout)
+                drop_rate=cfg.dropout, special_init_std=cfg.special_init_std)
         raise AssertionError(f"未处理的 enc_attn={kind!r}")
 
     # ── encode / decode（训练与推理同一路径, 与主线同名同义）──

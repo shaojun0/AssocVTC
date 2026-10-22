@@ -164,6 +164,9 @@ def parse_args():
     ap.add_argument("--img_size", type=int, default=224)
     ap.add_argument("--patch", type=int, default=16)
     ap.add_argument("--num_specials", type=int, default=64, help="K: z_s 压缩 token 数")
+    ap.add_argument("--special_init_std", type=float, default=0.02,
+                    help="special token 初始化标准差（默认 0.02 = 原行为; 2026-10-22 "
+                         "K≥128 A 相坍缩诊断的对称性探针）")
     # 编码器
     ap.add_argument("--enc_dim", type=int, default=448)
     ap.add_argument("--enc_depth", type=int, default=13)
@@ -270,6 +273,7 @@ def build_cfg(args) -> LinAttnConfig:
     """
     return LinAttnConfig(
         img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
+        special_init_std=float(args.special_init_std),
         enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
         enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
         enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
