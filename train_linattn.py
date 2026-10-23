@@ -246,6 +246,12 @@ def parse_args():
     ap.add_argument("--weight_decay", type=float, default=0.05)
     ap.add_argument("--warmup_frac", type=float, default=0.08)
     ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--accum_steps", type=int, default=1,
+                    help="梯度累积步数（默认 1 = 原行为逐位不变）。>1 时 loader 批量 = "
+                         "batch_size/accum_steps, **等效批量与优化步数都不变**"
+                         "（每步梯度 = accum 个 micro-batch 均值, 数学等价）, 只为把 "
+                         "BPTT 步数很大（T=16/24/32）时的激活显存放下来 "
+                         "（2026-10-23「固定 n=2 × T=16/24/32」臂: bs64 在 T=32 会 OOM）")
     ap.add_argument("--skip_grad", type=float, default=50.0,
                     help="clip 前 grad_norm 超过该值就跳过本步更新（0=关）; "
                          "线性注意力低精度间歇爆炸的护栏, 见模型 docstring")
@@ -360,10 +366,18 @@ def main():
           f"steps={cfg.refiner_steps or 'T'})", flush=True)
     print(f"[params] {pc}", flush=True)
 
+    accum = max(1, int(args.accum_steps))
+    assert args.batch_size % accum == 0, \
+        f"--batch_size({args.batch_size}) 须能被 --accum_steps({accum}) 整除"
+    micro_bs = args.batch_size // accum
+    if accum > 1:
+        print(f"[accum] 等效批量 {args.batch_size} = micro {micro_bs} × {accum} "
+              f"累积, 优化步数不变（val 每批 {micro_bs} × 批数×{accum} 保持同样张数）",
+              flush=True)
     tr_loader, va_loader, tr_ds, va_ds = build_loaders(
-        args.data_dir, args.img_size, args.batch_size, args.val_per_class,
-        args.num_workers, args.limit, args.val_batches)
-    steps_per_epoch = len(tr_loader)
+        args.data_dir, args.img_size, micro_bs, args.val_per_class,
+        args.num_workers, args.limit, args.val_batches * accum)
+    steps_per_epoch = len(tr_loader) // accum
     total_steps = (args.max_steps if args.max_steps > 0
                    else steps_per_epoch * args.epochs)
     warmup = max(1, int(total_steps * args.warmup_frac))
@@ -394,6 +408,7 @@ def main():
     t0 = time.time()
     run_imgs, run_t0 = 0, time.time()
     n_skipped = 0
+    loss_sum, rec_sum = 0.0, 0.0     # 一个优化步内 accum 个 micro-batch 的累计
     model.train()
     step = start_step
     stop = False
@@ -411,11 +426,17 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = lr
             x = x.cuda(non_blocking=True)
+            if bi % accum == 0:
+                opt.zero_grad(set_to_none=True)
+                loss_sum, rec_sum = 0.0, 0.0
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
                 out = model(x)
                 loss = out["loss"]
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
+            (loss / accum).backward()      # accum=1 时与原行为逐位相同
+            loss_sum += float(loss.item())
+            rec_sum += float(out["recon"].item())
+            if (bi + 1) % accum != 0:
+                continue                    # 累积未满 ⇒ 不做优化步
             if args.grad_clip > 0:
                 gn = torch.nn.utils.clip_grad_norm_(
                     [prm for prm in model.parameters() if prm.requires_grad],
@@ -431,22 +452,24 @@ def main():
             else:
                 opt.step()
             step += 1
-            run_imgs += x.shape[0]
+            run_imgs += x.shape[0] * accum
+            loss_avg = loss_sum / accum
+            rec_avg = rec_sum / accum
 
             if step % args.log_interval == 0 or step - start_step <= 3:
                 el = time.time() - t0
                 ips = run_imgs / max(1e-6, time.time() - run_t0)
                 eta_h = (total_steps - step) / max(1e-6, ips) * args.batch_size / 3600
                 rec = {
-                    "step": step, "epoch": epoch, "loss": round(loss.item(), 5),
-                    "recon": round(out["recon"].item(), 5),
+                    "step": step, "epoch": epoch, "loss": round(loss_avg, 5),
+                    "recon": round(rec_avg, 5),
                     "lr": lr, "grad_norm": round(float(gn), 4), "skipped": n_skipped, "T": n_steps,
                     "img_per_s": round(ips, 1), "elapsed_min": round(el / 60, 2),
                     "eta_h": round(eta_h, 2),
                     "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
                 }
                 print(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
-                      f"loss={loss.item():.4f} recon={out['recon'].item():.4f} "
+                      f"loss={loss_avg:.4f} recon={rec_avg:.4f} "
                       f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
                       f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h", flush=True)
                 log_jsonl(log_path, rec)
@@ -471,7 +494,7 @@ def main():
         # ── epoch 末验证 + 存档 ──
         if args.val_batches > 0 and (step > start_step or epoch > 1):
             vr = evaluate(model, va_loader, args.patch, args.img_size,
-                          bool(args.amp), args.val_batches,
+                          bool(args.amp), args.val_batches * accum,
                           save_grid=os.path.join(args.output_dir, "samples",
                                                  f"epoch{epoch:03d}_val.png"))
             vr.update({"step": step, "epoch": epoch, "split": "val"})

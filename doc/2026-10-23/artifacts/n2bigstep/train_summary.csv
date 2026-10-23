@@ -1,0 +1,4 @@
+T,K,n,stage,lr,plan,block,accum,best_val_psnr,wall_min,final_train_loss,total_skips
+16,32,2,2,0.0002,fixed,2,2,24.21,138.3,0.191,0
+24,48,2,2,0.0002,fixed,2,2,24.79,201.6,0.192,0
+32,64,2,2,0.0002,fixed,2,2,24.82,268.4,0.1859,0

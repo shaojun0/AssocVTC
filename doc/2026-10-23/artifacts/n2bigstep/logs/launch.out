@@ -1,0 +1,37 @@
+[n2] N2BIGSTEP_DONE 2026-10-23T20:36:26+08:00 chain_rc=0/0
+[eval-n2] 等待 N2BIGSTEP_DONE ... 2026-10-23T20:36:26+08:00
+[eval-n2] 开始评测 2026-10-23T20:36:26+08:00
+[eval-n2] K=64 T=32 末步 rc=0 2026-10-23T20:37:01+08:00
+[eval-n2] K=64 T=32 逐步 rc=0 2026-10-23T20:37:38+08:00
+[eval-n2] K=64 T=1(A 相) rc=0 2026-10-23T20:37:48+08:00
+[eval-n2] K=32 T=16 末步 rc=0 2026-10-23T20:38:09+08:00
+[eval-n2] K=32 T=16 逐步 rc=0 2026-10-23T20:38:31+08:00
+[eval-n2] K=32 T=1(A 相) rc=0 2026-10-23T20:38:41+08:00
+[eval-n2] K=48 T=24 末步 rc=0 2026-10-23T20:39:09+08:00
+[eval-n2] K=48 T=24 逐步 rc=0 2026-10-23T20:39:39+08:00
+[eval-n2] K=48 T=1(A 相) rc=0 2026-10-23T20:39:48+08:00
+[eval-n2] N2BIGSTEP_EVAL_DONE 2026-10-23T20:39:48+08:00
+total 120
+drwxr-xr-x 2 root root  4096 Oct 23 20:39 .
+drwxr-xr-x 9 root root  4096 Oct 23 20:39 ..
+-rw-r--r-- 1 root root  5255 Oct 23 15:03 baseline_pca_per_patch.json
+-rw-r--r-- 1 root root 12636 Oct 23 15:13 baseline_pca_per_patch_r160.json
+-rw-r--r-- 1 root root  5230 Oct 23 15:02 baseline_svd_per_image.json
+-rw-r--r-- 1 root root  1506 Oct 23 20:38 linattn_k32_t1.json
+-rw-r--r-- 1 root root   236 Oct 23 20:38 linattn_k32_t1.log
+-rw-r--r-- 1 root root  1597 Oct 23 20:38 linattn_k32_t16.json
+-rw-r--r-- 1 root root   237 Oct 23 20:38 linattn_k32_t16.log
+-rw-r--r-- 1 root root  1505 Oct 23 20:39 linattn_k48_t1.json
+-rw-r--r-- 1 root root   236 Oct 23 20:39 linattn_k48_t1.log
+-rw-r--r-- 1 root root  1621 Oct 23 20:39 linattn_k48_t24.json
+-rw-r--r-- 1 root root   237 Oct 23 20:39 linattn_k48_t24.log
+-rw-r--r-- 1 root root  1507 Oct 23 20:37 linattn_k64_t1.json
+-rw-r--r-- 1 root root   236 Oct 23 20:37 linattn_k64_t1.log
+-rw-r--r-- 1 root root  1645 Oct 23 20:37 linattn_k64_t32.json
+-rw-r--r-- 1 root root   237 Oct 23 20:37 linattn_k64_t32.log
+-rw-r--r-- 1 root root  2957 Oct 23 20:38 stepwise_k32_t16.json
+-rw-r--r-- 1 root root  2205 Oct 23 20:38 stepwise_k32_t16.log
+-rw-r--r-- 1 root root  4167 Oct 23 20:39 stepwise_k48_t24.json
+-rw-r--r-- 1 root root  2885 Oct 23 20:39 stepwise_k48_t24.log
+-rw-r--r-- 1 root root  5381 Oct 23 20:37 stepwise_k64_t32.json
+-rw-r--r-- 1 root root  3559 Oct 23 20:37 stepwise_k64_t32.log
