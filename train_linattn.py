@@ -266,6 +266,10 @@ def parse_args():
     ap.add_argument("--max_steps", type=int, default=0, help=">0 时提前停（冒烟）")
     ap.add_argument("--limit", type=int, default=0, help=">0 时限制训练集大小（冒烟）")
     ap.add_argument("--time_budget_h", type=float, default=0.0, help=">0 时到点保存退出")
+    ap.add_argument("--save_opt", type=int, default=1,
+                    help="1 = ckpt 里存 AdamW 状态（默认, 与原行为一致）；0 = 只存 model/cfg/args"
+                         "（2026-10-24 容量阶梯: 360M 档 ckpt 含 opt 约 11.6G/个, 数据盘放不下; "
+                         "本线不 --resume, 评测/热启动只用 model 权重 ⇒ 不存 opt 无副作用）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default="")
     ap.add_argument("--smoke", action="store_true", help="冒烟: 快速配置 + 小数据")
@@ -400,10 +404,13 @@ def main():
               f"best_psnr={best_psnr:.3f}", flush=True)
 
     def save_ckpt(path, step, epoch, best, tag=""):
-        torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
-                    "cfg": cfg.to_dict(), "args": vars(args), "step": step,
-                    "epoch": epoch, "best_psnr": best, "tag": tag,
-                    "params": pc}, path)
+        blob = {"model": model.state_dict(),
+                "cfg": cfg.to_dict(), "args": vars(args), "step": step,
+                "epoch": epoch, "best_psnr": best, "tag": tag,
+                "params": pc}
+        if args.save_opt:
+            blob["opt"] = opt.state_dict()      # 默认路径与原行为逐位相同
+        torch.save(blob, path)
 
     t0 = time.time()
     run_imgs, run_t0 = 0, time.time()
