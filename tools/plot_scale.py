@@ -70,6 +70,10 @@ def main():
     ap.add_argument("--base", default="doc/2026-10-23/artifacts/n2bigstep/eval")
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--blocks", type=int, nargs="*", default=[60, 120, 240, 360])
+    ap.add_argument("--t24_eval", default="",
+                    help="条件臂（n=2 × T=24, K=48）的 eval 目录; 空 = 本批没跑")
+    ap.add_argument("--t24_M", type=int, default=0,
+                    help="条件臂用的容量档（上一轮最优档）")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -97,6 +101,21 @@ def main():
                          **ev16, psnr_t1=(ev1["psnr"] if ev1 else None)))
     rows.sort(key=lambda r: r["total_M"])
 
+    # ── 条件臂: n=2 × T=24（K=48）@ 上一轮最优容量档 ──
+    t24 = None
+    if args.t24_eval and args.t24_M:
+        ev24 = load_eval(os.path.join(args.t24_eval, f"linattn_m{args.t24_M}_t24.json"))
+        ev1_24 = load_eval(os.path.join(args.t24_eval, f"linattn_m{args.t24_M}_t1.json"))
+        if ev24:
+            ed, eh, dd, dh = ARMS.get(args.t24_M, (0, 0, 0, 0))
+            d = load_one(os.path.join(args.t24_eval, f"linattn_m{args.t24_M}_t24.json"))
+            pc = (d or {}).get("params", {})
+            t24 = dict(M=args.t24_M, enc_M=pc.get("enc_M", 0), dec_M=pc.get("dec_M", 0),
+                       total_M=pc.get("total_M", 0), enc_dim=ed, enc_heads=eh,
+                       dec_dim=dd, dec_heads=dh,
+                       tag=f"{args.t24_M}M 档 + n=2,T=24 (K=48)",
+                       psnr_t1=(ev1_24["psnr"] if ev1_24 else None), **ev24)
+
     # ── 表 ──
     lines = ["# 容量阶梯：enc/dec 各 60/120/240/360M（n=2, T=16, K=32）", "",
              "> 协议: A 相 T=1 45ep/bs128/lr2e-4 → B 相 T=16 `fixed` n=2 6ep/等效bs64/lr2e-4; "
@@ -111,6 +130,16 @@ def main():
         lines.append(f"| {r['tag']} | {r['enc_M']:.2f}M | {r['dec_M']:.2f}M | "
                      f"{r['total_M']:.1f}M | {r['psnr']:.3f} | {r['l1']:.4f} | "
                      f"{r['ssim']:.4f} | {t1} | {d} |")
+    if t24:
+        same = next((r for r in rows if r["M"] == args.t24_M), None)
+        lines += ["", f"**条件臂：同容量（{args.t24_M}M）下 T=16(K=32) vs T=24(K=48)**", "",
+                  "| 臂 | K | PSNR | L1_norm | SSIM | ΔPSNR(T=24 − T=16) |",
+                  "|---|---|---|---|---|---|"]
+        if same:
+            lines.append(f"| n=2, T=16 | 32 | {same['psnr']:.3f} | {same['l1']:.4f} | "
+                         f"{same['ssim']:.4f} | — |")
+        lines.append(f"| n=2, T=24 | 48 | {t24['psnr']:.3f} | {t24['l1']:.4f} | "
+                     f"{t24['ssim']:.4f} | {t24['psnr'] - (same['psnr'] if same else 0):+.3f} |")
     tbl = "\n".join(lines) + "\n"
     with open(os.path.join(args.out_dir, "scale_table.md"), "w") as f:
         f.write(tbl)
@@ -156,6 +185,13 @@ def main():
         steps.append((r, sw))
         ax.plot(range(1, len(L) + 1), L, "-o", ms=3, color=colors[i % len(colors)],
                 label=f"{r['total_M']:.0f}M  final={L[-1]:.2f}")
+    if t24:
+        sw = load_stepwise(os.path.join(args.t24_eval,
+                                        f"stepwise_m{args.t24_M}_t24.json"))
+        if sw:
+            L = sw["L1_255"]
+            ax.plot(range(1, len(L) + 1), L, "--s", ms=3, color="#8172B3",
+                    label=f"{t24['total_M']:.0f}M, n=2, T=24  final={L[-1]:.2f}")
     ax.set_xlabel("decoding step t (n=2 tokens/step)")
     ax.set_ylabel("L1 (0-255 pixel scale; lower better)")
     ax.set_title("stepwise reconstruction error vs capacity (n=2, T=16)")
@@ -167,6 +203,7 @@ def main():
     plt.close()
 
     summary = {"arms": [{k: v for k, v in r.items()} for r in rows],
+               "t24_arm": t24,
                "note": "enc/dec 各 60/120/240/360M（深度钉死 13/7, 宽度 scaling）; "
                        "实际总参数 = 119.3/238.2/481.5/720.6M; "
                        "基线 63M 来自 2026-10-23 n2bigstep 的 K=32/T=16 臂（同协议）"}

@@ -1,0 +1,43 @@
+[scale] SCALE_DONE 2026-10-26T00:04:49+08:00 chain_rc=0/0
+[eval-scale] 等待 SCALE_DONE ... 2026-10-26T00:04:49+08:00
+[eval-scale] 开始评测 2026-10-26T00:04:49+08:00
+[eval-scale] m60 T=16 末步 rc=0 2026-10-26T00:05:18+08:00
+[eval-scale] m60 逐步 rc=0 2026-10-26T00:05:48+08:00
+[eval-scale] m60 A 相 rc=0 2026-10-26T00:05:59+08:00
+[eval-scale] m120 T=16 末步 rc=0 2026-10-26T00:06:42+08:00
+[eval-scale] m120 逐步 rc=0 2026-10-26T00:07:26+08:00
+[eval-scale] m120 A 相 rc=0 2026-10-26T00:07:38+08:00
+[eval-scale] m240 T=16 末步 rc=0 2026-10-26T00:08:56+08:00
+[eval-scale] m240 逐步 rc=0 2026-10-26T00:10:14+08:00
+[eval-scale] m240 A 相 rc=0 2026-10-26T00:10:33+08:00
+[eval-scale] m360 T=16 末步 rc=0 2026-10-26T00:12:12+08:00
+[eval-scale] m360 逐步 rc=0 2026-10-26T00:13:53+08:00
+[eval-scale] m360 A 相 rc=0 2026-10-26T00:14:16+08:00
+[eval-scale] SCALE_EVAL_DONE 2026-10-26T00:14:16+08:00
+total 104
+drwxr-xr-x  2 root root 4096 Oct 26 00:14 .
+drwxr-xr-x 11 root root 4096 Oct 26 00:14 ..
+-rw-r--r--  1 root root 1566 Oct 26 00:07 linattn_m120_t1.json
+-rw-r--r--  1 root root  230 Oct 26 00:07 linattn_m120_t1.log
+-rw-r--r--  1 root root 1603 Oct 26 00:06 linattn_m120_t16.json
+-rw-r--r--  1 root root  231 Oct 26 00:06 linattn_m120_t16.log
+-rw-r--r--  1 root root 1570 Oct 26 00:10 linattn_m240_t1.json
+-rw-r--r--  1 root root  230 Oct 26 00:10 linattn_m240_t1.log
+-rw-r--r--  1 root root 1607 Oct 26 00:08 linattn_m240_t16.json
+-rw-r--r--  1 root root  231 Oct 26 00:08 linattn_m240_t16.log
+-rw-r--r--  1 root root 1570 Oct 26 00:14 linattn_m360_t1.json
+-rw-r--r--  1 root root  230 Oct 26 00:14 linattn_m360_t1.log
+-rw-r--r--  1 root root 1607 Oct 26 00:12 linattn_m360_t16.json
+-rw-r--r--  1 root root  231 Oct 26 00:12 linattn_m360_t16.log
+-rw-r--r--  1 root root 1561 Oct 26 00:05 linattn_m60_t1.json
+-rw-r--r--  1 root root  228 Oct 26 00:05 linattn_m60_t1.log
+-rw-r--r--  1 root root 1596 Oct 26 00:05 linattn_m60_t16.json
+-rw-r--r--  1 root root  229 Oct 26 00:05 linattn_m60_t16.log
+-rw-r--r--  1 root root 2921 Oct 26 00:07 stepwise_m120_t16.json
+-rw-r--r--  1 root root 2193 Oct 26 00:07 stepwise_m120_t16.log
+-rw-r--r--  1 root root 2921 Oct 26 00:10 stepwise_m240_t16.json
+-rw-r--r--  1 root root 2319 Oct 26 00:10 stepwise_m240_t16.log
+-rw-r--r--  1 root root 2914 Oct 26 00:13 stepwise_m360_t16.json
+-rw-r--r--  1 root root 2316 Oct 26 00:13 stepwise_m360_t16.log
+-rw-r--r--  1 root root 2919 Oct 26 00:05 stepwise_m60_t16.json
+-rw-r--r--  1 root root 2195 Oct 26 00:05 stepwise_m60_t16.log

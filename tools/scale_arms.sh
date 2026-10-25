@@ -32,6 +32,9 @@ scale_arm_cfg() {
   SCALE_M=$1; ENC_DIM=$2; ENC_HEADS=$3; DEC_DIM=$4; DEC_HEADS=$5
   ENC_PARAM_M=$6; DEC_PARAM_M=$7
   SCALE_ACCUM_A=$8; SCALE_ACCUM_B=$9
+  # 全局强改（例如 T=24 条件臂显存更高, 需 FORCE_ACCUM_B=4）
+  if [ -n "${FORCE_ACCUM_A:-}" ]; then SCALE_ACCUM_A=$FORCE_ACCUM_A; fi
+  if [ -n "${FORCE_ACCUM_B:-}" ]; then SCALE_ACCUM_B=$FORCE_ACCUM_B; fi
   # 目录/日志标签（与历史 srdiff_* 一致风格）
   SCALE_TAG="m${SCALE_M}"
 }
@@ -44,6 +47,3 @@ SCALE_LR1=${SCALE_LR1:-2e-4}
 SCALE_LR2=${SCALE_LR2:-2e-4}
 SCALE_EP1=${SCALE_EP1:-45}
 SCALE_EP2=${SCALE_EP2:-6}
-# accum 默认取上表（scale_arm_cfg 覆盖）；需要全局强改时设环境变量 FORCE_ACCUM_A/B
-if [ -n "${FORCE_ACCUM_A:-}" ]; then SCALE_ACCUM_A=$FORCE_ACCUM_A; fi
-if [ -n "${FORCE_ACCUM_B:-}" ]; then SCALE_ACCUM_B=$FORCE_ACCUM_B; fi

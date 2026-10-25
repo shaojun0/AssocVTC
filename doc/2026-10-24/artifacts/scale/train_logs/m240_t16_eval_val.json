@@ -1,0 +1,13 @@
+{
+ "n_images": 2560,
+ "l1_norm": 0.12633590074256063,
+ "psnr": 27.807436633110047,
+ "ssim": 0.8144970551133156,
+ "psnr_mean_image_baseline": 12.29530863761902,
+ "psnr_patch_dc_baseline": 18.67907884120941,
+ "pred_clamped_to_01": true,
+ "psnr_gain_over_patch_dc": 9.128357791900637,
+ "step": 11406,
+ "epoch": 6,
+ "split": "val"
+}
