@@ -1,0 +1,95 @@
+{
+ "mode": "per_patch_pca",
+ "data_dir": "/root/autodl-tmp/datasets/imagenet100",
+ "n_images": 5000,
+ "img_size": 224,
+ "patch": 16,
+ "n_patches": 196,
+ "seed": 0,
+ "basis": {
+  "fit_on": "ImageNet-100 train patches (共享, 非逐图 oracle)",
+  "basis_images": 400,
+  "dim": 768,
+  "max_rank": 256,
+  "method": "covariance eigh (float64 累加, 前 q 特征向量)",
+  "shared_basis_numbers": 196608,
+  "note": "基的存储量算模型参数, 不计入每图预算（与 baseline_svd_stepwise 一致）"
+ },
+ "budget": {
+  "model": "K×d = 32×1248 = 39936 个数/图（240M 档 z_s: 32×1248）",
+  "pca": "196×r 个数/图（每 patch 前 r 个主成分系数）",
+  "model_numbers_per_image": 39936,
+  "matched_rank": 204
+ },
+ "gt_dir": "/root/autodl-tmp/rfid_k64/gt",
+ "gt_ref_used": "/root/autodl-tmp/rfid_k64/gt_stats.npz",
+ "psnr_agg": "per-image PSNR then mean (与 eval_linattn 同口径)",
+ "l1_255": "0–255 空间、不 clamp 的平均绝对误差（与 eval_rfid 同口径）",
+ "rfid_lib": "pytorch-fid 0.3.0, InceptionV3 pool3, dims=2048, resize 299",
+ "ranks": {
+  "25": {
+   "rank": 25,
+   "numbers_per_image": 4900,
+   "l1_255": 10.061590365600585,
+   "psnr": 25.10028388671875,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank25/recon",
+   "rfid": 45.50135526184471
+  },
+  "37": {
+   "rank": 37,
+   "numbers_per_image": 7252,
+   "l1_255": 8.892363960266113,
+   "psnr": 26.28420421142578,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank37/recon",
+   "rfid": 33.26603901706454
+  },
+  "51": {
+   "rank": 51,
+   "numbers_per_image": 9996,
+   "l1_255": 7.781417501831054,
+   "psnr": 27.50492388305664,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank51/recon",
+   "rfid": 23.314975444344896
+  },
+  "73": {
+   "rank": 73,
+   "numbers_per_image": 14308,
+   "l1_255": 6.622375587463379,
+   "psnr": 29.058161267089844,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank73/recon",
+   "rfid": 14.492178552452856
+  },
+  "102": {
+   "rank": 102,
+   "numbers_per_image": 19992,
+   "l1_255": 5.561386465454102,
+   "psnr": 30.736928060913087,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank102/recon",
+   "rfid": 9.016946079492357
+  },
+  "146": {
+   "rank": 146,
+   "numbers_per_image": 28616,
+   "l1_255": 4.389541986846924,
+   "psnr": 32.9837137084961,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank146/recon",
+   "rfid": 4.749574282951585
+  },
+  "153": {
+   "rank": 153,
+   "numbers_per_image": 29988,
+   "l1_255": 4.237818294525146,
+   "psnr": 33.30538932800293,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank153/recon",
+   "rfid": 4.4775583979577505
+  },
+  "204": {
+   "rank": 204,
+   "numbers_per_image": 39984,
+   "l1_255": 3.2632383033752443,
+   "psnr": 35.749753173828125,
+   "recon_dir": "/root/autodl-tmp/rfid_pca/rank204/recon",
+   "rfid": 2.1202112288680723
+  }
+ }
+}

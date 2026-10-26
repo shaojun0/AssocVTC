@@ -1,0 +1,37 @@
+{
+ "ckpt": "/root/autodl-tmp/srdiff_scale/stdattn_m240_t1/ckpt_best.pt",
+ "ckpt_step": 42750,
+ "ckpt_epoch": 45,
+ "K": 32,
+ "N": 196,
+ "img_size": 224,
+ "patch": 16,
+ "dec_step_plan": "square",
+ "dec_recurrent": false,
+ "T": 1,
+ "steps_cfg": [],
+ "cum_z_s": [
+  32
+ ],
+ "evaluated_steps": [
+  1
+ ],
+ "arm_dir": "/root/autodl-tmp/rfid_m240_a/m240_t1",
+ "gt_dir": "/root/autodl-tmp/rfid_k64/gt",
+ "gt_ref_used": "/root/autodl-tmp/rfid_k64/gt_stats.npz",
+ "data_dir": "/root/autodl-tmp/datasets/imagenet100",
+ "val_per_class": 50,
+ "n_images": 5000,
+ "psnr_agg": "per-image PSNR then mean (与 eval_linattn 同口径)",
+ "rfid_lib": "pytorch-fid 0.3.0, InceptionV3 pool3, dims=2048, resize 299",
+ "per_step": {
+  "1": {
+   "step": 1,
+   "cum_z_s": 32,
+   "l1_norm": 0.08008685728311539,
+   "psnr": 32.34495047607422,
+   "l1_255": 4.615682594299316,
+   "rfid": 6.127225424250696
+  }
+ }
+}
