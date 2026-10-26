@@ -229,6 +229,10 @@ def parse_args():
                     help="每步新增的生长 token 数（解码器读集合 = [z_s; L_1..L_it]）")
     ap.add_argument("--refiner_steps", type=int, default=0,
                     help="生长步数; 0 = 跟随解码器步数 T")
+    ap.add_argument("--zs_dim", type=int, default=0,
+                    help="编码器末端 FC 瓶颈维数（2026-10-26; 0=关）。zs_dim=448 ⇒ "
+                         "每个 z_s token 从 enc_dim 压到 448 维、每步 2×448=896 个数、"
+                         "每图 32×448=14,336 个值（= 旧 63M 宽度）")
     ap.add_argument("--init_from", default="",
                     help="warm start ckpt（循环版可从单步版 ckpt 热启动, 只缺零初始化 mem_pos）")
     # 解码器
@@ -303,25 +307,91 @@ def build_cfg(args) -> LinAttnConfig:
         refiner_layers=int(args.refiner_layers), refiner_dim=int(args.refiner_dim),
         refiner_heads=int(args.refiner_heads),
         refiner_mlp_ratio=float(args.refiner_mlp_ratio),
-        refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps))
+        refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps),
+        zs_dim=int(getattr(args, "zs_dim", 0)))
+
+
+def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
+    """`--zs_dim>0` 的 warm start 初始化（2026-10-26）。
+
+    目标: 让"编码器末端 FC（enc_dim→zs_dim）+ 解码器 mem_proj（zs_dim→dec_dim）"
+    这一对在初始化时**尽量逼近旧的 mem_proj（enc_dim→dec_dim）**，即最小化
+    「多出来的瓶颈」带来的初始退化，然后全量微调。
+
+    做法（对旧 `decoder.mem_proj.weight` W (dec_dim, enc_dim) 做 SVD）:
+        W ≈ U_d · diag(S_d) · Vh_d          # 最优秩 zs_dim 近似（Eckart–Young）
+        zs_proj.weight = zcls_proj.weight = Vh_d        # (zs_dim, enc_dim) 下投影
+        decoder.mem_proj.weight = U_d · diag(S_d)       # (dec_dim, zs_dim) 上投影
+    ⇒ 初始 `mem_proj(FC(z))` = W 的最优秩 zs_dim 近似（与旧 memory 同量级/同方向）。
+
+    退化路径: 旧 ckpt 没有 `decoder.mem_proj.weight`（enc_dim==dec_dim 时 mem_proj 是
+    Identity）⇒ FC 用截断恒等（取前 zs_dim 维）。
+    """
+    if getattr(model, "zs_proj", None) is None:
+        return
+    d = int(model.zs_dim)
+    key = "decoder.mem_proj.weight"
+    with torch.no_grad():
+        if key in sd:
+            W = sd[key].float()                       # (dec_dim, enc_dim)
+            U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+            Vh_d = Vh[:d].contiguous()                # (d, enc_dim)
+            U_d = (U[:, :d] * S[:d]).contiguous()     # (dec_dim, d)
+            model.zs_proj.weight.copy_(Vh_d)
+            model.zcls_proj.weight.copy_(Vh_d)
+            model.zs_proj.bias.zero_()
+            model.zcls_proj.bias.zero_()
+            model.decoder.mem_proj.weight.copy_(U_d)
+            # 初始近似误差（相对 Frobenius）: 反映瓶颈带来的初始退化
+            approx = U_d @ Vh_d
+            rel = float((W - approx).norm() / W.norm())
+            print(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=SVD 前 {d} 个右奇异向量, "
+                  f"mem_proj {tuple(W.shape)} → {tuple(U_d.shape)} "
+                  f"（秩-{d} 近似相对误差 {rel:.3f}）", flush=True)
+            return
+        for m in (model.zs_proj, model.zcls_proj):
+            m.weight.zero_()
+            m.bias.zero_()
+            for i in range(d):
+                m.weight[i, i] = 1.0
+    print(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=截断恒等（无 mem_proj 权重）",
+          flush=True)
 
 
 def load_init_from(model: nn.Module, path: str) -> dict:
-    """warm start: 允许缺 `decoder.mem_pos`（单步 → 循环）与 `refiner.*`（E-B3 新增块）。
+    """warm start: 允许缺 `decoder.mem_pos`（单步 → 循环）/ `refiner.*`（E-B3 新增块）
+    / `zs_proj.*`+`zcls_proj.*`（2026-10-26 编码器末端 FC 瓶颈）; 也允许
+    `decoder.mem_proj.*` 的形状变化（瓶颈臂: (dec_dim,enc_dim) → (dec_dim,zs_dim)）。
 
     其余 missing 一律报错（形状不符/配置不匹配必须立刻失败）; 有多余 key 也报错。
-    返回 `{"missing": [...], "unexpected": [...]}` 便于调用方记录。
+    返回 `{"missing": [...], "unexpected": [...], "shape_mismatch": [...]}`。
     """
     ck0 = torch.load(path, map_location="cpu", weights_only=False)
-    missing, unexpected = model.load_state_dict(ck0["model"], strict=False)
+    raw = dict(ck0["model"])
+    want = model.state_dict()
+    mism = {k: v for k, v in raw.items()
+            if k in want and tuple(v.shape) != tuple(want[k].shape)}
+    for k in mism:                       # 形状不符的先摘出来, 稍后按瓶颈规则重初始化
+        raw.pop(k)
+    if mism:
+        print(f"[init_from] 形状变化（按瓶颈规则重初始化）: "
+              f"{ {k: (tuple(v.shape), tuple(want[k].shape)) for k, v in mism.items()} }",
+              flush=True)
+    missing, unexpected = model.load_state_dict(raw, strict=False)
+    if getattr(model, "zs_proj", None) is not None:
+        _init_bottleneck_warm_start(model, ck0["model"])
     print(f"[init_from] {path} → missing={list(missing)} "
           f"unexpected={list(unexpected)}", flush=True)
     assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
-    allowed = {"decoder.mem_pos"} | {k for k in missing if k.startswith("refiner.")}
+    allowed = ({"decoder.mem_pos"}
+               | set(mism)                      # 形状变化: 已按瓶颈规则重初始化
+               | {k for k in missing if k.startswith("refiner.")}
+               | {k for k in missing if k.startswith(("zs_proj.", "zcls_proj."))})
     assert set(missing) <= allowed, \
-        f"除 mem_pos/refiner.* 外还有未加载参数（形状不符?）: " \
+        f"除 mem_pos/refiner.*/FC 瓶颈外还有未加载参数（形状不符?）: " \
         f"{[k for k in missing if k not in allowed][:8]}"
-    return {"missing": list(missing), "unexpected": list(unexpected)}
+    return {"missing": list(missing), "unexpected": list(unexpected),
+            "shape_mismatch": list(mism)}
 
 
 def main():
@@ -361,7 +431,9 @@ def main():
           flush=True)
     print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
           f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
-          f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__}", flush=True)
+          f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__} "
+          f"zs_dim={getattr(cfg, 'zs_dim', 0)} "
+          f"({pc['values_per_image']} 个值/图)", flush=True)
     print(f"[alit] loss_weights={model.loss_weights or '(平权)'} "
           f"dh_mode={model.dh_mode} dh_quantile={model.dh_quantile} "
           f"sample_grad_iters={model.sample_grad_iters} "

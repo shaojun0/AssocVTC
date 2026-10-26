@@ -1,0 +1,138 @@
+\section{\heiti 方法}
+\label{sec:method}
+
+本节按数据流依次说明循环读出压缩的各个组成部分。
+
+\subsection{\heiti 问题定义与总体结构}
+\label{sec:problem}
+
+给定图像 $x\in\R^{3\times H\times W}$，按 $p\times p$ 切分为 $N=(H/p)(W/p)$ 个图像块（patch）。记编码器为 $E$、解码器为 $R$。本文的目标是训练一对 $(E,R)$，使 $R$ 仅凭 $E$ 输出的 $K$ 个 token 重建整幅图像：
+\begin{equation}
+\begin{aligned}
+\hat{x}&=R\big(z_s\big),\\
+z_s&=E_s(x)\in\R^{K\times D},\qquad K<N,
+\end{aligned}
+\label{eq:goal}
+\end{equation}
+其中 $D$ 为编码器隐层维度，$z_s$ 称为\textbf{压缩表示}，$K$ 称为\textbf{token 预算}。重建质量用像素 L1 度量，压缩强度用压缩比 $K/N$ 度量；在给定 $K$ 下重建误差越低，说明 $z_s$ 保留的图像信息越多。
+
+图~\ref{fig:arch} 给出总体结构。编码器只前向一次，把图像压缩为 $K$ 个特殊 token；解码器把这 $K$ 个 token 逐步读出并还原为像素。两部分通过同一个 $z_s$ 相连。本文的全部训练信号来自像素重建，不引入分类、对比或语言监督。
+
+在结构来源上，本文受自适应长度分词（ALIT）的循环分配\cite{duggal2025alit}启发：两者都让同一组权重被反复施加，并让每一步可用的表示容量递增，因此同一个模型沿轨迹展开就得到一族长度不同的码。本文的取舍是将这一过程整体移至解码侧——编码器只前向一次，循环只发生在读出块 $\Phi$ 上——并以确定性的分块读窗口替代“每轮新增可学习 token”。这一取舍的动机与后果（尤其是“预算可自适应调整”与“容量可按图分配”之间的取舍）在第~\ref{sec:alit}~节与 ALIT 逐项对照。
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.98\textwidth}{!}{%
+\input{tikz/fig1_arch_hybrid.tikz}%
+}
+\caption{模型架构图}
+\label{fig:arch}
+\end{figure*}
+
+\subsection{\heiti 编码器：把特殊 token 放进输入序列}
+\label{sec:encoder}
+
+记分类 token 为 $c$，$K$ 个特殊 token 为 $s_1,\dots,s_K$，$N$ 个 patch token 为 $e_1,\dots,e_N$。编码器的输入是把三者直接拼接所得的序列：
+\begin{equation}
+\begin{aligned}
+X^{(0)}&=\big[\,c;\;s_1\cdots s_K;\;e_1\cdots e_N\,\big],\\
+\big|X^{(0)}\big|&=1+K+N,
+\end{aligned}
+\label{eq:input}
+\end{equation}
+其中 $e_n=\mathrm{PatchEmbed}(x)_n+\mathrm{PE}_n$ 由图像块嵌入与位置编码相加得到。编码器为 $L$ 层双向 Transformer，层内自注意力不加任何掩码：
+\begin{equation}
+X^{(\ell)}=\mathrm{Layer}_{\ell}\big(X^{(\ell-1)}\big),\qquad \ell=1,\dots,L.
+\label{eq:enc}
+\end{equation}
+最后对末层输出做层归一化，并截取前 $1+K$ 个位置，得到解码器可用的压缩表示：
+\begin{equation}
+[\,z_{\mathrm{cls}};\;z_s\,]=\LN\big(X^{(L)}\big)_{0:1+K},
+\label{eq:zs}
+\end{equation}
+其中 $z_{\mathrm{cls}}\in\R^{1\times D}$、$z_s\in\R^{K\times D}$。\textbf{patch token 不进入解码器}：它们只作为编码器内部的上下文，为特殊 token 提供可路由的内容；解码器只能看到式~\eqref{eq:zs} 给出的 $z_s$，瓶颈由此形成。特殊 token 与 patch token 在同一序列中做\textbf{全双向}注意力，每个特殊 token 既可以读取任意 patch，也可以与其他特殊 token 交换信息；因此不存在预先指定的 token 槽位，整幅图像在各特殊 token 上如何分摊，由 $L$ 层交互共同决定。
+
+\subsection{\heiti 特殊 token 的参数化}
+\label{sec:special}
+
+$K$ 个特殊 token 共享同一个可学习内容向量，仅由各自的位置编码区分：
+\begin{equation}
+s_k=\theta_{\mathrm{tok}}+\pi_k,\qquad k=1,\dots,K,
+\label{eq:special}
+\end{equation}
+其中 $\theta_{\mathrm{tok}}\in\R^{D}$ 为共享向量，$\pi_k$ 为第 $k$ 个位置的可学习位置编码。这一参数化使特殊 token 之间\textbf{不存在先验分工}：哪一个 token 承载图像的哪一部分信息，由式~\eqref{eq:enc} 的双向注意力在训练中决定。本文不另外引入路由机制，而是让解码器必须依赖编码器内部形成的路由，而不能依赖 token 与固定区域的对应关系。
+
+\subsection{\heiti 解码器的记忆与查询基}
+\label{sec:memory}
+
+解码器把编码器输出的 $K+1$ 个 token 作为记忆序列，并为其单独加一组位置编码 $\Pi$；同时持有一张与 patch 位置一一对应的可学习查询模板：
+\begin{equation}
+A=[\,z_{\mathrm{cls}};\;z_s\,]+\Pi,\qquad
+Q_0=q_{\mathrm{base}}+q_{\mathrm{pos}},
+\label{eq:memory}
+\end{equation}
+其中 $A\in\R^{(K+1)\times D'}$、$Q_0\in\R^{N\times D'}$，$D'$ 为解码器维度，$q_{\mathrm{base}},q_{\mathrm{pos}}\in\R^{N\times D'}$ 为可学习参数，$Q_0$ 的第 $n$ 行对应第 $n$ 个 patch 位置，行数恒为 $N$、与 $K$ 无关。$Q_0$ 是参数而非由输入导出的量，图像信息只能通过读取记忆 $A$ 进入解码过程。
+
+\subsection{\heiti 分块读窗口}
+\label{sec:window}
+
+第 $i$ 步只读取记忆序列 $A$ 的一个连续片段，称为\textbf{读窗口}。记读出步数为 $T$，第 $i$ 步的窗口为 $[l_i,h_i]$，窗口序列取自位置 $0,\dots,K$ 上的一个划分：
+\begin{equation}
+\begin{aligned}
+l_1&=0,\qquad l_{i+1}=h_i+1,\qquad h_T=K,\\
+M_i&=A[\,l_i:h_i\,],\qquad i=1,\dots,T.
+\end{aligned}
+\label{eq:window}
+\end{equation}
+各窗口首尾相接、互不重叠，合起来覆盖全部 $K+1$ 个位置。$T$ 与各窗口的宽度构成一个\textbf{读窗口计划}，它决定容量随步数增长的节奏。
+
+本文主实验采用\textbf{均匀窗口}（fixed 计划）：读出步数固定为 $T=16$，每步读 2 个特殊 token。第 1 步从位置 0 读起，因而同时看到 $z_{\mathrm{cls}}$ 与前 2 个特殊 token；第 $i\ge2$ 步只读本步对应的分块，不再包含 $z_{\mathrm{cls}}$。$K=32$ 时 16 步恰好读完，第 $t$ 步累计读到 $2t$ 个特殊 token，对应的预算为 $2,4,\dots,32$。
+
+这一划分替代了“每轮新增可学习 token”：容量随步数增长而不引入新参数，各步的读入量由窗口计划给出，不随图像内容调整（第~\ref{sec:alit}~节）。均匀窗口使相邻档位之间的信息增量完全相同，便于按步截断；递增窗口则让前几步用更少的 token 先给出粗解。读出步数固定后，token 预算由 $K$ 决定，而不是由步数决定。本文受控实验取 $K=32$、$T=16$。
+
+\subsection{\heiti 循环读出更新}
+\label{sec:recurrent}
+
+记解码块为 $\Phi$，它是一个 $L_{\mathrm{dec}}$ 层的 Transformer 解码器堆叠，每层依次执行查询自注意力、对 $M_i$ 的交叉注意力与前馈网络；$\Phi$ 的全部参数在所有读出步之间共享。第 $i$ 步的查询 $Q_i$、输出 $Y_i$ 由下式给出：
+\begin{equation}
+\begin{aligned}
+Q_1&=Q_0,\qquad Q_i=q_{\mathrm{base}}+Y_{i-1}\quad(i\ge 2),\\
+Y_i&=\Phi\big(Q_i,\;M_i\big),\qquad i=1,\dots,T,
+\end{aligned}
+\label{eq:recur}
+\end{equation}
+其中 $Q_0$ 与 $q_{\mathrm{base}}$ 由式~\eqref{eq:memory} 给出，$M_i$ 由式~\eqref{eq:window} 给出。式~\eqref{eq:recur} 中，每一步的输入查询由固定查询基与上一步的输出相加得到。该相加不经过投影或归一化，因此循环不引入额外参数，读出步数只增加计算量、不增加模型容量。
+
+式~\eqref{eq:recur} 存在一个结构上的退化解：若解码块 $\Phi$ 趋近恒等映射，则 $Y_i\approx i\,q_{\mathrm{base}}+q_{\mathrm{pos}}$，循环只是在重复累加查询基，不携带新的图像信息。该退化解无需训练即可满足“输出幅度逐级变化”，因此逐步精炼只能由像素监督驱动，不能由结构本身保证。
+
+\subsection{\heiti 逐步像素预测与深监督损失}
+\label{sec:loss}
+
+每一步的表示输出经同一个两层 MLP 还原为该步对整幅图像的预测：
+\begin{equation}
+\hat{x}_i=\PixelHead\big(\LN(Y_i)\big)\in\R^{N\times 3p^2},
+\label{eq:pred}
+\end{equation}
+其中 $i=1,\dots,T$，$3p^2$ 为一个 patch 的像素维数（$p=16$ 时为 768），$\PixelHead$ 在所有步之间共享。\textbf{每一步都预测整幅图像}，而不是各步分工预测局部，因此“第 $i$ 步的像素误差”是一个可直接观测的量。训练损失为各步像素 L1 的等权平均：
+\begin{equation}
+\Lrec=\frac{1}{T}\sum_{i=1}^{T}\mathrm{MAE}\big(\hat{x}_i,\,x\big),
+\label{eq:loss}
+\end{equation}
+其中 $\mathrm{MAE}(a,b)$ 为逐元素平均绝对误差（除以 $N\cdot 3p^2$）。式~\eqref{eq:loss} 对每一步等权、对每个像素等权，不使用步权重、区域掩码或额外正则项；本文的全部实验都使用这一形式。
+
+\subsection{\heiti 推理时的自适应读出}
+\label{sec:truncate}
+
+由式~\eqref{eq:recur} 可知，$Y_i$ 只依赖 $Y_1,\dots,Y_{i-1}$，因此前 $t$ 步的输出与完整 $T$ 步前向中第 $t$ 步的输出逐位相同。推理时把循环停在任意第 $t$ 步，就得到一个使用 $C_t$ 个 token 的压缩码，其中
+\begin{equation}
+C_t=h_t,\qquad t=1,\dots,T,
+\label{eq:budget}
+\end{equation}
+$h_t$ 由式~\eqref{eq:window} 给出：$z_{\mathrm{cls}}$ 占第 0 位、不计入 token 预算，故第 $t$ 步读到的特殊 token 数为 $h_t$；本文主实验的 16 个预算依次为 $2,4,\dots,32$（每步新增 2 个）。于是同一个训练好的模型无需重训即可在多个 token 预算下工作。提前停止只改变推理时执行的步数，不改变前向计算图；每步都要完整执行一次 $\Phi$，因此计算量随预算线性增长而非次线性增长，这也是读出步数可变的代价（第~\ref{sec:discussion}~节）。
+
+\subsection{\heiti 训练流程}
+\label{sec:training}
+
+训练分两个阶段。第一阶段只训练单步解码：令 $T=1$、读窗口取 $[0,K]$，即解码器一次性读完全部特殊 token，得到一个标准的输出查询解码器。第二阶段从第一阶段的权重热启动，切换为 $T$ 步循环，并按式~\eqref{eq:loss} 施加逐步监督。热启动的理由是：多步循环中前几步只读到很少的特殊 token（2, 4, 6, \dots），此时条件最优解接近图像均值，从零训练多步容易停留在该平凡解；先用单步全读把 $(E,R)$ 训练到非平凡初值，再切换到多步，可显著减少脱离该平凡解所需的步数（第~\ref{sec:impl}~节）。
+
+循环状态的梯度\textbf{沿时间反向传播}（back-propagation through time, BPTT）：式~\eqref{eq:recur} 中的相加不施加停止梯度（stop-gradient），因此第 $i$ 步的误差可以回流到前面各步的输出与查询基。本文所有实验都使用全步反传。

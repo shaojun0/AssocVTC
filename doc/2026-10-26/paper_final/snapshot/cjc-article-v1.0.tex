@@ -1,0 +1,174 @@
+% !TEX program = xelatex
+% !BIB program = bibtex
+%==================================================================%
+% 循环读出压缩：一种自适应的视觉 token 压缩方法
+% 《计算机学报》(Chinese Journal of Computers) 投稿模板
+% 编译方式：xelatex -> bibtex -> xelatex -> xelatex
+% 依赖：CjC.cls、ctex（TeX Live 自带）、captionhack.sty、
+%       gbt7714（TeX Live 自带）、flushend.sty（桩）、picins.sty、ref.bib
+%==================================================================%
+\documentclass[10.5pt,compsoc,UTF8]{CjC}
+\usepackage{ctex}
+\usepackage{graphicx}
+\usepackage{footmisc}
+\usepackage{subfigure}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{multicol}
+\usepackage{amsmath,amsthm}
+\usepackage{amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{color}
+\usepackage{ccaption}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{xcolor,stfloats}
+\usepackage{comment}
+\usepackage{cuted}
+\usepackage{captionhack}
+\usepackage{gbt7714}
+\usepackage{arydshln}
+\usepackage{colortbl}
+% ---------- 绘图与统计图 ----------
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric,calc,positioning,arrows.meta,fit,backgrounds,decorations.pathreplacing}
+\usepackage{mathtools}
+\usepackage{enumitem}
+\usepackage{adjustbox}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+% TikZiT 导出的流程图会设置 every picture 的 1pt 缩放；统计图用 \pgs 局部清除
+\newcommand{\pgs}[1]{\begingroup\tikzset{every picture/.style={}}#1\endgroup}
+% 统计图统一配色（与正文 4 种配置的配色一致）
+\pgfplotsset{colormap={ours}{rgb255=(31,119,180) rgb255=(255,127,14) rgb255=(44,160,44) rgb255=(214,39,40)}}
+\pgfplotsset{colormap={heatylord}{rgb255=(255,255,204) rgb255=(255,237,160) rgb255=(254,217,118) rgb255=(254,178,76) rgb255=(253,141,60) rgb255=(252,78,42) rgb255=(227,26,28) rgb255=(189,0,38) rgb255=(128,0,38)}}
+% ---------- 记号 ----------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Lrec}{\mathcal{L}_{\mathrm{rec}}}
+\newcommand{\Lstep}[1]{\mathcal{L}_{#1}}
+\newcommand{\Qbase}{q_{\mathrm{base}}}
+\newcommand{\PixelHead}{\mathrm{PixelHead}}
+\newcommand{\LN}{\mathrm{LN}}
+
+%=======设置奇偶页页眉=======%
+\headevenname{\mbox{\quad} \hfill  \mbox{\zihao{5-}{计\quad \quad 算\quad \quad 机\quad \quad 学\quad \quad 报} \hspace {50mm} \mbox{2026 年}}}%
+\headoddname{? 期 \hfill
+汪鹏：循环读出压缩}
+%=======设置奇偶页页眉=======%
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\setcounter{footnote}{0}
+\renewcommand\footnotelayout{\zihao{5-}}
+\newtheoremstyle{mystyle}{0pt}{0pt}{\normalfont}{1em}{\bf}{}{1em}{}
+\theoremstyle{mystyle}
+\renewcommand\figurename{figure~}
+% 图表编号使用中文“图N”/“表N”（覆盖 captionhack 的英文 Fig./Table）
+\makeatletter
+\renewcommand{\fnum@figure}{{\zihao{5-}\textbf{图\thefigure}}}
+\renewcommand{\fnum@table}{{\zihao{5-}\textbf{表\thetable}}}
+\makeatother
+\renewcommand{\thesubfigure}{(\alph{subfigure})}
+\newcommand{\upcite}[1]{\textsuperscript{\cite{#1}}}
+\renewcommand{\labelenumi}{(\arabic{enumi})}
+\newcommand{\tabincell}[2]{\begin{tabular}{@{}#1@{}}#2\end{tabular}}
+\renewcommand{\bibsection}{}
+\makeatletter
+\renewcommand{\@biblabel}[1]{[#1]\hfill}
+\makeatother
+\setlength\parindent{2em}
+\setlength{\emergencystretch}{2em}
+
+\begin{document}
+
+%=======设置首页页眉=======%
+\thispagestyle{empty}%
+\begin{table*}[!t]
+\vspace {-13mm}
+\onecolumn
+\noindent\begin{tabular}{p{168mm}}
+\zihao{5-}
+第??卷\quad 第?期 \hfill 计\quad 算\quad 机\quad 学\quad 报\hfill Vol. ??  No. ?\\
+\zihao{5-}
+20??年?月 \hfill CHINESE JOURNAL OF COMPUTERS \hfill ???. 20??\\
+\hline\hline\end{tabular}\end{table*}
+%=======设置首页页眉=======%
+
+% ================= 中文标题、作者与摘要 =================
+{
+\centering
+\vspace {11mm}
+{\zihao{2} \heiti 循环读出压缩：一种自适应的视觉语义压缩方法\par}
+
+\vskip 5mm
+{\zihao{3}\fangsong xx\raisebox{0.35em}{\zihao{5-}1)}\par}
+\vskip 1.5mm
+{\zihao{6}$^{1)}$（xxx，xxx 518000）\par}
+}
+
+\vskip 5mm
+
+\zihao{5-}{
+\setlength{\baselineskip}{16pt}\selectfont{
+\noindent {\heiti 摘\quad 要\quad }
+多模态大模型以稠密的图像块 token 作为视觉接口，token 数随分辨率上升到数百乃至上千；在对上下文长度与实时性敏感的应用中，上下文很快被大量低信息量的 token 占满。把图像压缩为固定数量的 token 是常见做法，但压缩预算在训练完成后固定，高精度场景会因此丢失细节。基于此，本文基于looped transformer的思想提出循环读出压缩（recurrent read-out compression），具体为：编码器在输入序列中拼接 $K$ 个可学习特殊 token，训练时，解码器只能从这 $K$ 个 token 获取图像信息，并据此重建整幅图像。解码器以权重共享的 Transformer 块反复读出这些 token。在 ImageNet-100 上的受控实验表明：在 240M 档（编码器与解码器各约 240 M、合计 481.54 M）下，以 token 数计的压缩率由旧 63M 基准的 3.06 倍（196$\to$64）提高到 6.12 倍（196$\to$32），单步读出达到 32.35 dB，显著高于逐图像块直流基线（18.45 dB）；把同一模型展开到 16 步，PSNR 由 22.07 dB 升到 27.94 dB。与逐块 PCA 的对照按每图连续值个数分层：在 $\le3{,}584$ 个连续值的紧预算端，本文两种瓶颈码（每 token 448 维与 224 维）的 PSNR 均高于同值数 PCA（$+0.89\sim+1.41$ dB）；7{,}168 值处 448 维码仍高 0.34 dB（224 维码仅 L1 更低）；预算放宽到 14{,}336 值及以上时 PCA 反超（$+1.37$ dB；主模型在 39{,}936 值处为 27.94 dB 对 35.75 dB）。把每个特殊 token 由 1248 维压到 448 维（每图连续值降为 36\%）只损失 0.25 dB，在同一 14{,}336 值下比旧 63M 基准高 3.54 dB。在公开人评复杂度数据上，图像复杂度与重建误差正相关（$\rho$ 在 5 个容量档 × 3 个子集共 15 个组合上全部为正，范围 $+0.33\sim+0.54$），容量增加缩小的是复杂度惩罚的绝对幅度；容量阶梯在 240M 档达到峰值。总体而言，循环读出压缩以一组固定的 token 配合自适应的读出，在单一模型中提供由少到多的多档 token 预算。
+
+\vspace {5mm}
+
+\zihao{5-}{\noindent
+{\heiti 关键词 \quad }视觉 token 压缩；循环读出；权重共享；特殊 token；深监督；注意力机制
+}\par\noindent
+\zihao{5-}{\heiti 中图法分类号\quad } TP391\rm{\quad \quad \quad }
+{\heiti 文献标识码\quad } A
+
+\vskip 5mm
+
+\begin{center}
+\zihao{3}{ \heiti Recurrent Read-Out Compression for Adaptive Visual Token Compression}\\
+\vspace {5mm}
+\zihao{5}{ xxx$^{1)}$}\\
+\vspace {1mm}
+\zihao{6}{{$^{1)}$(xxx, x, x, x 518000, xx)}}
+\end{center}
+
+\zihao{5}{
+{\noindent\bf Abstract}\quad
+Multimodal large models interface with images through dense patch tokens, whose count grows with resolution to hundreds or even thousands; in applications sensitive to context length and latency, such as embodied agents, the context is quickly exhausted by many low-information tokens. Compressing an image into a fixed number of tokens is common practice, but the budget is frozen once training ends, so high-precision scenes lose detail. We propose recurrent read-out compression: the encoder appends $K$ learnable special tokens to its input sequence; during training, the decoder can obtain image information only from these $K$ tokens and must reconstruct the whole image from them, so the tokens must jointly contain all the information needed for reconstruction rather than each repeating the same global information. Whether the compression is effective depends on whether the information is preserved, not on the token count: layout, objects and boundaries remain recoverable after compression. The decoder repeatedly reads the tokens out with a weight-tied Transformer block: the first-step query is a learnable query base, the query at step $t$ is the query base plus the previous output, and step $t$ reads only its own read-out window; every step predicts the full image and receives pixel-level supervision. The token budget is thereby tied to the number of read-out steps: the same weights can be stopped at any step at inference, so the budget is no longer fixed at training time but can be chosen at inference according to the precision a scene requires. The design borrows the capacity-increasing allocation of adaptive-length tokenization, but the loop acts on the read-out side. Controlled experiments on ImageNet-100 show that at the 240M scale (about 240M parameters each for encoder and decoder, 481.54M in total) token compression is raised from $3.06\times$ (196$\to$64) in the earlier 63M baseline to $6.12\times$ (196$\to$32), and single-step read-out reaches 32.35 dB, far above the per-patch DC baseline (18.45 dB); expanding the same model to sixteen steps raises PSNR from 22.07 dB to 27.94 dB. Against a per-patch PCA baseline at matched numbers of continuous values the outcome is budget-dependent: at the tight end (up to 3,584 values per image) both of our bottleneck codes (448- and 224-dimensional tokens) are $+0.89$ to $+1.41$ dB above PCA at the same value count; at 7,168 values the 448-dimensional code is still 0.34 dB higher while the 224-dimensional one only wins on L1; from 14,336 values on PCA takes the lead ($+1.37$ dB; at 39,936 values the main model gives 27.94 dB against 35.75 dB), because PCA keeps all 196 spatial positions and only reduces the dimension at each of them, whereas we route the whole image into 32 tokens. Squeezing each token from 1248 to 448 dimensions (36\% of the continuous values) costs only 0.25 dB and remains 3.54 dB above the earlier 63M baseline at the same 14,336 values. On public human-rated complexity data, complexity correlates positively with reconstruction error (positive for all 15 capacity$\times$subset combinations, ranging from $+0.33$ to $+0.54$), and increasing capacity shrinks the absolute complexity penalty; the capacity ladder peaks at 240M. Overall, recurrent read-out compression pairs a fixed token set with adaptive read-out, offering a family of token budgets from few to many within a single model.
+\par}
+
+\vspace {5mm}
+
+\zihao{5}{
+{\noindent\bf Keywords}\quad visual token compression; recurrent read-out; weight tying; special tokens; deep supervision; attention mechanism
+\par}
+
+\zihao{5}
+\vskip 1mm
+\songti
+
+% 正文进入双栏模式
+\switchtwocolumn
+
+\input{sec1_intro}
+\input{sec2_related}
+\input{sec3_method}
+\input{sec4_exp}
+\input{sec5_disc}
+\input{sec6_concl}
+
+% ========== 参考文献 ==========
+\vspace {5mm}
+\centerline
+{\zihao{5}\textsf{参~考~文~献}}
+\zihao{5-} \addtolength{\itemsep}{-1em}
+\vspace {1.5mm}
+\bibliographystyle{gbt7714-numerical}
+\bibliography{ref}
+
+% ========== 作者简介 ==========
+\begin{biographynophoto}
+\noindent
+\textbf{xx}\ \ xxx
+\end{biographynophoto}
+
+\end{document}

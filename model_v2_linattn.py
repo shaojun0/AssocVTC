@@ -1193,6 +1193,16 @@ class LinAttnConfig:
     refiner_grow: int = 16         # 每步新增的生长 token 数
     refiner_steps: int = 0         # 0 = 跟随解码器步数 T
 
+    # ── 编码器末端 FC 瓶颈（2026-10-26; 默认 0 = 关 ⇒ 旧路径逐位不变）──
+    #   zs_dim>0 ⇒ 编码器最后一步加 `Linear(enc_dim → zs_dim)`，z_s（以及 z_cls）
+    #   各压成 zs_dim 维 ⇒ 每个 token 的"存储值个数" = zs_dim。
+    #   240M 档 enc_dim=1248、K=32、每步读 2 个 token:
+    #     zs_dim=448 ⇒ 每步 2×448 = 896 个数（= 旧 63M 宽度 2×448），每图 32×448 = 14,336 个值。
+    #   解码器 `mem_proj` 相应变为 Linear(zs_dim, dec_dim)。
+    #   warm start（train_linattn.py `--init_from`）: 新 FC 初始化为"取前 zs_dim 维"的
+    #   截断恒等，`mem_proj` 取旧权重前 zs_dim 列 ⇒ 初始行为 = 丢掉 z_s 的后 800 维。
+    zs_dim: int = 0
+
     @property
     def num_patches(self) -> int:
         return (self.img_size // self.patch) ** 2
@@ -1240,8 +1250,19 @@ class SRPhase1LinAttn(nn.Module):
                 "若确为「预算超过 N」的探针臂, 须显式 allow_k_gt_n=True")
 
         self.encoder = self._build_encoder(cfg)
+        # ── 编码器末端 FC 瓶颈（zs_dim=0 时逐位不变）──
+        self.zs_dim = int(cfg.zs_dim)
+        assert 0 <= self.zs_dim < int(cfg.enc_dim), \
+            f"zs_dim={self.zs_dim} 须满足 0 ≤ zs_dim < enc_dim={cfg.enc_dim}"
+        code_dim = self.zs_dim if self.zs_dim > 0 else int(cfg.enc_dim)
+        if self.zs_dim > 0:
+            self.zs_proj = nn.Linear(cfg.enc_dim, self.zs_dim)
+            self.zcls_proj = nn.Linear(cfg.enc_dim, self.zs_dim)
+        else:
+            self.zs_proj = None
+            self.zcls_proj = None
         _dec_kw = dict(
-            enc_dim=cfg.enc_dim, dim=cfg.dec_dim, depth=cfg.dec_depth,
+            enc_dim=code_dim, dim=cfg.dec_dim, depth=cfg.dec_depth,
             heads=cfg.dec_heads, mlp_ratio=cfg.dec_mlp_ratio, patch=cfg.patch,
             num_patches=self.num_patches, num_specials=cfg.num_specials,
             pixel_hidden=cfg.pixel_hidden, dropout=cfg.dropout)
@@ -1323,7 +1344,17 @@ class SRPhase1LinAttn(nn.Module):
 
     # ── encode / decode（训练与推理同一路径, 与主线同名同义）──
     def encode(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
-        return self.encoder(pixel_values)
+        z_cls, z_s = self.encoder(pixel_values)
+        return self.project_code(z_cls, z_s)
+
+    def project_code(self, z_cls: Tensor, z_s: Tensor) -> Tuple[Tensor, Tensor]:
+        """编码器末端 FC 瓶颈: (B,1,enc_dim)/(B,K,enc_dim) → (·,·,zs_dim)。
+
+        `zs_dim=0`（默认）⇒ 原样返回, 逐位不变。
+        """
+        if self.zs_proj is None:
+            return z_cls, z_s
+        return self.zcls_proj(z_cls), self.zs_proj(z_s)
 
     # ── E-B3 生长 token 序列（共享 GrowthBlock, 每步新增 refiner_grow 个）──
     def _grow_tokens(self, patch_feats: Tensor, n_steps: int) -> Tensor:
@@ -1446,6 +1477,7 @@ class SRPhase1LinAttn(nn.Module):
         if self.refiner is not None:
             # E-B3: 编码器额外回末层 patch 段给 GrowthBlock（默认关 ⇒ 走原两元组）
             z_cls, z_s, patch_feats = self.encoder(x, return_seq=True)
+            z_cls, z_s = self.project_code(z_cls, z_s)
             return self.decode(z_cls, z_s, x, patch_feats=patch_feats)
         z_cls, z_s = self.encode(x)
         return self.decode(z_cls, z_s, x)
@@ -1453,10 +1485,18 @@ class SRPhase1LinAttn(nn.Module):
     # ── 参数统计（编码器/解码器/生长块分开, 用于"同等体量"核对）──
     def count_params(self) -> dict:
         def n(m):
-            return sum(p.numel() for p in m.parameters())
-        enc, dec = n(self.encoder), n(self.decoder)
-        ref = n(self.refiner) if self.refiner is not None else 0
+            return 0 if m is None else sum(p.numel() for p in m.parameters())
+        # 编码器末端 FC 瓶颈算进"编码器"（它是编码器的一部分）
+        enc = n(self.encoder) + n(getattr(self, "zs_proj", None)) \
+            + n(getattr(self, "zcls_proj", None))
+        dec = n(self.decoder)
+        ref = n(self.refiner)
         return {"encoder": enc, "decoder": dec, "refiner": ref,
+                "enc_fc": n(getattr(self, "zs_proj", None))
+                          + n(getattr(self, "zcls_proj", None)),
+                "zs_dim": int(getattr(self, "zs_dim", 0)),
+                "values_per_image": int(self.num_specials) * int(
+                    getattr(self, "zs_dim", 0) or self.cfg.enc_dim),
                 "total": enc + dec + ref,
                 "enc_M": round(enc / 1e6, 3), "dec_M": round(dec / 1e6, 3),
                 "refiner_M": round(ref / 1e6, 3),
