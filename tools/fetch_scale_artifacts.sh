@@ -55,10 +55,12 @@ scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24"/m240_stage*.log \
 for T in 1 24; do
   scp -P "$PORT" -o StrictHostKeyChecking=no \
       "$HOST:$SRC24/stdattn_m240_t${T}/args.json" "$DST/args/m240_t${T}_args.json" || true
+  # 条件臂的 T=1 是 K=48 的 A 相，与阶梯臂 K=32 的 A 相不能同名 ⇒ 加 _K48 后缀
+  if [ "$T" = "1" ]; then suf="_K48"; else suf=""; fi
   scp -P "$PORT" -o StrictHostKeyChecking=no \
-      "$HOST:$SRC24/stdattn_m240_t${T}/train_log.jsonl" "$DST/train_logs/m240_t${T}.jsonl" || true
+      "$HOST:$SRC24/stdattn_m240_t${T}/train_log.jsonl" "$DST/train_logs/m240_t24arm_t${T}${suf}.jsonl" || true
   scp -P "$PORT" -o StrictHostKeyChecking=no \
-      "$HOST:$SRC24/stdattn_m240_t${T}/eval_val.json" "$DST/train_logs/m240_t${T}_eval_val.json" || true
+      "$HOST:$SRC24/stdattn_m240_t${T}/eval_val.json" "$DST/train_logs/m240_t24arm_t${T}${suf}_eval_val.json" || true
 done
 echo "[fetch] done → $DST"
 ls -la "$DST" "$DST/eval"
