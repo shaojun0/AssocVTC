@@ -139,9 +139,18 @@ PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 /root/miniconda3/bin/python -u /root/auto
   --out_summary /root/autodl-tmp/savoias_eval/ssim_<tag>.json
 ```
 
-SSIM 首版 OOM（把 `B*T` 一次性展平送入 SSIM 的 conv）→ 改为**逐 step 算**后通过。
-补充 pass 实测：每模型 20~90 s，5 个全部 `exit=0`；OOD 全量 SSIM 与
-`ssim_<tag>.json` 的 `SSIM_last` 一致（见报告主表）。
+SSIM 补充 pass 的两次修正（都只影响 `.json`，不影响 canonical 的 L1/PSNR）：
+
+1. **OOM**：首版把 `B*T` 一次性展平送入 SSIM 的 conv（B=32、T=16 ⇒ 512 张 224×224 同时算）→
+   31.5G 显存打满。改为**逐 step 算** SSIM（每次 B 张）后通过；
+2. **bf16 偏差**：第二版把 SSIM 放进了 `torch.autocast(bf16)` 块内，SSIM 的方差项
+   （`E[x²]−E[x]²`，C2 很小）在 bf16 下精度不足，全量 SSIM 系统性偏低 ~0.05
+   （base63：0.6007 ✅→ 0.6503）。已把 SSIM 计算移到 autocast **之外**用 fp32 算
+   （与 `eval_linattn.py` 算 ID SSIM 的位置一致），5 个模型全部重跑。
+
+补充 pass 实测（fp32）：每模型 15~50 s，5 个全部 `exit=0`；重跑后 OOD 全量 SSIM：
+`base63 0.6503 / m60 0.7298 / m120 0.7990 / m240 0.8257 / m360 0.7979`（与报告主表一致）。
+补充 pass 脚本与日志留在 `/root/autodl-tmp/savoias_eval/{ssim_pass.py, logs/ssim_*.log, logs/ssim_rerun.log}`。
 
 ## 7. 产物落点
 
