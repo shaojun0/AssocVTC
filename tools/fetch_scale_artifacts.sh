@@ -37,5 +37,19 @@ for M in 60 120 240 360; do
         "$HOST:$SRC/stdattn_m${M}_t${T}/train_log.jsonl" "$DST/train_logs/m${M}_t${T}.jsonl" || true
   done
 done
+# ── 条件臂 n=2 × T=24 @ 最优容量档（独立 OUT 目录, 存在才拉）──────────────
+SRC24=${SRC24:-/root/autodl-tmp/srdiff_scale_t24}
+scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24/eval/*.json" "$DST/eval/" || true
+scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24/eval/*.log" "$DST/logs/" || true
+scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24"/m240_stage*.log \
+    "$HOST:$SRC24/launch.out" "$DST/logs/" || true
+for T in 1 24; do
+  scp -P "$PORT" -o StrictHostKeyChecking=no \
+      "$HOST:$SRC24/stdattn_m240_t${T}/args.json" "$DST/args/m240_t${T}_args.json" || true
+  scp -P "$PORT" -o StrictHostKeyChecking=no \
+      "$HOST:$SRC24/stdattn_m240_t${T}/train_log.jsonl" "$DST/train_logs/m240_t${T}.jsonl" || true
+  scp -P "$PORT" -o StrictHostKeyChecking=no \
+      "$HOST:$SRC24/stdattn_m240_t${T}/eval_val.json" "$DST/train_logs/m240_t${T}_eval_val.json" || true
+done
 echo "[fetch] done → $DST"
 ls -la "$DST" "$DST/eval"
