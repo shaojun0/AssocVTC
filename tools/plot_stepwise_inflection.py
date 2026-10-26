@@ -62,6 +62,7 @@ ARMS = [
 DEFAULT_EVAL = "doc/2026-10-24/artifacts/scale/eval"
 DEFAULT_BASE = "doc/2026-10-23/artifacts/n2bigstep/eval"
 DEFAULT_OUT = "doc/2026-10-24/artifacts/scale"
+DEFAULT_PCA = "doc/2026-10-23/artifacts/n2bigstep/eval/baseline_pca_per_patch_r160.json"
 T_MIN, T_MAX = 1.5, 15.5          # 求 knee / elbow 的区间
 GRID = 0.01                       # t 细网格步长
 
@@ -75,6 +76,50 @@ def load_stepwise(path):
     if isinstance(d, dict) and d:
         return next(iter(d.values()))
     raise ValueError(f"无法解析 {path}")
+
+
+def load_pca_curves(path, n_steps=16):
+    """读 per-patch PCA 基线 json（ranks 1..160 的 L1_255/PSNR），按「每步预算对齐」取两条曲线。
+
+    预算口径: 模型 step t 的信息量 = 2t 个 z_s × 448 = 896t 个数；
+              per-patch PCA rank r = 196r 个数/图（+ 768×160 共享基，摊到 5000 张 ≈25/img）。
+    预算对齐:  r_budget(t) = round(896t / 196) = round(4.5714 t)   (t=1..16 → 5,9,...,73)
+    对照:      r_2t(t)     = 2t                                    (0.44× 预算)
+    """
+    with open(path) as f:
+        d = json.load(f)
+    ranks = d.get("ranks", d)
+    out = dict(source=path, mode=d.get("mode", ""), n_images=d.get("n_images", 0),
+               t=list(range(1, n_steps + 1)),
+               r_budget=[], r_2t=[], l1_budget=[], psnr_budget=[], l1_2t=[], psnr_2t=[])
+    for t in range(1, n_steps + 1):
+        rb = int(round(896.0 * t / 196.0))
+        r2 = 2 * t
+        out["r_budget"].append(rb)
+        out["r_2t"].append(r2)
+        out["l1_budget"].append(float(ranks[str(rb)]["L1_255"]))
+        out["psnr_budget"].append(float(ranks[str(rb)]["PSNR"]))
+        out["l1_2t"].append(float(ranks[str(r2)]["L1_255"]))
+        out["psnr_2t"].append(float(ranks[str(r2)]["PSNR"]))
+    for k in ("l1_budget", "psnr_budget", "l1_2t", "psnr_2t"):
+        out[k] = np.array(out[k])
+    return out
+
+
+def write_pca_csv(pca, out_dir):
+    """pca_stepwise_curve.csv —— t / 预算对齐 rank / L1 / PSNR / 2t rank / L1 / PSNR。"""
+    os.makedirs(out_dir, exist_ok=True)
+    p = os.path.join(out_dir, "pca_stepwise_curve.csv")
+    with open(p, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["t", "rank_budget_matched", "L1_255", "PSNR",
+                    "rank_2t", "L1_255_2t", "PSNR_2t"])
+        for i, t in enumerate(pca["t"]):
+            w.writerow([t, pca["r_budget"][i], f"{pca['l1_budget'][i]:.4f}",
+                        f"{pca['psnr_budget'][i]:.4f}", pca["r_2t"][i],
+                        f"{pca['l1_2t'][i]:.4f}", f"{pca['psnr_2t'][i]:.4f}"])
+    print(f"[out] {p}")
+    return p
 
 
 def analyse_curve(L, win=5, poly=2, s_scale=1e-3, tol_frac=0.10):
@@ -247,12 +292,12 @@ def write_tables(rows, args):
     return models
 
 
-def make_plot(rows, args):
-    fig, ax = plt.subplots(figsize=(7.4, 4.55))
-    # 1) 原图 5 条曲线（样式与原 plot_scale.py 图 2 一致）
+def make_plot(rows, args, pca=None):
+    fig, ax = plt.subplots(figsize=(7.4, 4.95))
+    # 1) 原图 5 条模型曲线（样式与原 plot_scale.py 图 2 一致; alpha 略降以便看清 PCA）
     for r in rows:
         L = r["L1_255"]
-        ax.plot(r["t"], L, "-o", ms=3, color=r["color"],
+        ax.plot(r["t"], L, "-o", ms=3, color=r["color"], alpha=0.85,
                 label=f"{r['capacity_M']:.0f}M  final={r['final_L1']:.2f}  "
                       f"knee t={r['knee_step']:.2f}")
     # 2) knee 点（白边、形状按档区分）
@@ -270,6 +315,14 @@ def make_plot(rows, args):
     ax.plot(px, py, "--", color="#1A1A1A", lw=2.0, alpha=0.95, zorder=4,
             path_effects=[pe.Stroke(linewidth=4.4, foreground="white"), pe.Normal()],
             label="knee trajectory (d²L/dt²≈0), capacity↑")
+    # 3b) per-patch PCA 基线（同一份 5,000 张 val / 同 L1_255 口径）
+    if pca is not None:
+        ax.plot(pca["t"], pca["l1_budget"], "-s", ms=3.2, lw=1.6, color="#4D4D4D",
+                alpha=0.95, zorder=3,
+                label="PCA per-patch, rank≈4.6t (same per-image numbers as model)")
+        ax.plot(pca["t"], pca["l1_2t"], "--s", ms=2.4, lw=1.1, color="#9E9E9E",
+                alpha=0.9, zorder=3,
+                label="PCA per-patch, rank=2t (0.44× budget)")
     # 4) 每点旁标注容量（白底小字，避免压线）
     offs = {"63M": (-2, 13), "119M": (-6, 12), "238M": (-44, -8),
             "482M": (20, -10), "721M": (0, 12)}
@@ -294,10 +347,14 @@ def make_plot(rows, args):
             "elbow (max|d²L/dt²|) is only a cross-check (t≈1.5–2.0).\n"
             "All five curves are monotone convex decays → no strict interior "
             "d²L/dt²=0; the 63M baseline has one strict crossing at t≈13.1 "
-            "(tail upturn), not marked.")
-    fig.text(0.010, 0.006, note, fontsize=5.7, va="bottom", ha="left",
+            "(tail upturn), not marked.\n"
+            "budget: model step t = 896t numbers (2t tokens × 448); PCA rank r = "
+            "196r numbers/image (+ 768×160 shared basis learned on\n"
+            "train patches, amortized ≈25/img over 5,000). PCA = per-patch PCA on "
+            "the same 5,000-image val set, not per-image oracle.")
+    fig.text(0.010, 0.006, note, fontsize=5.5, va="bottom", ha="left",
              color="#333333", linespacing=1.5)
-    plt.tight_layout(rect=(0.0, 0.135, 1.0, 1.0))
+    plt.tight_layout(rect=(0.0, 0.175, 1.0, 1.0))
     os.makedirs(args.out_dir, exist_ok=True)
     for ext in ("png", "pdf"):
         p = os.path.join(args.out_dir, f"scale_stepwise_l1.{ext}")
@@ -331,16 +388,27 @@ def main():
                     help="UnivariateSpline 平滑量 s = 该值 × 点数")
     ap.add_argument("--tol_frac", type=float, default=0.10,
                     help="|d²L/dt²| 视为 ≈0 的相对容差（相对峰值）")
+    ap.add_argument("--pca_json", default=DEFAULT_PCA,
+                    help="per-patch PCA 基线 json（ranks r→L1_255/PSNR），画预算对齐 + 2t 两条灰线")
+    ap.add_argument("--no_pca", action="store_true", help="不画 PCA 基线曲线")
     ap.add_argument("--from_json", default="",
                     help="复用已算好的 inflection_points.json（只重画图，不重算 knee）")
     ap.add_argument("--no_plot", action="store_true", help="只写 json/csv，不出图")
     args = ap.parse_args()
 
+    pca = None
+    if not args.no_pca:
+        if os.path.isfile(args.pca_json):
+            pca = load_pca_curves(args.pca_json)
+            write_pca_csv(pca, args.out_dir)
+        else:
+            print(f"[warn] 找不到 PCA json: {args.pca_json} → 只画模型曲线")
+
     if args.from_json:
         rows, _ = analyse_from_json(args.from_json, args)
         print(f"[info] 复用 {args.from_json} 的 knee/elbow（只重画）")
         if not args.no_plot:
-            make_plot(rows, args)
+            make_plot(rows, args, pca)
         print_table(rows)
         return
 
@@ -348,7 +416,7 @@ def main():
     print_table(rows)
     write_tables(rows, args)
     if not args.no_plot:
-        make_plot(rows, args)
+        make_plot(rows, args, pca)
 
 
 if __name__ == "__main__":
