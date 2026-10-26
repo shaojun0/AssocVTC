@@ -1,9 +1,9 @@
 {
  "data_dir": "/root/autodl-tmp/datasets/imagenet100",
- "output_dir": "/root/autodl-tmp/srdiff_scale/stdattn_m240_t1",
+ "output_dir": "/root/autodl-tmp/srdiff_scale_t24/stdattn_m240_t1",
  "img_size": 224,
  "patch": 16,
- "num_specials": 32,
+ "num_specials": 48,
  "special_init_std": 0.02,
  "enc_dim": 1248,
  "enc_depth": 13,

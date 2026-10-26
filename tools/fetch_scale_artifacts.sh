@@ -17,8 +17,15 @@ SRC=${SRC:-/root/autodl-tmp/srdiff_scale}
 DST=${DST:-doc/2026-10-24/artifacts/scale}
 mkdir -p "$DST/eval" "$DST/logs" "$DST/args" "$DST/train_logs"
 
-scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/*.json" "$DST/eval/" || true
-scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/*.log" "$DST/logs/" || true
+# ⚠️ 只取本实验的 4 档，别用 eval/*.json 通配：该目录会被其它并行作业写入（如 *_zs448）
+for M in 60 120 240 360; do
+  for T in 1 16; do
+    scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/linattn_m${M}_t${T}.json" "$DST/eval/" || true
+    scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/stepwise_m${M}_t16.json" "$DST/eval/" || true
+    scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/linattn_m${M}_t${T}.log" "$DST/logs/" || true
+    scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC/eval/stepwise_m${M}_t16.log" "$DST/logs/" || true
+  done
+done
 for M in 60 120 240 360; do
   scp -P "$PORT" -o StrictHostKeyChecking=no \
       "$HOST:$SRC/m${M}_stage1.log" "$HOST:$SRC/m${M}_stage2.log" "$DST/logs/" || true
@@ -39,7 +46,9 @@ for M in 60 120 240 360; do
 done
 # ── 条件臂 n=2 × T=24 @ 最优容量档（独立 OUT 目录, 存在才拉）──────────────
 SRC24=${SRC24:-/root/autodl-tmp/srdiff_scale_t24}
-scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24/eval/*.json" "$DST/eval/" || true
+# 条件臂单独目录 eval_t24/：其 linattn_m240_t1.json 是 K=48 的 A 相，不能与阶梯臂的 K=32 混名
+mkdir -p "$DST/eval_t24"
+scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24/eval/*.json" "$DST/eval_t24/" || true
 scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24/eval/*.log" "$DST/logs/" || true
 scp -P "$PORT" -o StrictHostKeyChecking=no "$HOST:$SRC24"/m240_stage*.log \
     "$HOST:$SRC24/launch.out" "$DST/logs/" || true
