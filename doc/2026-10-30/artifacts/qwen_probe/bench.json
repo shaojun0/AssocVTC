@@ -1,0 +1,13 @@
+{
+ "note": "bench 口径: qwen_probe.py --mode bench --r 5120（identity 输入）；GPU 独占（pca 结束后）",
+ "bs64_w12_img_s": 68.2,
+ "bs128_w16_img_s_run1": 170.9,
+ "bs128_w16_img_s_run2": 157.5,
+ "bs128_w20_img_s": 153.3,
+ "bs192_w16_img_s": 73.8,
+ "chosen": {"bs": 128, "workers": 16,
+            "img_s_observed_in_train": 145.0,
+            "epoch_time_min_est": 14.6,
+            "why": "bs64 严重欠利用 GPU；bs128 是峰值；bs192 反而掉到 73.8（显存/分配器悬崖）"},
+ "train_full_set": 126689
+}

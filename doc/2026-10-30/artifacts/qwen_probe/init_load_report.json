@@ -1,0 +1,14 @@
+{
+ "n_keys": 137,
+ "missing": [
+  "decoder.mem_proj.weight",
+  "decoder.mem_proj.bias"
+ ],
+ "unexpected": [],
+ "params_M": 242.713984,
+ "mem_pos_shape": [
+  1,
+  50,
+  1440
+ ]
+}

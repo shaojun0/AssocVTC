@@ -1,0 +1,90 @@
+{
+ "n_imgs": 5000,
+ "n_tokens": 245000,
+ "max_abs_diff": 1.459320068359375,
+ "rel_rmse": 0.0049143412350532295,
+ "token_psnr_db": 46.17069381769913,
+ "subset_fp16_source": "/root/autodl-tmp/qwen_vtc/tokens/train_fp16_subset.npy",
+ "quant_scheme": "b2_posmean_perchannel_pertoken_int8",
+ "subset_idx_head": [
+  23,
+  27,
+  37,
+  46,
+  72,
+  85,
+  163,
+  238,
+  291,
+  301
+ ],
+ "pooled_cov_relerr_f32_pipeline_vs_f64": 2.036040327849499e-05,
+ "variance_ratio_int8_over_fp16_same_subset": 1.0000852873608412,
+ "quant_noise_variance_fraction": 8.528008752772333e-05,
+ "note": "int8 = 全量训练集的 per-token absmax 量化; fp16 子集 = 固定随机子集原始精度。r_subset_fp16 vs r_subset_int8（同一批图、同一样本数）隔离量化噪声对阈值 r 的影响；r_full_train_int8 用了全部训练图，与子集的差主要来自抽样噪声。token 值重尾（absmax/rms~60），per-token absmax int8 对尾部阈值影响见 quant_noise_variance_fraction。",
+ "dims_at_thresholds": {
+  "1sigma": {
+   "target": 0.6827,
+   "r_subset_fp16": 20,
+   "r_subset_int8_same_images": 20,
+   "diff_quant_int8_minus_fp16": 0,
+   "r_subset_fp16_f32_pipeline": 20,
+   "r_full_train_int8": 20,
+   "diff_subset_minus_full": 0
+  },
+  "2sigma": {
+   "target": 0.9545,
+   "r_subset_fp16": 233,
+   "r_subset_int8_same_images": 233,
+   "diff_quant_int8_minus_fp16": 0,
+   "r_subset_fp16_f32_pipeline": 233,
+   "r_full_train_int8": 234,
+   "diff_subset_minus_full": -1
+  },
+  "3sigma": {
+   "target": 0.9973,
+   "r_subset_fp16": 748,
+   "r_subset_int8_same_images": 753,
+   "diff_quant_int8_minus_fp16": 5,
+   "r_subset_fp16_f32_pipeline": 748,
+   "r_full_train_int8": 754,
+   "diff_subset_minus_full": -6
+  },
+  "90": {
+   "target": 0.9,
+   "r_subset_fp16": 134,
+   "r_subset_int8_same_images": 134,
+   "diff_quant_int8_minus_fp16": 0,
+   "r_subset_fp16_f32_pipeline": 134,
+   "r_full_train_int8": 134,
+   "diff_subset_minus_full": 0
+  },
+  "95": {
+   "target": 0.95,
+   "r_subset_fp16": 221,
+   "r_subset_int8_same_images": 221,
+   "diff_quant_int8_minus_fp16": 0,
+   "r_subset_fp16_f32_pipeline": 221,
+   "r_full_train_int8": 222,
+   "diff_subset_minus_full": -1
+  },
+  "99": {
+   "target": 0.99,
+   "r_subset_fp16": 423,
+   "r_subset_int8_same_images": 424,
+   "diff_quant_int8_minus_fp16": 1,
+   "r_subset_fp16_f32_pipeline": 423,
+   "r_full_train_int8": 425,
+   "diff_subset_minus_full": -2
+  },
+  "999": {
+   "target": 0.999,
+   "r_subset_fp16": 1187,
+   "r_subset_int8_same_images": 1202,
+   "diff_quant_int8_minus_fp16": 15,
+   "r_subset_fp16_f32_pipeline": 1187,
+   "r_full_train_int8": 1201,
+   "diff_subset_minus_full": -14
+  }
+ }
+}

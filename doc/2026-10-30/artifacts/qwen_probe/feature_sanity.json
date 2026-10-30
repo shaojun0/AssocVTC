@@ -1,0 +1,41 @@
+{
+ "check": "mean-pooled Qwen vision tokens -> linear classifier (IN-100)",
+ "method": "standardize -> closed-form ridge linear classifier (lam=10, one-hot centred targets)",
+ "n_val": 5000,
+ "n_classes": 100,
+ "chance_top1": 0.01,
+ "quant_scheme": "b2_posmean_perchannel_pertoken_int8",
+ "primary": {
+  "subset_mode": "first",
+  "label_range": [
+   0,
+   39
+  ],
+  "top1": 0.3576,
+  "top5": 0.396,
+  "top1_best": 0.3576,
+  "top5_best": 0.396,
+  "top1_best_seen": 0.894,
+  "top5_best_seen": 0.99,
+  "n_classes_seen_in_train": 40,
+  "n_train": 50000,
+  "train_min": 1.379867641131083
+ },
+ "control": {
+  "subset_mode": "random",
+  "n_train": 20000,
+  "top1": 0.9114,
+  "top5": 0.9882,
+  "top1_best": 0.9114,
+  "top5_best": 0.9882,
+  "top1_best_seen": 0.9114,
+  "top5_best_seen": 0.9882,
+  "n_classes_seen_in_train": 100,
+  "train_min": 0.9318051973978678
+ },
+ "note": "primary = train_index \u987a\u5e8f\u524d 50k\uff08entries \u6309 class,name \u6392\u5e8f => \u53ea\u8986\u76d6\u524d 40 \u7c7b\uff0cfull-val top1 \u4e0a\u9650 ~40%\uff0c\u770b top1_best_seen\uff1bcontrol = \u968f\u673a 20k \u8986\u76d6\u5168\u90e8 100 \u7c7b\uff0c\u7528\u4e8e\u5bf9\u7167 >60% \u9884\u671f\uff09\u3002",
+ "elapsed_min": 5.6451159596443174,
+ "alarm": false,
+ "alarm_note": "OK",
+ "nearest_centroid_cosine_top1": 0.0
+}

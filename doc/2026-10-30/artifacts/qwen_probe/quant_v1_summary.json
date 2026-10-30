@@ -1,0 +1,10 @@
+{
+ "scheme": "v1_per_token_absmax_int8",
+ "rel_rmse": 0.14181791237141406,
+ "token_psnr_db": 16.9653782388049,
+ "max_abs_diff": 1.7698695659637451,
+ "n_tokens_checked": 6207761,
+ "zero_frac_pct": 44.0,
+ "zero_frac_source": "probe-trainer 13:05 \u89c2\u5bdf\uff08v1 \u5b58\u50a8\u4e0b 44% \u7684\u7ef4\u88ab\u91cf\u5316\u6210 0\uff09",
+ "note": "\u9996\u7248 per-token absmax int8\uff08Qwen token \u91cd\u5c3e\u5bfc\u81f4\u4fdd\u771f\u5ea6\u5dee\uff09\uff1b13:07 \u8d77\u88ab B2 \u91cd\u63d0\u8986\u76d6\uff1b\u8bc1\u636e\u89c1 pca/_unittest/v1_quant/"
+}

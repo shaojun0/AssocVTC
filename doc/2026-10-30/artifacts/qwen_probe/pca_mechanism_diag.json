@@ -1,0 +1,9 @@
+{
+ "sample": "2000 train images (98,000 tokens), B2 dequant, global-centred",
+ "pc_variance_share_sample": {"PC1": 0.5486, "PC2": 0.0263, "PC3": 0.0162, "PC4": 0.0159},
+ "corr_pc1_score_vs_token_l2_norm": {"pearson": -0.999, "spearman": -0.998},
+ "pc1_loading_concentration": {"top10_dims_share": 0.924, "top100_dims_share": 0.950, "max_abs_loading": 0.9357, "uniform_loading_abs": 0.000195},
+ "pc1_between_position_variance_fraction": 0.069,
+ "token_l2_norm": {"mean": 78.9, "std": 40.0, "per_image_token_std_mean": 38.5, "per_position_norm_min": 55.7, "per_position_norm_max": 106.6},
+ "note": "PC1 ≈ token 幅度/离群通道方向：载荷极稀疏（单维 0.936、top10 维 92.4%），PC1 分数与 token L2 norm 几乎完全相关。池化 PCA 的 top1 share 51.7% 主要由它贡献。"
+}

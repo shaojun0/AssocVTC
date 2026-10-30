@@ -1,0 +1,455 @@
+{
+ "generated_at": "2026-10-30T15:58:30+0800",
+ "experiment": "Qwen3.8-27B 视觉 token（49×5120, 224²）池化 PCA 截断 × AssocVTC 240M 真解码器单步还原探针（热启动，4 臂）",
+ "protocol_tag": "warm_start_from_AssocVTC_240M_decoder_T16",
+ "metric_protocol": "PSNR/SSIM/L1_255 在 [0,1] 像素空间；SSIM=metrics_linattn.ssim (11×11 高斯窗, fp32)；L1_255=[0,1] L1×255；重建用 v2 的 patches_to_img01（DINOv2 反归一化, patch=16, 224²）",
+ "data": {
+  "n_train": 126689,
+  "n_val": 5000,
+  "tokens_per_image": 49,
+  "dim": 5120,
+  "resolution": 224,
+  "quant_scheme": "posmean_perchannel_pertoken_int8",
+  "token_psnr_db": 46.17,
+  "quant_rel_rmse": 0.00491434123505323,
+  "val_tokens_dtype": "float16",
+  "model": "Qwen/Qwen3.8-27B visual tower (460.73M)",
+  "pca": {
+   "fit_on": "IN-100 train 全量池化 token（6,207,761 样本）",
+   "arms_r": {
+    "1sigma": 20,
+    "2sigma": 234,
+    "3sigma": 754,
+    "all": 5120
+   },
+   "cumvar_at": {
+    "1σ": 0.683622,
+    "2σ": 0.954684,
+    "3σ": 0.997303,
+    "全部 (5120)": 1.0
+   }
+  }
+ },
+ "training": {
+  "output_dirs": [
+   "probe/v2_r20",
+   "probe/v2_r234",
+   "probe/v2_r754",
+   "probe/v2_r5120"
+  ],
+  "ckpt_dtype": "best.pt = fp16 state_dict；训练中 last.pt=fp32（每臂训完删除）",
+  "init": "probe/init_m240_decoder.pt（AssocVTC 240M 档 B 相 t16 ckpt 的 decoder.* 权重；step 11406, best_psnr 27.81；mem_pos 33→50 行线性插值）",
+  "init_missing_keys": [
+   "decoder.mem_proj.weight",
+   "decoder.mem_proj.bias"
+  ],
+  "init_unexpected_keys": [],
+  "params_M": 242.714,
+  "params_breakdown": "真实解码器 237.11M（decoder 递归读出，含 mem_proj/mem_norm/mem_pos/query_pos/norm_out/pixel_head）+ mem_proj 输入适配 5120→1440 (+5.58M) = 242.71M",
+  "lr": 0.0002,
+  "bs": 128,
+  "warmup": 200,
+  "epochs": 2,
+  "seed": 0,
+  "subset_size": 126689,
+  "img_per_arm": 253378,
+  "pixel_space": "DINOv2 归一化（mean=IMAGENET_MEAN×255, std=IMAGENET_STD×255；与 240M ckpt 的训练口径一致）；指标在 [0,1] 像素空间算",
+  "bench": {
+   "note": "bench 口径: qwen_probe.py --mode bench --r 5120（identity 输入）；GPU 独占（pca 结束后）",
+   "bs64_w12_img_s": 68.2,
+   "bs128_w16_img_s_run1": 170.9,
+   "bs128_w16_img_s_run2": 157.5,
+   "bs128_w20_img_s": 153.3,
+   "bs192_w16_img_s": 73.8,
+   "chosen": {
+    "bs": 128,
+    "workers": 16,
+    "img_s_observed_in_train": 145.0,
+    "epoch_time_min_est": 14.6,
+    "why": "bs64 严重欠利用 GPU；bs128 是峰值；bs192 反而掉到 73.8（显存/分配器悬崖）"
+   },
+   "train_full_set": 126689
+  },
+  "NOTE": "warm_start_from_AssocVTC_240M_decoder_T16",
+  "per_arm_wall_min": [
+   {
+    "r": 20,
+    "wall_min": 21.5
+   },
+   {
+    "r": 234,
+    "wall_min": 21.6
+   },
+   {
+    "r": 754,
+    "wall_min": 21.6
+   },
+   {
+    "r": 5120,
+    "wall_min": 21.5
+   }
+  ],
+  "total_train_wall_min": 86.2,
+  "estimated_total_with_evals_min": 106.2
+ },
+ "arms": [
+  {
+   "r": 20,
+   "r_label": "1σ",
+   "cumvar_at_r": 0.683622,
+   "ckpt": "probe/v2_r20/best.pt",
+   "eval_json": "eval_v2_r20.json",
+   "epochs": 2,
+   "bs": 128,
+   "lr": 0.0002,
+   "warmup": 200,
+   "seed": 0,
+   "init": "probe/init_m240_decoder.pt",
+   "epoch_log": [
+    {
+     "ep": 0,
+     "subset_psnr": 14.5727,
+     "subset_ssim": 0.3525,
+     "subset_l1_255": 36.804,
+     "steps": 989,
+     "elapsed_min": 10.8
+    },
+    {
+     "ep": 1,
+     "subset_psnr": 15.2659,
+     "subset_ssim": 0.3631,
+     "subset_l1_255": 33.656,
+     "steps": 1978,
+     "elapsed_min": 21.5
+    }
+   ],
+   "steps": 1978,
+   "subset_psnr_final": 15.2659,
+   "wall_min": 21.5,
+   "psnr": 15.2595,
+   "ssim": 0.3673,
+   "l1_255": 33.818,
+   "n": 5000,
+   "params_M": 242.714,
+   "ckpt_ep": 1,
+   "init_missing_keys": [
+    "decoder.mem_proj.weight",
+    "decoder.mem_proj.bias"
+   ],
+   "init_unexpected_keys": [],
+   "delta_vs_all": -1.2393,
+   "delta_vs_meanbase": 3.4386
+  },
+  {
+   "r": 234,
+   "r_label": "2σ",
+   "cumvar_at_r": 0.954684,
+   "ckpt": "probe/v2_r234/best.pt",
+   "eval_json": "eval_v2_r234.json",
+   "epochs": 2,
+   "bs": 128,
+   "lr": 0.0002,
+   "warmup": 200,
+   "seed": 0,
+   "init": "probe/init_m240_decoder.pt",
+   "epoch_log": [
+    {
+     "ep": 0,
+     "subset_psnr": 15.3911,
+     "subset_ssim": 0.3662,
+     "subset_l1_255": 32.403,
+     "steps": 989,
+     "elapsed_min": 10.8
+    },
+    {
+     "ep": 1,
+     "subset_psnr": 16.1858,
+     "subset_ssim": 0.386,
+     "subset_l1_255": 29.119,
+     "steps": 1978,
+     "elapsed_min": 21.6
+    }
+   ],
+   "steps": 1978,
+   "subset_psnr_final": 16.1858,
+   "wall_min": 21.6,
+   "psnr": 16.224,
+   "ssim": 0.3903,
+   "l1_255": 29.172,
+   "n": 5000,
+   "params_M": 242.714,
+   "ckpt_ep": 1,
+   "init_missing_keys": [
+    "decoder.mem_proj.weight",
+    "decoder.mem_proj.bias"
+   ],
+   "init_unexpected_keys": [],
+   "delta_vs_all": -0.2748,
+   "delta_vs_meanbase": 4.4031
+  },
+  {
+   "r": 754,
+   "r_label": "3σ",
+   "cumvar_at_r": 0.997303,
+   "ckpt": "probe/v2_r754/best.pt",
+   "eval_json": "eval_v2_r754.json",
+   "epochs": 2,
+   "bs": 128,
+   "lr": 0.0002,
+   "warmup": 200,
+   "seed": 0,
+   "init": "probe/init_m240_decoder.pt",
+   "epoch_log": [
+    {
+     "ep": 0,
+     "subset_psnr": 15.6142,
+     "subset_ssim": 0.373,
+     "subset_l1_255": 31.268,
+     "steps": 989,
+     "elapsed_min": 10.8
+    },
+    {
+     "ep": 1,
+     "subset_psnr": 16.4513,
+     "subset_ssim": 0.3913,
+     "subset_l1_255": 28.1,
+     "steps": 1978,
+     "elapsed_min": 21.6
+    }
+   ],
+   "steps": 1978,
+   "subset_psnr_final": 16.4513,
+   "wall_min": 21.6,
+   "psnr": 16.4781,
+   "ssim": 0.3956,
+   "l1_255": 28.146,
+   "n": 5000,
+   "params_M": 242.714,
+   "ckpt_ep": 1,
+   "init_missing_keys": [
+    "decoder.mem_proj.weight",
+    "decoder.mem_proj.bias"
+   ],
+   "init_unexpected_keys": [],
+   "delta_vs_all": -0.0207,
+   "delta_vs_meanbase": 4.6572
+  },
+  {
+   "r": 5120,
+   "r_label": "全部 (5120)",
+   "cumvar_at_r": 1.0,
+   "ckpt": "probe/v2_r5120/best.pt",
+   "eval_json": "eval_v2_r5120.json",
+   "epochs": 2,
+   "bs": 128,
+   "lr": 0.0002,
+   "warmup": 200,
+   "seed": 0,
+   "init": "probe/init_m240_decoder.pt",
+   "epoch_log": [
+    {
+     "ep": 0,
+     "subset_psnr": 15.6061,
+     "subset_ssim": 0.3733,
+     "subset_l1_255": 31.352,
+     "steps": 989,
+     "elapsed_min": 10.8
+    },
+    {
+     "ep": 1,
+     "subset_psnr": 16.4739,
+     "subset_ssim": 0.392,
+     "subset_l1_255": 27.993,
+     "steps": 1978,
+     "elapsed_min": 21.5
+    }
+   ],
+   "steps": 1978,
+   "subset_psnr_final": 16.4739,
+   "wall_min": 21.5,
+   "psnr": 16.4988,
+   "ssim": 0.3961,
+   "l1_255": 28.038,
+   "n": 5000,
+   "params_M": 242.714,
+   "ckpt_ep": 1,
+   "init_missing_keys": [
+    "decoder.mem_proj.weight",
+    "decoder.mem_proj.bias"
+   ],
+   "init_unexpected_keys": [],
+   "delta_vs_all": 0.0,
+   "delta_vs_meanbase": 4.6779
+  }
+ ],
+ "meanbase": {
+  "psnr": 11.820898056030273,
+  "ssim": 0.31507107615470886,
+  "l1_255": 58.50120162963867,
+  "n_train_images_for_mean": 5000,
+  "n_val": 5000
+ },
+ "zeroshot": [
+  {
+   "r": 20,
+   "r_label": "1σ",
+   "cumvar_at_r": 0.683622,
+   "eval_json": "eval_v2_zeroshot_r20.json",
+   "psnr": 13.7983,
+   "ssim": 0.3426,
+   "l1_255": 41.689,
+   "n": 5000,
+   "delta_vs_all": -2.7005,
+   "delta_vs_meanbase": 1.9774
+  },
+  {
+   "r": 234,
+   "r_label": "2σ",
+   "cumvar_at_r": 0.954684,
+   "eval_json": "eval_v2_zeroshot_r234.json",
+   "psnr": 16.2058,
+   "ssim": 0.3906,
+   "l1_255": 29.459,
+   "n": 5000,
+   "delta_vs_all": -0.293,
+   "delta_vs_meanbase": 4.3849
+  },
+  {
+   "r": 754,
+   "r_label": "3σ",
+   "cumvar_at_r": 0.997303,
+   "eval_json": "eval_v2_zeroshot_r754.json",
+   "psnr": 16.4861,
+   "ssim": 0.3958,
+   "l1_255": 28.097,
+   "n": 5000,
+   "delta_vs_all": -0.0127,
+   "delta_vs_meanbase": 4.6652
+  },
+  {
+   "r": 5120,
+   "r_label": "全部 (5120)",
+   "cumvar_at_r": 1.0,
+   "eval_json": "eval_v2_r5120.json",
+   "psnr": 16.4988,
+   "ssim": 0.3961,
+   "l1_255": 28.038,
+   "n": 5000,
+   "delta_vs_all": 0.0,
+   "delta_vs_meanbase": 4.6779,
+   "note": "= all 臂自身评测（零训练截断的右端点，非独立点）"
+  }
+ ],
+ "trained_vs_zeroshot": [
+  {
+   "r": 20,
+   "r_label": "1σ",
+   "cumvar_at_r": 0.683622,
+   "trained_psnr": 15.2595,
+   "zeroshot_psnr": 13.7983,
+   "delta_trained_minus_zeroshot": 1.4612,
+   "trained_ssim": 0.3673,
+   "zeroshot_ssim": 0.3426,
+   "delta_ssim": 0.0247,
+   "note": "该 r 臂从零(热启动)重训 vs 用 r=5120 探针零训练直接吃截断输入；差值 >0 = 重训有收益"
+  },
+  {
+   "r": 234,
+   "r_label": "2σ",
+   "cumvar_at_r": 0.954684,
+   "trained_psnr": 16.224,
+   "zeroshot_psnr": 16.2058,
+   "delta_trained_minus_zeroshot": 0.0182,
+   "trained_ssim": 0.3903,
+   "zeroshot_ssim": 0.3906,
+   "delta_ssim": -0.0003,
+   "note": "该 r 臂从零(热启动)重训 vs 用 r=5120 探针零训练直接吃截断输入；差值 >0 = 重训有收益"
+  },
+  {
+   "r": 754,
+   "r_label": "3σ",
+   "cumvar_at_r": 0.997303,
+   "trained_psnr": 16.4781,
+   "zeroshot_psnr": 16.4861,
+   "delta_trained_minus_zeroshot": -0.008,
+   "trained_ssim": 0.3956,
+   "zeroshot_ssim": 0.3958,
+   "delta_ssim": -0.0002,
+   "note": "该 r 臂从零(热启动)重训 vs 用 r=5120 探针零训练直接吃截断输入；差值 >0 = 重训有收益"
+  },
+  {
+   "r": 5120,
+   "r_label": "全部 (5120)",
+   "cumvar_at_r": 1.0,
+   "trained_psnr": 16.4988,
+   "zeroshot_psnr": 16.4988,
+   "delta_trained_minus_zeroshot": 0.0,
+   "trained_ssim": 0.3961,
+   "zeroshot_ssim": 0.3961,
+   "delta_ssim": 0.0,
+   "note": "该 r 臂从零(热启动)重训 vs 用 r=5120 探针零训练直接吃截断输入；差值 >0 = 重训有收益"
+  }
+ ],
+ "scratch_ref": {
+  "all": {
+   "psnr": 15.7283,
+   "ssim": 0.3609,
+   "l1_255": 31.093,
+   "note": "v1 探针（model_v2.OutputQueryDecoder, 244.69M）从零训练 2 ep"
+  },
+  "zeroshot": {
+   "20": {
+    "psnr": 13.6713,
+    "ssim": 0.3207,
+    "l1_255": 43.158
+   },
+   "234": {
+    "psnr": 15.4941,
+    "ssim": 0.356,
+    "l1_255": 32.487
+   },
+   "754": {
+    "psnr": 15.7185,
+    "ssim": 0.3607,
+    "l1_255": 31.149
+   }
+  }
+ },
+ "honest_boundaries": [
+  "**热启动而非从零训练**：解码器主体来自 AssocVTC 240M 档在**其自身 DINOv2/自建编码器 token** 上的 B 相 ckpt（step 11406），本次只把 memory 换成 Qwen 视觉 token；唯一缺失键 = mem_proj（5120→1440，随机初始化，7.37M）",
+  "4 臂同 init / 同 seed(0) / 同数据顺序 / 同 epoch 预算 / 同超参，唯一自变量 = PCA 截断维数 r",
+  "单种子；非超参搜索（lr/wd/warmup/bs 未调）",
+  "PCA 基在**训练集**（126,689×49 池化 token）上拟合 ⇒ 可泛化口径而非 oracle；val 未参与拟合（train/val 同域 IN-100）",
+  "训练输入 int8 B2（token PSNR 46.17 dB, rel_rmse 0.0049；mu_p/sd 由 val 5,000 张 fp16 估计，仅存储刻度）；val 评测输入 fp16 原值 ⇒ 训练/评测输入精度不完全对称",
+  "像素指标（PSNR/SSIM/L1）≠ 任务保真；未测分类/检索/生成下游",
+  "PCA 是**方差最优**不是**重建最优**：池化 PC1 占 51.7% 方差且与 token 幅度/norm 相关 −0.999，r=20（1σ）主要保留幅度方向，内容维度大多在其外（top-49 才 78.3% 方差）⇒ r20 臂差于 r234/r754 属预期",
+  "mem_proj 的 PCA-投影初始化（raw / 白化，把池化 PCA 前 1248 维投到 ckpt 的 1248 维空间）实测初始 PSNR 10.44/10.49 dB，不如随机初始化 10.77 dB（32 张 val）⇒ 未采用；ckpt 的 1248 维 token 空间与 Qwen PCA 空间方向不对应",
+  "24 位分辨率 224²、patch=16（N=196）与 Qwen 的 7×7 视觉 token 网格非同构，由解码器自行学习映射",
+  "ckpt 落盘 fp16（省盘）：相对 fp32 舍入 1e-3，对 PSNR/SSIM 影响 <0.001 dB 量级"
+ ],
+ "artifacts": {
+  "eval_jsons": [
+   "/root/autodl-tmp/qwen_vtc/probe/eval_r5120.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_r5120_scratch.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_r20.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_r234.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_r5120.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_r754.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_zeroshot_r20.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_zeroshot_r234.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_v2_zeroshot_r754.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r20.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r20_scratch.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r234.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r234_scratch.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r754.json",
+   "/root/autodl-tmp/qwen_vtc/probe/eval_zeroshot_r754_scratch.json"
+  ],
+  "fig_psnr": [
+   "fig_qwen_probe_v2_psnr_vs_r.png",
+   "fig_qwen_probe_v2_psnr_vs_r.pdf"
+  ],
+  "fig_grid": "fig_qwen_probe_v2_grid.png",
+  "scratch_ref": "eval_r5120_scratch.json + eval_zeroshot_r*_scratch.json（v1 从零 2ep 对照）"
+ }
+}
