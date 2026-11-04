@@ -286,3 +286,36 @@ PORT=23556 bash tools/fetch_448_960m.sh
    `ALL_DONE` 之前 `wait`，任何一段评测失败都不会写 `ALL_DONE`。
 7. **不 commit**：脚本与本文档由 Lead 统一提交；远端 rsync 副本没有 `.git`，
    `run_info.json` 的 commit 会退化为 `src:<sha256前12位>`（或用 `COMMIT=34638ed` 显式指定）。
+
+---
+
+## 11. 中途改双卡 DDP（2026-11-04 15:20 决策，用户要求提速）
+
+**背景**：A 相已单卡跑到 ~20%，无法中途转换；用户要求双卡提速 ⇒ 只把 **B/S3** 改成 2×A800 DDP，A 结束后自动接力。
+
+| 项 | 单卡（原计划） | 双卡 DDP（现方案） |
+|---|---|---|
+| A 相 45ep | 单卡（已在跑，不重跑） | 不变 |
+| B 相 6ep | 4.41 s/step → 14.0 h | ~2.4–2.6 s/step（预估 1.7–1.85×）→ 7.6–8.2 h |
+| S3 相 3ep | 4.38 s/step → 6.9 h | ~3.8–4.1 h |
+| 全部完成 | 11-05 ~22:20 | **11-05 ~13:00–14:00** |
+| 等效批量/步数 | A128 / B,S3=64；42,795/11,406/5,703 | **完全不变**（每卡 micro16×accum2 = 全局 64） |
+
+**关键实现**（`train_linattn.py`，`WORLD_SIZE>1` 才启用，单卡路径逐位不变，回归 max|Δloss|=0.0）：
+- `torch.distributed.init_process_group(nccl)` + `DDP(find_unused_parameters=True)`；
+- `--batch_size` 仍为**全局等效批量**，每卡 micro = `batch_size/(accum×world)`；
+- `DistributedSampler` + `set_epoch`，**steps/epoch 硬断言 == 单卡参考**（B/S3=1901）；
+- 梯度累积用 `no_sync()`（只最后一次 micro allreduce）；
+- rank0 独占 日志/val/采样图/ckpt（val 与采样图用裸模型 + `barrier()`，否则单 rank forward 会 hang）；
+- ckpt 用 `raw_model.state_dict()`（不带 `module.` 前缀），DDP 时额外记 `ddp` 元信息。
+
+**接力驱动** `tools/run_448_960m_ddp_afterA.sh`（15:23 启动，PID 51814）：
+1. 等 A 完成（`ckpt_best` + A 进程退出 + `stage1.log` 有 `[done] steps=42750`）→ 补写 `STAGE1_DONE`、删 `A/ckpt_last`；
+2. **真实尺寸 DDP 冒烟** 30 步测 speedup（<1.3× ⇒ 写 `ALERT_ddp_slow.txt` + `DDP_FALLBACK` 回退单卡）；
+3. A 评测 → B DDP → B 评测 → S3 DDP → S3 评测 → `ALL_DONE`；
+4. `afterA.heartbeat` 每 30s 更新（watchdog 看不到本驱动进程时用它兜底；>5min 不更新即报警）；
+5. watchdog 已用 `CHAIN_PATTERN="run_448_960m_(3stage|ddp_afterA)\.sh"` 重启（pid 52139），可见本驱动。
+
+**已知误报**：A 结束后若 GPU 被别的作业占用，接力会等空卡最多 30 min（`SMOKE_WAIT_GPU_MIN`），期间无 train 进程 ⇒ watchdog 可能报一次 CRASHED/NO_PROC_AFTER_DONE，用 `afterA.heartbeat` 与 `afterA.out` 的 `[gpu]` 行分辨。
+
+**证据**：`doc/2026-11-04/DDP_448_960M_VERIFICATION.md` 与 `doc/2026-11-04/artifacts/ddp/`（单卡回归、2-rank plumbing、7 场景 41 断言沙箱自测）。

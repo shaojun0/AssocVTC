@@ -7,7 +7,11 @@
 
     torchrun --nproc_per_node=1 train_linattn.py --output_dir out/linattn_k64
 
-单卡即可（本仓库实验版无 DDP 需求; 多卡时每卡独立跑不同配置更方便对照）。
+**单卡默认路径逐位不变**; 设了 `WORLD_SIZE>1`（torchrun 注入）时自动启用 DDP:
+    torchrun --nproc_per_node=2 train_linattn.py ...   # ⇒ 2 卡 DDP
+`--batch_size` 始终是**全局等效批量**, 每卡 micro = batch_size/(accum_steps×world);
+steps/epoch、优化器、调度、等效批量语义全部与单卡完全相同（2026-11-04 双卡提速改造）。
+
 训练量: 121,689 train / 5,000 val（100 类 × 50 张等距抽取）;
 batch 128 时 drop_last ⇒ **950 步/epoch**, 60 epoch = 57,000 步 ≈ 5.7h @ ~357 img/s。
 
@@ -24,14 +28,18 @@ batch 128 时 drop_last ⇒ **950 步/epoch**, 60 epoch = 57,000 步 ≈ 5.7h @ 
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
 import time
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 from torchvision.utils import make_grid, save_image
 
 from data_linattn import build_loaders
@@ -39,6 +47,29 @@ from metrics_linattn import psnr, ssim, per_patch_dc_baseline
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
                               SRPhase1LinAttn, patches_to_image,
                               parse_loss_weights)
+
+
+# ─────────────────────── 分布式（DDP）辅助 ───────────────────────
+
+# 单卡（或 rank0）时 _IS_MAIN=True ⇒ `_p` 与内置 `print` 行为完全一致。
+_IS_MAIN = True
+
+
+def _p(*a, **kw):
+    """rank0-only 打印（单卡路径与 `print` 逐位等价, 保证旧行为不变）。"""
+    if _IS_MAIN:
+        print(*a, **kw)
+
+
+def ddp_env():
+    """读 torchrun 注入的分布式环境变量; 未设置 ⇒ (1, 0, 0) 单卡路径。"""
+    def _i(key, default):
+        v = os.environ.get(key, "")
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+    return _i("WORLD_SIZE", 1), _i("RANK", 0), _i("LOCAL_RANK", 0)
 
 
 # ─────────────────────────── 工具 ───────────────────────────
@@ -345,7 +376,7 @@ def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
             # 初始近似误差（相对 Frobenius）: 反映瓶颈带来的初始退化
             approx = U_d @ Vh_d
             rel = float((W - approx).norm() / W.norm())
-            print(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=SVD 前 {d} 个右奇异向量, "
+            _p(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=SVD 前 {d} 个右奇异向量, "
                   f"mem_proj {tuple(W.shape)} → {tuple(U_d.shape)} "
                   f"（秩-{d} 近似相对误差 {rel:.3f}）", flush=True)
             return
@@ -354,7 +385,7 @@ def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
             m.bias.zero_()
             for i in range(d):
                 m.weight[i, i] = 1.0
-    print(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=截断恒等（无 mem_proj 权重）",
+    _p(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=截断恒等（无 mem_proj 权重）",
           flush=True)
 
 
@@ -374,13 +405,13 @@ def load_init_from(model: nn.Module, path: str) -> dict:
     for k in mism:                       # 形状不符的先摘出来, 稍后按瓶颈规则重初始化
         raw.pop(k)
     if mism:
-        print(f"[init_from] 形状变化（按瓶颈规则重初始化）: "
+        _p(f"[init_from] 形状变化（按瓶颈规则重初始化）: "
               f"{ {k: (tuple(v.shape), tuple(want[k].shape)) for k, v in mism.items()} }",
               flush=True)
     missing, unexpected = model.load_state_dict(raw, strict=False)
     if getattr(model, "zs_proj", None) is not None:
         _init_bottleneck_warm_start(model, ck0["model"])
-    print(f"[init_from] {path} → missing={list(missing)} "
+    _p(f"[init_from] {path} → missing={list(missing)} "
           f"unexpected={list(unexpected)}", flush=True)
     assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
     allowed = ({"decoder.mem_pos"}
@@ -395,6 +426,7 @@ def load_init_from(model: nn.Module, path: str) -> dict:
 
 
 def main():
+    global _IS_MAIN
     args = parse_args()
     if args.smoke:
         args.limit = args.limit or 512
@@ -403,11 +435,35 @@ def main():
         args.log_interval = 5
         args.num_workers = 8
         args.sample_interval = 20
-    os.makedirs(args.output_dir, exist_ok=True)
+    # ── 分布式（DDP）: 只有 torchrun 注入 WORLD_SIZE>1 才启用 ──────────────
+    # 未设置时 world=1/rank=0 ⇒ 下面所有 `if ddp:` 分支都不执行, 单卡路径逐位不变。
+    world, rank, local_rank = ddp_env()
+    ddp = world > 1
+    _IS_MAIN = (rank == 0)
+    if ddp:
+        backend = os.environ.get("DDP_BACKEND", "nccl")
+        ndev = torch.cuda.device_count()
+        # 正常 2 卡: local_rank 即物理卡号。同卡多 rank 的 plumbing 测试
+        # (CUDA_VISIBLE_DEVICES 只暴露 1 张卡) 时取模, 两个 rank 都落 device 0。
+        dev = local_rank if local_rank < ndev else local_rank % max(1, ndev)
+        torch.cuda.set_device(dev)
+        local_rank = dev
+        dist.init_process_group(backend=backend)
+        assert dist.get_world_size() == world, \
+            f"torchrun WORLD_SIZE={world} ≠ 进程组 world_size={dist.get_world_size()}"
+        # 每个 rank 各打一行（rank≠0 也打: 冒烟时用来确认两个进程都起来了/各自 device）
+        print(f"[ddp] rank={rank}/{world} local_rank={local_rank} "
+              f"backend={backend} device=cuda:{dev}"
+              + (" （⚠️ 多 rank 共卡调试: 仅 gloo 可跑, NCCL 会拒绝 Duplicate GPU）"
+                 if ndev < world else ""), flush=True)
+
+    if _IS_MAIN:
+        os.makedirs(args.output_dir, exist_ok=True)
     log_path = os.path.join(args.output_dir, "train_log.jsonl")
     status_path = os.path.join(args.output_dir, "status.json")
-    with open(os.path.join(args.output_dir, "args.json"), "w") as f:
-        json.dump(vars(args), f, ensure_ascii=False, indent=1)
+    if _IS_MAIN:      # 日志/args 只由 rank0 落盘
+        with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+            json.dump(vars(args), f, ensure_ascii=False, indent=1)
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -421,65 +477,106 @@ def main():
         for prm in model.encoder.parameters():
             prm.requires_grad_(False)
         n_tr = sum(prm.numel() for prm in model.parameters() if prm.requires_grad)
-        print(f"[freeze] 冻结编码器 ⇒ 可训参数 {n_tr/1e6:.3f} M "
+        _p(f"[freeze] 冻结编码器 ⇒ 可训参数 {n_tr/1e6:.3f} M "
               f"(原 {sum(prm.numel() for prm in model.parameters())/1e6:.3f} M)", flush=True)
     pc = model.count_params()
     n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
-    print(f"[decode] recurrent={getattr(model,'recurrent',False)} "
+    _p(f"[decode] recurrent={getattr(model,'recurrent',False)} "
           f"dec_attn={cfg.dec_attn} → {type(model.decoder).__name__} T={n_steps}"
           + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else ""),
           flush=True)
-    print(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
+    _p(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
           f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
           f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__} "
           f"zs_dim={getattr(cfg, 'zs_dim', 0)} "
           f"({pc['values_per_image']} 个值/图)", flush=True)
-    print(f"[alit] loss_weights={model.loss_weights or '(平权)'} "
+    _p(f"[alit] loss_weights={model.loss_weights or '(平权)'} "
           f"dh_mode={model.dh_mode} dh_quantile={model.dh_quantile} "
           f"sample_grad_iters={model.sample_grad_iters} "
           f"refiner={type(model.refiner).__name__ if model.refiner else 'off'} "
           f"(layers={cfg.refiner_layers} dim={cfg.refiner_dim} grow={cfg.refiner_grow} "
           f"steps={cfg.refiner_steps or 'T'})", flush=True)
-    print(f"[params] {pc}", flush=True)
+    _p(f"[params] {pc}", flush=True)
+
+    raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
+    if ddp:
+        model = DDP(raw_model, device_ids=[local_rank],
+                    find_unused_parameters=True)
 
     accum = max(1, int(args.accum_steps))
-    assert args.batch_size % accum == 0, \
-        f"--batch_size({args.batch_size}) 须能被 --accum_steps({accum}) 整除"
-    micro_bs = args.batch_size // accum
+    # ★ `--batch_size` 恒为**全局等效批量**: 每卡 micro = batch_size/(accum×world)。
+    #   单卡时 world=1 ⇒ micro = batch_size/accum, 与改造前逐位相同。
+    assert args.batch_size % (accum * world) == 0, \
+        f"--batch_size({args.batch_size}) 须能被 accum_steps×world_size" \
+        f"({accum}×{world}={accum * world}) 整除"
+    micro_bs = args.batch_size // (accum * world)
     if accum > 1:
-        print(f"[accum] 等效批量 {args.batch_size} = micro {micro_bs} × {accum} "
+        _p(f"[accum] 等效批量 {args.batch_size} = micro {micro_bs} × {accum} "
               f"累积, 优化步数不变（val 每批 {micro_bs} × 批数×{accum} 保持同样张数）",
               flush=True)
+    if ddp:
+        _p(f"[ddp] 等效批量 {args.batch_size} = 每卡 micro {micro_bs} × 每卡 accum "
+              f"{accum} × {world} 卡（与单卡 micro {args.batch_size // accum} × "
+              f"accum {accum} 等价, 优化步数不变）", flush=True)
+    # val 张数口径: 单卡 val 图数 = micro×accum×val_batches = batch_size×val_batches,
+    # DDP 下换成每个 rank 的 micro/accum, 故批数要乘 world 才能保持同样张数。
+    val_batches_n = args.val_batches * accum * world
     tr_loader, va_loader, tr_ds, va_ds = build_loaders(
         args.data_dir, args.img_size, micro_bs, args.val_per_class,
-        args.num_workers, args.limit, args.val_batches * accum)
+        args.num_workers, args.limit, val_batches_n)
+    tr_sampler = None
+    if ddp:
+        # 每卡只看自己那份（DistributedSampler 自动垫齐到 ceil(N/world)）
+        tr_sampler = DistributedSampler(tr_ds, num_replicas=world, rank=rank,
+                                        shuffle=True, seed=args.seed,
+                                        drop_last=False)
+        tr_loader = DataLoader(tr_ds, batch_size=micro_bs, sampler=tr_sampler,
+                               drop_last=True, num_workers=args.num_workers,
+                               pin_memory=True,
+                               persistent_workers=args.num_workers > 0,
+                               prefetch_factor=4 if args.num_workers > 0 else None)
     steps_per_epoch = len(tr_loader) // accum
     total_steps = (args.max_steps if args.max_steps > 0
                    else steps_per_epoch * args.epochs)
     warmup = max(1, int(total_steps * args.warmup_frac))
-    print(f"[data] train={len(tr_ds)} val={len(va_ds)} "
+    _p(f"[data] train={len(tr_ds)} val={len(va_ds)} "
           f"steps/epoch={steps_per_epoch} total_steps={total_steps} "
           f"warmup={warmup}", flush=True)
+    if ddp:
+        # ★等价批量语义守卫: steps/epoch 必须与「同样超参的单卡跑」完全一致,
+        #   否则等效批量/优化步数被悄悄改了（每个 rank 各打一行, 供冒烟核对）。
+        micro_single = args.batch_size // accum
+        ref_single = (len(tr_ds) // micro_single) // accum
+        assert steps_per_epoch == ref_single, (
+            f"DDP steps/epoch={steps_per_epoch} ≠ 单卡参考 {ref_single}"
+            f"（train={len(tr_ds)} micro={micro_bs} accum={accum} world={world}）")
+        print(f"[ddp] rank={rank} sampler num_samples={len(tr_sampler)} "
+              f"loader_batches={len(tr_loader)} micro={micro_bs} accum={accum} "
+              f"⇒ steps/epoch={steps_per_epoch} == 单卡参考 {ref_single} ✓",
+              flush=True)
 
-    opt = torch.optim.AdamW(param_groups(model, args.weight_decay),
+    opt = torch.optim.AdamW(param_groups(raw_model, args.weight_decay),
                             lr=args.lr, betas=(0.9, 0.95), eps=1e-8)
     start_step, start_epoch, best_psnr = 0, 0, -1e9
     if args.resume and os.path.exists(args.resume):
         ck = torch.load(args.resume, map_location="cpu", weights_only=False)
-        model.load_state_dict(ck["model"])
+        raw_model.load_state_dict(ck["model"])
         if "opt" in ck:
             opt.load_state_dict(ck["opt"])
         start_step = ck.get("step", 0)
         start_epoch = ck.get("epoch", 0)
         best_psnr = ck.get("best_psnr", -1e9)
-        print(f"[resume] {args.resume} step={start_step} epoch={start_epoch} "
+        _p(f"[resume] {args.resume} step={start_step} epoch={start_epoch} "
               f"best_psnr={best_psnr:.3f}", flush=True)
 
     def save_ckpt(path, step, epoch, best, tag=""):
-        blob = {"model": model.state_dict(),
+        blob = {"model": raw_model.state_dict(),   # 裸模型: 不带 DDP 的 "module." 前缀
                 "cfg": cfg.to_dict(), "args": vars(args), "step": step,
                 "epoch": epoch, "best_psnr": best, "tag": tag,
                 "params": pc}
+        if ddp:                                    # 单卡 ckpt 逐字节不变: 只在 DDP 下加此键
+            blob["ddp"] = {"world_size": world, "rank": rank, "backend": backend,
+                           "micro_bs": micro_bs, "accum": accum}
         if args.save_opt:
             blob["opt"] = opt.state_dict()      # 默认路径与原行为逐位相同
         torch.save(blob, path)
@@ -497,6 +594,8 @@ def main():
     # （2026-10-15 独立审查 finding 6: 旧版按 epoch 数终止会少跑 <1 epoch）。
     while step < total_steps and not stop:
         epoch += 1
+        if ddp:
+            tr_sampler.set_epoch(epoch)   # 每 epoch 换一份不重复的全局打乱划分
         for bi, (x, _) in enumerate(tr_loader):
             if step >= total_steps:
                 stop = True
@@ -508,17 +607,23 @@ def main():
             if bi % accum == 0:
                 opt.zero_grad(set_to_none=True)
                 loss_sum, rec_sum = 0.0, 0.0
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
-                out = model(x)
-                loss = out["loss"]
-            (loss / accum).backward()      # accum=1 时与原行为逐位相同
+            last_micro = ((bi + 1) % accum == 0)
+            # DDP 梯度累积: 只有本优化步的最后一次 micro 才 allreduce, 其余 no_sync
+            # （否则每个 micro 都同步一次, 通信量 ×accum 且语义不等价）。
+            sync_ctx = (model.no_sync() if ddp and not last_micro
+                        else contextlib.nullcontext())
+            with sync_ctx:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
+                    out = model(x)
+                    loss = out["loss"]
+                (loss / accum).backward()      # accum=1 时与原行为逐位相同
             loss_sum += float(loss.item())
             rec_sum += float(out["recon"].item())
-            if (bi + 1) % accum != 0:
+            if not last_micro:
                 continue                    # 累积未满 ⇒ 不做优化步
             if args.grad_clip > 0:
                 gn = torch.nn.utils.clip_grad_norm_(
-                    [prm for prm in model.parameters() if prm.requires_grad],
+                    [prm for prm in raw_model.parameters() if prm.requires_grad],
                     args.grad_clip)
             else:
                 gn = torch.tensor(0.0)
@@ -531,11 +636,13 @@ def main():
             else:
                 opt.step()
             step += 1
-            run_imgs += x.shape[0] * accum
+            run_imgs += x.shape[0] * accum * world   # DDP: ×world = 全局吞吐（单卡恒等）
             loss_avg = loss_sum / accum
             rec_avg = rec_sum / accum
 
-            if step % args.log_interval == 0 or step - start_step <= 3:
+            # 日志/status 只由 rank0 写（否则两个 rank 抢同一个 status.json.tmp，
+            # os.replace 会 ENOENT；train_log.jsonl 也会被写两遍）。
+            if _IS_MAIN and (step % args.log_interval == 0 or step - start_step <= 3):
                 el = time.time() - t0
                 ips = run_imgs / max(1e-6, time.time() - run_t0)
                 eta_h = (total_steps - step) / max(1e-6, ips) * args.batch_size / 3600
@@ -547,7 +654,7 @@ def main():
                     "eta_h": round(eta_h, 2),
                     "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
                 }
-                print(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
+                _p(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
                       f"loss={loss_avg:.4f} recon={rec_avg:.4f} "
                       f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
                       f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h", flush=True)
@@ -555,10 +662,12 @@ def main():
                 write_status(status_path, {**rec, "best_psnr": best_psnr,
                                            "running": True})
 
-            if args.sample_interval and step % args.sample_interval == 0:
+            if _IS_MAIN and args.sample_interval and step % args.sample_interval == 0:
+                # ⚠️ 用 raw_model: DDP 包装后的 forward 含 buffer 广播集合通信,
+                #    只有 rank0 调用会 hang 住另一个 rank。
                 with torch.no_grad():
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
-                        o = model(x[:8])
+                        o = raw_model(x[:8])
                     g_in = denorm01(o["target_pix"].float(), args.img_size, args.patch)
                     g_rec = denorm01(o["F_hat"].float(), args.img_size, args.patch)
                     save_pair_grid(g_in, g_rec,
@@ -566,18 +675,24 @@ def main():
                                                 f"step{step:07d}.png"))
 
             if args.time_budget_h > 0 and (time.time() - t0) / 3600 >= args.time_budget_h:
-                print(f"[stop] 达到时间预算 {args.time_budget_h}h", flush=True)
+                _p(f"[stop] 达到时间预算 {args.time_budget_h}h", flush=True)
                 stop = True
                 break
 
         # ── epoch 末验证 + 存档 ──
-        if args.val_batches > 0 and (step > start_step or epoch > 1):
-            vr = evaluate(model, va_loader, args.patch, args.img_size,
-                          bool(args.amp), args.val_batches * accum,
+        # val 只在 rank0 做（其余 rank 在 barrier 上等）⇒ 用 raw_model 规避 DDP
+        # forward 的集合通信; 前后各一次 barrier 保证不会一个 rank 在 allreduce 上
+        # 等另一个 rank 先去做 val。
+        do_val = (args.val_batches > 0 and (step > start_step or epoch > 1))
+        if ddp:
+            dist.barrier()
+        if do_val and _IS_MAIN:
+            vr = evaluate(raw_model, va_loader, args.patch, args.img_size,
+                          bool(args.amp), args.val_batches * accum * world,
                           save_grid=os.path.join(args.output_dir, "samples",
                                                  f"epoch{epoch:03d}_val.png"))
             vr.update({"step": step, "epoch": epoch, "split": "val"})
-            print(f"[val] ep{epoch} step{step} l1={vr['l1_norm']:.4f} "
+            _p(f"[val] ep{epoch} step{step} l1={vr['l1_norm']:.4f} "
                   f"psnr={vr['psnr']:.2f}dB ssim={vr['ssim']:.4f} "
                   f"(mean基线 {vr['psnr_mean_image_baseline']:.2f}dB, "
                   f"patchDC基线 {vr['psnr_patch_dc_baseline']:.2f}dB)", flush=True)
@@ -593,22 +708,30 @@ def main():
                                        "best_psnr": best_psnr,
                                        "elapsed_min": round((time.time() - t0) / 60, 2),
                                        "running": not stop})
-        if args.save_every_epochs and epoch % args.save_every_epochs == 0:
+        if ddp:
+            dist.barrier()      # rank≠0 等 rank0 做完 val + ckpt/status 落盘
+        if _IS_MAIN and args.save_every_epochs and epoch % args.save_every_epochs == 0:
             save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"),
                       step, epoch, best_psnr, "last")
 
-    save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"), step, epoch,
-              best_psnr, "last")
-    if best_psnr < -1e8 and args.val_batches == 0:
-        save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"), step, epoch,
-                  best_psnr, "notvalidated")
-    dt = (time.time() - t0) / 60
-    print(f"[done] steps={step} epochs={epoch} best_val_psnr={best_psnr:.2f} "
-          f"wall={dt:.1f}min", flush=True)
-    write_status(status_path, {"step": step, "epoch": epoch,
-                               "best_psnr": best_psnr,
-                               "elapsed_min": round(dt, 2), "running": False,
-                               "done": True})
+    # 收尾: 只 rank0 落盘/打日志; 其它 rank 先 barrier 等落盘完再退出。
+    if ddp:
+        dist.barrier()
+    if _IS_MAIN:
+        save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"), step, epoch,
+                  best_psnr, "last")
+        if best_psnr < -1e8 and args.val_batches == 0:
+            save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"), step, epoch,
+                      best_psnr, "notvalidated")
+        dt = (time.time() - t0) / 60
+        _p(f"[done] steps={step} epochs={epoch} best_val_psnr={best_psnr:.2f} "
+              f"wall={dt:.1f}min", flush=True)
+        write_status(status_path, {"step": step, "epoch": epoch,
+                                   "best_psnr": best_psnr,
+                                   "elapsed_min": round(dt, 2), "running": False,
+                                   "done": True})
+    if ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

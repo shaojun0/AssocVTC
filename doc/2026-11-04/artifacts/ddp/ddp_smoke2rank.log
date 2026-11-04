@@ -1,0 +1,35 @@
+[ddp] rank=0/2 local_rank=0 backend=gloo device=cuda:0 （⚠️ 多 rank 共卡调试: 仅 gloo 可跑, NCCL 会拒绝 Duplicate GPU）[ddp] rank=1/2 local_rank=0 backend=gloo device=cuda:0 （⚠️ 多 rank 共卡调试: 仅 gloo 可跑, NCCL 会拒绝 Duplicate GPU）
+
+[decode] recurrent=True dec_attn=std → RecurrentOutputQueryDecoder T=16 steps=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+[cfg] N=196 K=32 enc=64x1 dec=64x1 enc_attn=std → StandardAttentionEncoder zs_dim=0 (2048 个值/图)
+[alit] loss_weights=(平权) dh_mode=0 dh_quantile=0.5 sample_grad_iters=0 refiner=off (layers=0 dim=256 grow=16 steps=T)
+[params] {'encoder': 261440, 'decoder': 498816, 'refiner': 0, 'enc_fc': 0, 'zs_dim': 0, 'values_per_image': 2048, 'total': 760256, 'enc_M': 0.261, 'dec_M': 0.499, 'refiner_M': 0.0, 'total_M': 0.76, 'enc_dec_ratio': 1.908}
+[accum] 等效批量 64 = micro 16 × 2 累积, 优化步数不变（val 每批 16 × 批数×2 保持同样张数）
+[ddp] 等效批量 64 = 每卡 micro 16 × 每卡 accum 2 × 2 卡（与单卡 micro 32 × accum 2 等价, 优化步数不变）
+[data] train=2000 val=5000 steps/epoch=31 total_steps=20 warmup=1
+[ddp] rank=0 sampler num_samples=1000 loader_batches=62 micro=16 accum=2 ⇒ steps/epoch=31 == 单卡参考 31 ✓
+[ddp] rank=1 sampler num_samples=1000 loader_batches=62 micro=16 accum=2 ⇒ steps/epoch=31 == 单卡参考 31 ✓
+[rank1]:[W1104 15:01:53.965999111 reducer.cpp:1528] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank0]:[W1104 15:01:53.114117463 reducer.cpp:1528] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[   0.03m] step 1/20 ep1 loss=0.9643 recon=0.9647 lr=2.00e-04 gn=0.21 skip=0 31img/s vram=3.1G eta=0.01h
+[   0.04m] step 2/20 ep1 loss=0.9086 recon=0.9089 lr=2.00e-04 gn=0.08 skip=0 58img/s vram=3.1G eta=0.01h
+[   0.04m] step 3/20 ep1 loss=0.9018 recon=0.9018 lr=1.99e-04 gn=0.06 skip=0 83img/s vram=3.1G eta=0.00h
+[   0.04m] step 4/20 ep1 loss=0.8681 recon=0.8682 lr=1.95e-04 gn=0.05 skip=0 105img/s vram=3.1G eta=0.00h
+[   0.04m] step 5/20 ep1 loss=0.8913 recon=0.8913 lr=1.88e-04 gn=0.04 skip=0 124img/s vram=3.1G eta=0.00h
+[   0.06m] step 6/20 ep1 loss=0.8539 recon=0.8537 lr=1.79e-04 gn=0.03 skip=0 106img/s vram=3.4G eta=0.00h
+[   0.06m] step 7/20 ep1 loss=0.8040 recon=0.8038 lr=1.68e-04 gn=0.03 skip=0 120img/s vram=3.4G eta=0.00h
+[   0.06m] step 8/20 ep1 loss=0.9112 recon=0.9110 lr=1.55e-04 gn=0.02 skip=0 133img/s vram=3.4G eta=0.00h
+[   0.07m] step 9/20 ep1 loss=0.8943 recon=0.8939 lr=1.40e-04 gn=0.03 skip=0 144img/s vram=3.4G eta=0.00h
+[   0.07m] step 10/20 ep1 loss=0.9349 recon=0.9347 lr=1.25e-04 gn=0.03 skip=0 156img/s vram=3.4G eta=0.00h
+[   0.08m] step 11/20 ep1 loss=0.8888 recon=0.8885 lr=1.09e-04 gn=0.03 skip=0 138img/s vram=3.4G eta=0.00h
+[   0.09m] step 12/20 ep1 loss=0.8663 recon=0.8660 lr=9.23e-05 gn=0.02 skip=0 147img/s vram=3.4G eta=0.00h
+[   0.09m] step 13/20 ep1 loss=0.8662 recon=0.8658 lr=7.61e-05 gn=0.02 skip=0 156img/s vram=3.4G eta=0.00h
+[   0.09m] step 14/20 ep1 loss=0.9377 recon=0.9375 lr=6.05e-05 gn=0.02 skip=0 163img/s vram=3.4G eta=0.00h
+[   0.09m] step 15/20 ep1 loss=0.9287 recon=0.9283 lr=4.61e-05 gn=0.03 skip=0 170img/s vram=3.4G eta=0.00h
+[   0.11m] step 16/20 ep1 loss=0.8624 recon=0.8621 lr=3.31e-05 gn=0.02 skip=0 156img/s vram=3.4G eta=0.00h
+[   0.11m] step 17/20 ep1 loss=0.9055 recon=0.9051 lr=2.20e-05 gn=0.02 skip=0 162img/s vram=3.4G eta=0.00h
+[   0.11m] step 18/20 ep1 loss=0.9181 recon=0.9177 lr=1.30e-05 gn=0.03 skip=0 168img/s vram=3.4G eta=0.00h
+[   0.12m] step 19/20 ep1 loss=0.9024 recon=0.9020 lr=6.39e-06 gn=0.02 skip=0 175img/s vram=3.4G eta=0.00h
+[   0.12m] step 20/20 ep1 loss=0.9494 recon=0.9491 lr=2.36e-06 gn=0.02 skip=0 181img/s vram=3.4G eta=0.00h
+[val] ep1 step20 l1=1.0170 psnr=11.75dB ssim=0.2548 (mean基线 11.74dB, patchDC基线 18.13dB)
+[done] steps=20 epochs=1 best_val_psnr=11.75 wall=0.2min
