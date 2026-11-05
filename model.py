@@ -226,7 +226,10 @@ class VLM8Budget(PreTrainedModel):
 
     config_class = VLM8BudgetConfig
     base_model_prefix = "vlm8b"
-    _tied_weights_keys: List[str] = ["lm.lm_head.weight"]
+    # transformers 5.x: `_tied_weights_keys` 是 dict{key: 源 key}，且会递归遍历子模块；
+    # `lm`（Qwen3_5ForConditionalGeneration）自己声明了 {'lm_head.weight': ...}，
+    # 这里留空 dict 让递归生效即可（写成 list 会让 save_pretrained 直接 AttributeError）。
+    _tied_weights_keys: Dict[str, str] = {}
 
     def __init__(self, config: VLM8BudgetConfig,
                  encoder: Optional[nn.Module] = None, lm: Optional[nn.Module] = None,
