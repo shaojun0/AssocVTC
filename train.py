@@ -17,6 +17,7 @@ E2–E3 全解冻（encoder 5e-6 / LLM 1e-5 / proj 1e-4），cosine + warmup 3%�
 """
 import argparse
 import json
+import math
 import os
 
 from torch.optim import AdamW
@@ -195,6 +196,16 @@ def main() -> None:
     train_dataset = SelfDistillSFTDataset(
         args.train_jsonl, tokenizer, args.image_root, build_image_transform(train=True))
 
+    # transformers 5.x 的 TrainingArguments 没有 warmup_ratio（只有 warmup_steps），
+    # 这里按 数据集/等效批 估总步数后换算；smoke 不设 warmup。
+    world_size = max(1, int(os.environ.get("WORLD_SIZE", "1")))
+    steps_per_epoch = math.ceil(
+        len(train_dataset) / (args.micro_batch_size * args.grad_accum * world_size))
+    total_steps = 2 if args.smoke else int(math.ceil(steps_per_epoch * args.epochs))
+    warmup_steps = 0 if args.smoke else max(1, int(round(total_steps * args.warmup_ratio)))
+    print(f"[vlm8b] dataset={len(train_dataset)} steps/epoch={steps_per_epoch} "
+          f"total_steps={total_steps} warmup_steps={warmup_steps}")
+
     model = VLM8Budget(VLM8BudgetConfig(
         encoder_ckpt=args.encoder_ckpt, qwen_dir=args.qwen_dir,
         budget_ids=budgets,
@@ -211,7 +222,7 @@ def main() -> None:
         learning_rate=args.lr_llm,           # 组 lr 由 param_groups 覆盖
         weight_decay=args.wd_llm,
         max_grad_norm=GRAD_CLIP,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         logging_steps=1 if args.smoke else LOGGING_STEPS,
         save_strategy="no" if args.smoke else "epoch",
