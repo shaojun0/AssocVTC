@@ -12,7 +12,8 @@ vlm8b — AssocVTC 448²/p32/960M 阶段2 编码器 → 8 预算并行 → Qwen3
       → vis (B,8,2560)                                                  [与 LM hidden 同维]
       → 每图展开 V 行: 行 k = [vis[:, :k] ; text_embeds]  (right-pad 到 max_k+T)
       → Qwen3.5-4B 文本主干（只喂 inputs_embeds, 不喂 pixel_values, 不走 vision tower）
-      → 只在 answer 位置取 hidden → lm_head → CE（fp32 分块）
+      → 只在 answer 的**预测位置**（= label 位置 − 1，行内再 +k）取 hidden
+        → lm_head → CE（fp32 分块）；标准因果 shift：position p 的 hidden 预测 label[p+1]
 
 关键裁决（`doc/2026-11-05/DESIGN_8budget_vlm_finetune.md` §4）:
 
@@ -219,8 +220,9 @@ class BudgetRows:
                         ``L = max_k + T``。
         attention_mask: (B*V, L) —— visual 前缀与真实文本为 1，padding 为 0。
         labels:         (B*V, L) —— visual 前缀 / padding / prompt 全 -100。
-        ans_pos:        (B*V, A) —— 每行 answer token 在行内的绝对位置；无效位 -1。
-        ans_targets:    (B*V, A) —— answer token id；无效位 -100。
+        ans_pos:        (B*V, A) —— 每行 **预测位置**（``k + label_pos - 1``）在行内的
+                        绝对下标（取 hidden 用）；无效位 -1。
+        ans_targets:    (B*V, A) —— 要预测的 answer token id；无效位 -100。
         budget_ks:      (V,) —— 本批实际的预算值（升序）。
         num_images:     B。
         num_budgets:    V。
@@ -276,6 +278,17 @@ def expand_budget_rows(
           mask=1        mask=text_mask      mask=0
           label=-100    label=labels        label=-100
 
+    **label 位置与预测位置差一位**（标准因果 LM 的 teacher forcing）：文本位置 ``p``
+    的 hidden 只能用来预测 ``label[p + 1]``。所以 answer 的第 j 个 token（文本位置
+    ``starts + j``）用的是文本位置 ``starts + j - 1`` 的 hidden，在行 k 里是::
+
+        ans_pos[k, j]     = k + (starts + j - 1)      # 取 hidden 的行内下标
+        ans_targets[k, j] = labels[starts + j]        # 被预测的 token id
+
+    第一个 answer token 的预测位置 = **prompt 最后一个 token**（``starts - 1``），
+    因此要求 ``starts >= 1``。若在这里用 answer 自身位置取 hidden，因果自注意力
+    能看见该 token 的 embedding ⇒ loss 可被"复制输入"压到 0（目标泄露）。
+
     Args:
         vis_embeds: (B, V_max, H)，`BudgetProjector` 的输出。
         text_embeds: (B, T, H)，文本（prompt+answer）embedding。
@@ -287,7 +300,8 @@ def expand_budget_rows(
         `BudgetRows`；行顺序 `b * len(budget_ks) + vi`。
 
     Raises:
-        ValueError: 形状/预算集合/answer 段不合法。
+        ValueError: 形状 / 预算集合 / answer 段不合法，或 answer 从文本第 0 位开始
+            （没有 prompt 末 token 可当第一个预测位置）。
     """
     if vis_embeds.dim() != 3 or text_embeds.dim() != 3:
         raise ValueError("vis_embeds / text_embeds 必须是 3 维")
@@ -327,14 +341,24 @@ def expand_budget_rows(
         row_labels[:, vi, k:k + T] = labels
 
     starts, counts = _answer_spans(labels)
+    if int(starts.min()) < 1:
+        raise ValueError(
+            "labels 的 answer 从文本第 0 个 token 开始（starts=0）：标准因果 shift "
+            "要求第一个 answer token 由**它前一个位置**（prompt 最后一个 token）的 "
+            "hidden 预测，position p 只能预测 label[p+1]。请检查 dataset 的 "
+            "prompt/answer 切分（prompt 至少要有 1 个 token）")
+
     A_max = int(counts.max())
     j = torch.arange(A_max, device=device).unsqueeze(0)                 # (1,A)
-    ans_pos_b = starts.unsqueeze(1) + j                                # (B,A)
+    label_pos_b = starts.unsqueeze(1) + j                              # (B,A) label 位置
     ans_valid = j < counts.unsqueeze(1)                                # (B,A)
-    ans_targets_b = labels.gather(1, ans_pos_b.clamp(min=0, max=T - 1))
+    ans_targets_b = labels.gather(1, label_pos_b.clamp(min=0, max=T - 1))
     ans_targets_b = ans_targets_b.masked_fill(~ans_valid, IGNORE_INDEX)
 
-    # (B,A) → (B,V,A)：预算 k 的 answer 整体后移 k 个 visual 前缀位置。
+    # 预测位置 = label 位置 − 1（标准 shift），再整体后移 k 个 visual 前缀位置。
+    # ⚠️ 千万不要写成 label 位置本身：那样 hidden[p] 已含 token p（因果自注意力
+    #    可见自己），loss 可被"复制输入"压到 0 —— 目标泄露。
+    ans_pos_b = label_pos_b - 1                                        # (B,A)
     ans_pos = ans_pos_b.unsqueeze(1) + torch.tensor(ks, device=device).view(1, V, 1)
     ans_pos = ans_pos.masked_fill(~ans_valid.unsqueeze(1), -1)
     ans_targets = ans_targets_b.unsqueeze(1).expand(B, V, A_max)
@@ -639,6 +663,34 @@ class VLM8Budget(PreTrainedModel):
             self.load_lm()
         return self.lm
 
+    # ─── 冻结 encoder 的模式保护（P1#2） ──────────────────────
+    def _encoder_is_frozen(self) -> bool:
+        """encoder 是否完全冻结（所有参数 `requires_grad=False`）。
+
+        优先用 `AssocVTCEncoder.is_frozen`；替身 encoder（smoke）没有该属性时，
+        退回按参数判断，保证逻辑只有一处口径。
+        """
+        encoder = self.encoder
+        if encoder is None:
+            return False
+        frozen = getattr(encoder, "is_frozen", None)
+        if isinstance(frozen, bool):
+            return frozen
+        return not any(p.requires_grad for p in encoder.parameters())
+
+    def _keep_frozen_encoder_in_eval(self) -> None:
+        """幂等保护：已冻结的 encoder 不能被拉回 train 模式（dropout 必须关）。
+
+        为什么需要：`Trainer` 在 `_inner_training_loop` / 每个 epoch 都会调
+        `model.train()`，该调用会**递归**把所有子模块切到 train（含 encoder）。
+        `VLM8Budget.train()` 已经兜了一层，但直接 `self.encoder.train()`、
+        或子模块被别的代码切模式时仍会漏；这里在每个 forward 入口再兜一次。
+        只读属性 + 条件切换 ⇒ 成本可忽略、重复调用无副作用。
+        """
+        encoder = self.encoder
+        if encoder is not None and encoder.training and self._encoder_is_frozen():
+            encoder.eval()
+
     # ─── 预算 / loss 权重 ─────────────────────────────────────
     def _resolve_budget_ids(self, budget_ids: Optional[object]) -> List[int]:
         """把 None / list / Tensor / 逗号串统一成升序 int 列表。"""
@@ -710,6 +762,7 @@ class VLM8Budget(PreTrainedModel):
                 "纯生成请用 generate_budget()")
         encoder = self._ensure_encoder()
         lm = self._ensure_lm()
+        self._keep_frozen_encoder_in_eval()
 
         param_dtype = next(encoder.parameters()).dtype
         pixel_values = pixel_values.to(dtype=param_dtype)
@@ -742,6 +795,7 @@ class VLM8Budget(PreTrainedModel):
             dict：同 `forward`。
         """
         lm = self._ensure_lm()
+        self._keep_frozen_encoder_in_eval()
         outputs = lm.model(
             inputs_embeds=rows.embeds,
             attention_mask=rows.attention_mask,
@@ -751,7 +805,9 @@ class VLM8Budget(PreTrainedModel):
         R, L, H = hidden.shape
         A = rows.ans_pos.size(1)
 
-        # 只 gather answer 位置（不 materialize 全序列 vocab logits）。
+        # 只 gather answer 的**预测位置**（不 materialize 全序列 vocab logits）。
+        # `rows.ans_pos` 已是 `k + label_pos - 1`（expand_budget_rows 负责 shift），
+        # 所以 hidden[p] 与 targets=labels[p+1] 构成标准因果 teacher forcing。
         safe_pos = rows.ans_pos.clamp(min=0)
         row_index = torch.arange(R, device=hidden.device).unsqueeze(1)
         flat_index = (row_index * L + safe_pos).reshape(-1)
@@ -839,6 +895,7 @@ class VLM8Budget(PreTrainedModel):
         """
         lm = self._ensure_lm()
         encoder = self._ensure_encoder()
+        self._keep_frozen_encoder_in_eval()
         dtype = next(encoder.parameters()).dtype
         pixel_values = pixel_values.to(dtype=dtype)
 
@@ -874,11 +931,15 @@ class VLM8Budget(PreTrainedModel):
 
     # ─── 训练模式：冻结的 encoder 始终留在 eval ────────────────
     def train(self, mode: bool = True) -> "VLM8Budget":
-        """`model.train()` 时不把已冻结的 encoder 切回 train（确定性）。"""
+        """`model.train()` 时不把已冻结的 encoder 切回 train（确定性）。
+
+        `super().train(mode)` 会递归把 encoder 也切到 train；这里在递归之后把它
+        恢复成 eval。`forward` / `forward_rows` 入口还有 `_keep_frozen_encoder_in_eval`
+        再兜一次（幂等），因此 E1 冻结期的 dropout 一定关闭。
+        """
         super().train(mode)
-        if self.encoder is not None and not any(
-                p.requires_grad for p in self.encoder.parameters()):
-            self.encoder.eval()
+        if mode:
+            self._keep_frozen_encoder_in_eval()
         return self
 
 

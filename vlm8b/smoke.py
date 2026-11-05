@@ -6,15 +6,21 @@ vlm8b 本机自检（纯 CPU / 无 Qwen / 无 GPU）
 
   1. 投影头形状：z_s (B,32,1744) → vis (B,8,2560)；N(0,0.02) 初始化。
   2. 8 行展开：行 k = [vis[:, :k]; text]，right-pad 到 max_k+T；
-     labels 只在 answer 非 -100；answer 位置随 k 平移。
+     labels 只在 answer 非 -100；**预测位置** = label 位置随 k 平移 + 标准 shift（−1）。
   3. collator：图片 batch 的 right-padding / labels 填充 / gt_name 透传。
   4. 四个不变量（设计 §7.2）：
        ① 行独立：单图单跑 vs 混批，per-budget CE 差 < 1e-4；
        ② 截断隔离：改 z_s 第 5 个 token 不影响 k=1（只影响 k≥2）；
        ③ pad 隔离：把 padding 位置 embedding 换成随机值，loss 不变；
-       ④ 预算单调结构：行长度随 k 严格 +1、前缀嵌套、answer 位置单调平移。
-  5. CE 遮蔽：answer-only gather CE 与"整序列 CE + ignore_index"逐位一致；
-     loss = Σ w_k·CE_k（equal / inv-k）；反向能到 projector 与 encoder。
+       ④ 预算单调结构：行长度随 k 严格 +1、前缀嵌套、预测位置单调平移。
+  5. CE 口径（**非循环**，P0 修复后）：
+       · 标准因果 shift：`F.cross_entropy(logits[:, :-1], labels[:, 1:])` 按行平均，
+         `forward_rows()` 的 `row_ce` 必须与它 max|Δ| ≤ 1e-5；
+       · 结构断言：逐行逐元素 `ans_pos == label_pos - 1 + k`；
+       · leak 回归：故意用 label 位置本身（no-shift，错误口径）gather 的 CE 必须与
+         正确 CE 不同（|Δ| > 1e-6），防止以后退回目标泄露。
+  6. 冻结 encoder 保护（P1#2）+ Trainer 默认不 eval（P1#1）的冒烟。
+  7. loss = Σ w_k·CE_k（equal / inv-k）；反向能到 projector 与 encoder。
 
 用法::
 
@@ -308,6 +314,33 @@ def build_model() -> VLM8Budget:
     return model
 
 
+def _row_ce_from_pos(model: VLM8Budget, rows, pos: torch.Tensor) -> torch.Tensor:
+    """按**给定的行内位置** gather hidden → lm_head → fp32 CE → 每行平均。
+
+    与 `VLM8Budget.forward_rows()` 同口径（分块 fp32 CE），只是位置可以换：
+    正确位置 = `rows.ans_pos`；错误位置 = `rows.ans_pos + 1`（no-shift 反例）。
+    """
+    hidden = model.lm.model(
+        inputs_embeds=rows.embeds,
+        attention_mask=rows.attention_mask).last_hidden_state
+    row_count, length = hidden.shape[0], hidden.shape[1]
+    hidden_size = hidden.shape[2]
+    flat_index = ((torch.arange(row_count).unsqueeze(1) * length
+                   + pos.clamp(min=0)).reshape(-1))
+    gathered = hidden.reshape(row_count * length, hidden_size).index_select(
+        0, flat_index)                                        # (R*A, H)
+    targets = rows.ans_targets.reshape(-1)
+    ce = torch.zeros(flat_index.numel(), dtype=torch.float32)
+    for start in range(0, flat_index.numel(), 64):
+        stop = min(start + 64, flat_index.numel())
+        logits = model.lm.lm_head(gathered[start:stop]).float()
+        ce[start:stop] = F.cross_entropy(
+            logits, targets[start:stop],
+            reduction="none", ignore_index=IGNORE_INDEX)
+    counts = (rows.ans_targets != IGNORE_INDEX).sum(dim=1).clamp(min=1)
+    return ce.reshape(row_count, pos.size(1)).sum(dim=1) / counts.to(ce.dtype)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 各检查组
 # ═══════════════════════════════════════════════════════════════
@@ -383,13 +416,15 @@ def check_rows(checker: Checker, model: VLM8Budget, batch: dict):
                   bool(torch.equal(rows.embeds[row_k1, 1:1 + TEXT_LEN],
                                    rows.embeds[row_k2, 2:2 + TEXT_LEN])))
 
-    # answer 位置：图 0 的 k=1 → 14..17；图 1 的 k=8 → 18..20；无效位 -1。
-    checker.check("ans_pos: image0 k=1 = [14,15,16,17]",
-                  rows.ans_pos[row_k1].tolist() == [14, 15, 16, 17],
+    # 预测位置（= label 位置 − 1 + k）：图 0 的 k=1 → 13..16；图 1 的 k=8 → 17..19；
+    # 无效位 -1。数据：图 0 answer 在文本 13..16（prompt 12 个 token），
+    # 图 1 answer 在文本 10..12（prompt 9 个 token，文本 right-pad 4 个）。
+    checker.check("ans_pos (predict pos): image0 k=1 = [13,14,15,16]",
+                  rows.ans_pos[row_k1].tolist() == [13, 14, 15, 16],
                   str(rows.ans_pos[row_k1].tolist()))
     image1_k8 = 1 * rows_per_image + 7
-    checker.check("ans_pos: image1 k=8 has 3 valid + 1 invalid (-1)",
-                  rows.ans_pos[image1_k8].tolist() == [18, 19, 20, -1],
+    checker.check("ans_pos (predict pos): image1 k=8 has 3 valid + 1 invalid (-1)",
+                  rows.ans_pos[image1_k8].tolist() == [17, 18, 19, -1],
                   str(rows.ans_pos[image1_k8].tolist()))
     checker.check("ans_targets: invalid slot is -100",
                   rows.ans_targets[image1_k8].tolist()[-1] == IGNORE_INDEX)
@@ -535,7 +570,13 @@ def check_forward_and_loss(checker: Checker, model: VLM8Budget, batch: dict):
                   out_custom["loss"], out_custom["per_budget_ce"][0], 1e-6)
     model.set_loss_weighting("equal")
 
-    # CE 遮蔽：gather 版 row CE == 整序列 CE + ignore_index。
+    # ── CE 口径（**非循环**，P0 修复后） ─────────────────────────
+    # 标准因果 LM 的 teacher forcing：position p 的 hidden 预测 label[p+1]。
+    # 所以参考值**不能**再用 gather 自己的 hidden 算（那是循环验证），而要用
+    # 全序列 logits 的 shift 口径：
+    #     F.cross_entropy(logits[:, :-1].reshape(-1,V), labels[:, 1:].reshape(-1),
+    #                     ignore_index=-100)
+    # 再按行平均（只对 answer 的 label 生效；prompt/pad 由 ignore_index 处理）。
     rows = expand_budget_rows(
         model.projector(torch.randn(BATCH, NUM_SPECIALS, ENC_DIM)),
         model.lm.get_input_embeddings()(batch["input_ids"]),
@@ -544,14 +585,85 @@ def check_forward_and_loss(checker: Checker, model: VLM8Budget, batch: dict):
     hidden = model.lm.model(
         inputs_embeds=rows.embeds,
         attention_mask=rows.attention_mask).last_hidden_state
-    logits = model.lm.lm_head(hidden)                        # (R,L,V)
+    logits = model.lm.lm_head(hidden).float()                # (R,L,VOCAB) fp32
+    row_count = hidden.size(0)
+    shifted_logits = logits[:, :-1].reshape(-1, VOCAB)
+    shifted_labels = rows.labels[:, 1:].reshape(-1)
     per_token = F.cross_entropy(
-        logits.reshape(-1, VOCAB), rows.labels.reshape(-1),
-        reduction="none", ignore_index=IGNORE_INDEX).reshape(hidden.size(0), -1)
-    counts = (rows.labels != IGNORE_INDEX).sum(dim=1).clamp(min=1)
+        shifted_logits, shifted_labels,
+        reduction="none", ignore_index=IGNORE_INDEX).reshape(row_count, -1)
+    counts = (rows.labels[:, 1:] != IGNORE_INDEX).sum(dim=1).clamp(min=1)
     reference = per_token.sum(dim=1) / counts
-    checker.close("answer-only gather CE == full-sequence CE (ignore -100)",
-                  out_rows["row_ce"], reference, 1e-6)
+    n_ref = int((rows.labels[:, 1:] != IGNORE_INDEX).sum())
+    checker.check(
+        "standard shift reference covers all answer tokens (labels[:, 1:])",
+        n_ref == int((rows.ans_targets != IGNORE_INDEX).sum()),
+        f"{n_ref} supervised positions")
+    checker.close(
+        "row_ce == standard causal shift CE (logits[:-1] vs labels[1:])",
+        out_rows["row_ce"], reference, 1e-5)
+
+    # 结构断言 ①：逐行逐元素 ans_pos == label_pos - 1 + k。两种等价写法都验：
+    #   · 文本坐标：label_pos(text) = answer 在 batch labels 里的位置 ⇒ + k 进行坐标；
+    #   · 行坐标  ：label_pos(row) = rows.labels 里非 -100 的位置（已含 +k）
+    #               ⇒ 预测位置 = label_pos(row) - 1。
+    # 两者相等即 `ans_pos == k + (label_pos_text - 1)`，也就是标准 shift 的错位。
+    text_label_positions = [
+        (labels_row != IGNORE_INDEX).nonzero(as_tuple=False).flatten()
+        for labels_row in batch["labels"]]
+    budget_ks = rows.budget_ks.tolist()
+    structural_ok = True
+    n_slots = 0
+    n_bad = 0
+    #: no-shift 反例用的位置：**label 位置本身**（从 rows.labels 反解，与 ans_pos 无关）。
+    leak_pos = torch.full_like(rows.ans_pos, -1)
+    for row in range(row_count):
+        image_index = row // rows.num_budgets
+        k = int(budget_ks[row % rows.num_budgets])
+        valid_slots = rows.ans_pos[row] >= 0
+        got_pos = rows.ans_pos[row][valid_slots]
+        n_slots += int(got_pos.numel())
+
+        text_pos = text_label_positions[image_index].to(got_pos.device)
+        row_pos = (rows.labels[row] != IGNORE_INDEX).nonzero(
+            as_tuple=False).flatten()
+        leak_pos[row, :row_pos.numel()] = row_pos
+        expected_from_text = text_pos - 1 + k
+        if (got_pos.numel() != expected_from_text.numel()
+                or not torch.equal(got_pos, expected_from_text)):
+            structural_ok = False
+            n_bad += 1
+        if not torch.equal(got_pos, row_pos - 1):
+            structural_ok = False
+            n_bad += 1
+        if not torch.equal(rows.ans_targets[row][valid_slots],
+                           rows.labels[row][row_pos]):
+            structural_ok = False
+            n_bad += 1
+        if not torch.equal(
+                rows.ans_targets[row][valid_slots],
+                batch["labels"][image_index][
+                    text_label_positions[image_index]].to(got_pos.device)):
+            structural_ok = False
+            n_bad += 1
+    checker.check(
+        "structural: ans_pos == label_pos - 1 + k (per row/element)",
+        structural_ok,
+        f"checked {n_slots} slots over {row_count} rows, bad={n_bad}")
+
+    # leak 回归 ②：no-shift（错误口径）= 在 **label 位置本身** gather 算 CE。
+    # 位置从 `rows.labels` 反解，**不依赖 `rows.ans_pos`** —— 所以如果谁把
+    # `expand_budget_rows` 的 shift 改回去，`row_ce` 就会等于这里的 `leak_ce`，
+    # 本检查（以及上面的标准 shift 等价检查）同时 FAIL。
+    leak_ce = _row_ce_from_pos(model, rows, leak_pos)
+    leak_delta = (leak_ce - out_rows["row_ce"]).abs()
+    checker.check(
+        "leak-regression: no-shift CE differs from correct shift CE",
+        bool(float(leak_delta.min()) > 1e-6),
+        f"min|Δ|={float(leak_delta.min()):.3e} "
+        f"max|Δ|={float(leak_delta.max()):.3e} "
+        f"(mean shift CE={float(out_rows['row_ce'].mean()):.4f}, "
+        f"mean no-shift CE={float(leak_ce.mean()):.4f})")
 
     # 反传：梯度应到达 projector 与 encoder。
     model.zero_grad(set_to_none=True)
@@ -659,6 +771,138 @@ def check_invariants(checker: Checker, model: VLM8Budget, batch: dict):
                                    rows.embeds[1, 2:2 + TEXT_LEN])))
 
 
+def check_frozen_encoder_guard(checker: Checker, batch: dict) -> None:
+    """⑥ P1#2：冻结的 encoder 不会被拉回 train 模式（forward 入口幂等保护）。"""
+    model = build_model()
+    encoder = model.encoder
+    encoder.eval()
+    for param in encoder.parameters():
+        param.requires_grad_(False)
+
+    # ① `model.train()` 不会把冻结的 encoder 切回 train（train() 覆写）。
+    model.train()
+    checker.check("frozen encoder: model.train() keeps encoder in eval mode",
+                  encoder.training is False and model.training is True)
+
+    # ② 有人硬把 encoder.train() 切回 train，forward 入口的幂等保护要兜住。
+    encoder.train()
+    checker.check("frozen encoder: manual encoder.train() flips it (setup)",
+                  encoder.training is True)
+    with torch.no_grad():
+        model(**batch)
+    checker.check("frozen encoder: forward() restores eval (idempotent guard)",
+                  encoder.training is False)
+    with torch.no_grad():
+        model(**batch)                     # 再跑一次，保护必须幂等
+    checker.check("frozen encoder: guard is idempotent (2nd forward)",
+                  encoder.training is False)
+
+    # ③ 冻结期 backward 不应该给 encoder 参数留梯度。
+    model.zero_grad(set_to_none=True)
+    out = model(**batch)
+    out["loss"].backward()
+    checker.check("frozen encoder: no grad on frozen encoder after backward",
+                  all(param.grad is None for param in encoder.parameters()))
+    model.pop_budget_ce_stats()            # 丢掉本检查累积的统计
+    model.zero_grad(set_to_none=True)
+
+
+class _ListDataset(torch.utils.data.Dataset):
+    """把已构造好的样本 dict 列表包成 Dataset（Trainer 冒烟用）。"""
+
+    def __init__(self, items: list):
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> dict:
+        return self.items[index]
+
+
+def check_trainer_no_eval(checker: Checker, batch: dict) -> None:
+    """⑦ P1#1：Trainer 默认路径（`eval_strategy="no"` + 无 eval_dataset）可训练。
+
+    `VLM8Budget.forward()` 只返回 loss / CE，**不返回 `logits`**，HF
+    `prediction_step` 取不到 logits（会崩或给出无意义指标）⇒ Trainer 内不做 eval，
+    评测交给 `eval.py`。这里用微型替身跑 1 步真实 `Trainer.train()`：
+
+    * 结构上确认 `eval_strategy="no"` 且 `eval_dataset is None`（不触发 prediction_step）；
+    * 训练循环里 `model.train()` 之后冻结的 encoder 仍然是 eval（P1#2 与 Trainer 的
+      交互也一并验证）。
+
+    只有 **import / `TrainingArguments` 构造**（纯环境 API）失败才 SKIP；
+    `trainer.train()` 本身抛错必须让 smoke FAIL（那正是 P1#1 要防的"会崩的默认路径"）。
+    """
+    temp_dir = tempfile.mkdtemp(prefix="vlm8b_trainer_")
+    try:
+        try:
+            from transformers import TrainingArguments
+            try:
+                import train as train_module
+            except ImportError:             # `python -m vlm8b.smoke` 包内导入
+                from . import train as train_module
+            training_args = TrainingArguments(
+                output_dir=temp_dir,
+                num_train_epochs=1,
+                per_device_train_batch_size=1,
+                gradient_accumulation_steps=1,
+                learning_rate=1e-5,
+                logging_steps=1,
+                save_strategy="no",
+                eval_strategy=train_module.TRAINER_EVAL_STRATEGY,
+                bf16=False,
+                fp16=False,
+                report_to=[],
+                remove_unused_columns=False,
+                max_steps=1,
+                use_cpu=True,
+                disable_tqdm=True,
+            )
+        except Exception as exc:            # noqa: BLE001 - 环境不支持则 SKIP
+            print(f"[SKIP] trainer no-eval smoke (env unsupported: "
+                  f"{type(exc).__name__}: {exc})")
+            return
+
+        model = build_model()
+        encoder = model.encoder
+        encoder.eval()
+        for param in encoder.parameters():
+            param.requires_grad_(False)        # E1：冻结期
+
+        items = []
+        for index in range(batch["pixel_values"].size(0)):
+            items.append({
+                key: (value[index] if torch.is_tensor(value) else value[index])
+                for key, value in batch.items()})
+
+        trainer = train_module.VLM8BudgetTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=_ListDataset(items),
+            eval_dataset=None,
+            data_collator=EightBudgetCollator(_FakeTokenizer()),
+            param_groups=train_module.build_param_groups(
+                model, lr_llm=1e-5, lr_proj=1e-4, lr_encoder=5e-6,
+                wd_llm=0.1, wd_other=0.05),
+        )
+        trainer.train()
+        checker.check(
+            "trainer default path: eval_strategy='no' + no eval_dataset",
+            str(training_args.eval_strategy).lower().endswith("no")
+            and trainer.eval_dataset is None,
+            f"eval_strategy={training_args.eval_strategy}")
+        checker.check(
+            "trainer default path: 1-step train() ran without prediction_step",
+            int(trainer.state.global_step) == 1
+            and trainer.state.log_history != [])
+        checker.check(
+            "trainer + frozen encoder: encoder still eval after train()",
+            encoder.training is False)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def check_encoder_ckpt(path: str) -> bool:
     """（可选 --full）从阶段2 ckpt 构造编码器，验证 z_s 形状。"""
     config = VLM8BudgetConfig(
@@ -709,6 +953,8 @@ def main() -> int:
         check_dataset(checker)
         check_forward_and_loss(checker, model, batch)
         check_invariants(checker, model, batch)
+        check_frozen_encoder_guard(checker, batch)
+        check_trainer_no_eval(checker, batch)
     except Exception:                           # noqa: BLE001 - 自检需要打印完整栈
         traceback.print_exc()
         checker.check("unexpected exception", False)

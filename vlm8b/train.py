@@ -30,6 +30,10 @@ vlm8b 训练入口 — HF Trainer + DeepSpeed ZeRO-3（2×A800）
         --val-jsonl   .../val_nothink_all.jsonl
 
 先用 `--smoke`（= `--max-steps 2`）确认能跑通再长跑。
+
+**Trainer 内不做 eval**（`forward` 不返回 `logits`，`prediction_step` 无法工作）：
+`eval_strategy` 恒为 `"no"`、不传 `eval_dataset`；每 epoch 的 ckpt 由
+`--save-strategy epoch` 存下，训练结束后用 `eval.py` 评测（README §4.4 / §11）。
 """
 
 import json
@@ -92,6 +96,14 @@ DEFAULT_BUDGET_SET = "1,2,3,4,5,6,7,8"
 DEFAULT_SEED = 42
 DEFAULT_MAX_TEXT_LENGTH = 1024
 
+#: Trainer 内**不做** eval（P1#1）。原因：`VLM8Budget.forward()` 只返回
+#: loss / per-budget CE，**不返回 `logits`**，HF `prediction_step` 取不到 logits
+#: （要么崩、要么产出无意义指标）。评测统一走 `eval.py`；训练中每 epoch 的 ckpt
+#: 由 `save_strategy="epoch"` 存下，训练结束后再跑 eval。
+#: `smoke.py::check_trainer_no_eval` 用微型替身跑 1 步 `Trainer.train()` 验证
+#: 这条默认路径不碰 `prediction_step`。
+TRAINER_EVAL_STRATEGY: str = "no"
+
 
 # ═══════════════════════════════════════════════════════════════
 # CLI
@@ -116,7 +128,9 @@ def parse_args():
     paths.add_argument("--image-root", default=DEFAULT_IMAGE_ROOT,
                        help="IN-100 图片根目录")
     paths.add_argument("--train-jsonl", default=DEFAULT_TRAIN_JSONL)
-    paths.add_argument("--val-jsonl", default=DEFAULT_VAL_JSONL)
+    paths.add_argument("--val-jsonl", default=DEFAULT_VAL_JSONL,
+                       help="【deprecated，忽略】Trainer 内不做 eval，本参数不读；"
+                            "只保留给旧启动脚本，评测用 eval.py --jsonl")
     paths.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     paths.add_argument("--deepspeed", default=DEFAULT_DEEPSPEED,
                        help="DeepSpeed json；传空串可关闭（单卡调试）")
@@ -137,7 +151,9 @@ def parse_args():
     data.add_argument("--train-limit", type=int, default=0,
                       help="只用前 N 条训练（0=全部；smoke 用）")
     data.add_argument("--eval-limit", type=int, default=0,
-                      help=">0 时启用 Trainer 的每 epoch 快评（取前 N 条 val）")
+                      help="【deprecated，忽略】原为 Trainer 每 epoch 快评取前 N 条 "
+                           "val；forward 不返回 logits，Trainer 内 eval 已关闭。"
+                           "评测请用 eval.py --limit")
 
     # ── 训练 ──
     train = parser.add_argument_group("training")
@@ -368,9 +384,12 @@ def main() -> None:
         if args.max_steps <= 0:
             args.max_steps = 2
         args.save_strategy = "no"
-        args.eval_limit = 0
         args.logging_steps = 1
         print("[vlm8b] smoke mode: max_steps=2, save_strategy=no")
+    if args.eval_limit > 0:
+        print("[vlm8b] warning: --eval-limit 已废弃且被忽略"
+              "（forward 不返回 logits，Trainer 内不做 eval）；"
+              "请在训练结束后用 eval.py --limit 评测")
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.makedirs(args.output_dir, exist_ok=True)
@@ -385,14 +404,10 @@ def main() -> None:
         args.train_jsonl, tokenizer, args.image_root, train=True,
         messages_key=args.messages_key, max_text_length=args.max_text_length,
         limit=args.train_limit, augment=args.train_transform == "rrc")
-    eval_dataset = None
-    if args.eval_limit > 0:
-        eval_dataset = build_dataset(
-            args.val_jsonl, tokenizer, args.image_root, train=False,
-            messages_key=args.messages_key,
-            max_text_length=args.max_text_length, limit=args.eval_limit)
-    print(f"[vlm8b] train={len(train_dataset)}  eval="
-          f"{len(eval_dataset) if eval_dataset is not None else 0}")
+    # Trainer 内不 eval（P1#1）：不构造 val 数据集、不传 eval_dataset，
+    # 因此 HF 永远不会走 prediction_step（它需要 forward 返回 logits）。
+    print(f"[vlm8b] train={len(train_dataset)}  "
+          f"eval=0 (Trainer 内不 eval；评测走 eval.py)")
 
     config = VLM8BudgetConfig(
         encoder_ckpt=args.encoder_ckpt,
@@ -418,12 +433,10 @@ def main() -> None:
         wd_other=args.wd_other)
 
     collator = EightBudgetCollator(tokenizer)
-    use_eval = eval_dataset is not None and args.eval_limit > 0
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.micro_batch_size,
-        per_device_eval_batch_size=args.micro_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr_llm,          # 组 lr 由 param_groups 覆盖
         weight_decay=args.wd_llm,
@@ -435,7 +448,9 @@ def main() -> None:
         save_strategy=args.save_strategy,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
-        eval_strategy="epoch" if use_eval else "no",
+        # ↓ Trainer 内不做 eval（P1#1）：forward 不返回 logits，
+        #   prediction_step 无法工作 ⇒ 固定 "no"，评测交给 eval.py。
+        eval_strategy=TRAINER_EVAL_STRATEGY,
         bf16=True,
         fp16=False,
         gradient_checkpointing=False,       # model.py 里手动对 Qwen 开
@@ -454,7 +469,6 @@ def main() -> None:
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         data_collator=collator,
         param_groups=param_groups,
         callbacks=[

@@ -1,9 +1,14 @@
 # vlm8b — AssocVTC 448²/p32/960M 阶段2编码器 → 8 预算并行 → Qwen3.5-4B 全参微调
 
-> **当前状态（2026-11-05）：仅本地逻辑自检通过**——`cd vlm8b && python3 smoke.py`
-> 在 torch 2.8 CPU 上 **55/55 PASS**；**尚未在 GPU / Qwen3.5-4B 上跑过**（本机无
-> transformers 5.22 / 无 4B 权重 / 无空闲 GPU）。所有 remote 命令按设计文档写就，
-> 第一次真机运行请先走 `--smoke`。
+> **当前状态（2026-11-05，含 review 修复提交）：仅本地逻辑自检通过**——
+> `cd vlm8b && python3 smoke.py` 在 torch 2.8 CPU 上 **66/66 PASS**；
+> **尚未在 GPU / Qwen3.5-4B / ZeRO-3 上跑过**（本机无 transformers 5.22 / 无 4B
+> 权重 / 无空闲 GPU）。所有 remote 命令按设计文档写就，第一次真机运行请先走 `--smoke`。
+>
+> 本次修复（详见 §11）：**P0 answer 位置差一位（目标泄露）** —— 预测位置改为
+> 标准因果 shift `ans_pos = k + (label_pos − 1)`；**P1#1** Trainer 内不再 eval
+> （`forward` 不返回 `logits`，`prediction_step` 无法工作）；**P1#2** 冻结 encoder
+> 在 `forward` 入口的幂等 `eval()` 保护。
 
 一句话：把 AssocVTC 阶段2 的 `z_s (32×1744)` 投成 **8 个 2560 维 visual token**，
 同一张图一次前向展开 **8 行**（行 k 只用前 k 个 token）去预测**同一段文本**，
@@ -36,10 +41,10 @@ vis (B,8,2560)                                  与 Qwen LM hidden 同维
 rows (B·V, 8+T, 2560)                           右侧补零到 max_k+T；2D right-padding mask
    │
    ▼  Qwen3.5-4B 文本主干（只喂 inputs_embeds，不喂 pixel_values，vision tower 已删）
-hidden (B·V, 8+T, 2560)                         只 gather answer 位置
+hidden (B·V, 8+T, 2560)                         只 gather answer 的**预测位置**（label−1）
    │
    ▼  lm_head（分块）
-logits (B·V, A_max, 248320)                     A≈4（nothink）/ 58（think）
+logits (B·V, A_max, 248320)                     标准因果 shift：hidden[p] 预测 label[p+1]
    │
    ▼  CE（fp32 分块）→ 行 CE → 每预算 CE → loss = Σ_k w_k·CE_k
 loss
@@ -57,11 +62,12 @@ loss
 | `rows.embeds` | `(B·V, 8+T, 2560)` | 行 k = `[vis[:,:k]; text]`，右侧补 `8-k` 个零 |
 | `rows.labels` | `(B·V, 8+T)` | visual 前缀 / padding / prompt 全 `-100` |
 | `hidden` | `(B·V, 8+T, 2560)` | `lm.model(inputs_embeds=..., attention_mask=2D)` |
-| `logits` | `(B·V, A_max, 248320)` | 只对 answer 位置调 `lm_head`（分块 64 位置） |
+| `rows.ans_pos` | `(B·V, A_max)` | **预测位置** `k + (label_pos − 1)`；无效位 `-1` |
+| `logits` | `(B·V, A_max, 248320)` | 只对 answer 的**预测位置**调 `lm_head`（分块 64 位置） |
 | `loss` | 标量 | 8 行 CE 的 `Σ w_k·CE_k`；`equal` 或 `inv-k` |
 
 `T` = prompt + answer 的文本长度（nothink 实测 ~112，think ~578）；`A` = answer 长度
-（nothink 4，think 58）；`V` = 预算数（默认 8）。
+（nothink 4，think 58，`logits` 的 A 轴按批内最长 answer 对齐）；`V` = 预算数（默认 8）。
 
 ---
 
@@ -87,8 +93,14 @@ loss
 - **防泄露 = 截断（行 k 只含 `vis[:, :k]`）+ padding mask**，不靠 mask 遮 visual。
   `smoke.py` 的 `invariant 2b` 专门验证：改 `z_s` 第 5 个 token 不影响 k=1。
 - **`position_ids` 不传**：Qwen3.5 文本 forward 默认 `arange(0..L-1)`，与 mask 无关。
-- **answer-only logits**：`lm.model(...)` 出 hidden → gather answer 位置 → `lm_head` →
-  分块 CE（`CE_CHUNK_SIZE=64`），不 materialize 全序列 vocab logits。
+- **answer-only logits**：`lm.model(...)` 出 hidden → gather answer 的**预测位置**
+  → `lm_head` → 分块 CE（`CE_CHUNK_SIZE=64`），不 materialize 全序列 vocab logits。
+- **标准因果 shift（P0 修复）**：`labels = input_ids`、prompt 全 `-100`，position `p`
+  的 hidden 只能预测 `label[p+1]` ⇒ 取 hidden 的位置是
+  `ans_pos = k + (label_pos − 1)`，targets 仍是 `labels[label_pos]`。用 answer 自身
+  位置取 hidden 会让 hidden 看见该 token 的 embedding（目标泄露，loss 可被"复制输入"
+  压到 0）。`smoke.py` 用**非循环**参考（`logits[:, :-1]` vs `labels[:, 1:]`）+
+  leak 回归断言双向锁死这个语义。
 
 ### 2.3 训练协议（§5）
 
@@ -101,7 +113,7 @@ loss
 | 批次 | micro 2 img/GPU（16 行）× accum 8 × 2 GPU = 32 img/step | `--micro-batch-size/--grad-accum` |
 | 精度 | bf16 参数/激活 + fp32 master（ZeRO 默认） | `ds_zero3.json` |
 | grad ckpt | 开（`use_reentrant=False`） | `VLM8Budget.enable_gradient_checkpointing` |
-| 冻结 | E1 encoder `requires_grad=False`；E2–E3 全解冻 | `EncoderFreezeCallback` |
+| 冻结 | E1 encoder `requires_grad=False`；E2–E3 全解冻；`forward` 入口幂等 `eval()` 兜底 | `EncoderFreezeCallback` + `VLM8Budget._keep_frozen_encoder_in_eval` |
 | 日志 | 每 20 步 loss / 8 个 per-budget CE / lr / gnorm → JSONL | `BudgetCELogCallback` |
 | ckpt | 只存 best/last 的 bf16 权重（不存 optimizer） | `save_only_model=True` + `stage3_gather_16bit_weights_on_model_save` |
 
@@ -143,14 +155,23 @@ val `Resize(512, BICUBIC)+CenterCrop(448)`；`Normalize` 用
 ```bash
 cd /home/linaro/dsh/AssocVTC/vlm8b
 python3 -m py_compile *.py
-python3 smoke.py            # = --logic-only；55/55 PASS 时 rc=0
+python3 smoke.py            # = --logic-only；66/66 PASS 时 rc=0
 ```
 
 期望结尾：
 
 ```
-PASS 55 / FAIL 0  (total 55)
+PASS 66 / FAIL 0  (total 66)
 RESULT: PASS
+```
+
+其中与本次修复直接相关的 4 行（应逐字出现）：
+
+```
+[PASS] row_ce == standard causal shift CE (logits[:-1] vs labels[1:])  (max|Δ|=...)
+[PASS] structural: ans_pos == label_pos - 1 + k (per row/element)  (checked ... slots ...)
+[PASS] leak-regression: no-shift CE differs from correct shift CE  (min|Δ|=...)
+[PASS] trainer default path: eval_strategy='no' + no eval_dataset
 ```
 
 `--full --encoder-ckpt <ckpt>` 会额外做一次真实编码器的 `z_s` 形状检查（本机无 ckpt
@@ -183,6 +204,10 @@ cd /root/autodl-tmp/exp448/code/AssocVTC        # 仓库根（含 vlm8b/）
 
 - 日志：`<output>/per_budget_ce.jsonl`（每 20 步一条，含 8 个 CE）
 - 产物：`<output>/final/`（HF 目录：`config.json` + `model.safetensors`，≥10G 级）
+- **训练中不做 eval**（P1#1）：`forward` 不返回 `logits`，HF `prediction_step` 无法工作，
+  因此 `eval_strategy` 恒为 `"no"`、不传 `eval_dataset`；`--eval-limit` / `--val-jsonl`
+  已标 deprecated（保留只为兼容旧启动脚本，**不生效**）。每 epoch 的 ckpt 由
+  `--save-strategy epoch` 存下，训练结束后统一跑 §4.4 的 `eval.py`。
 - 断点：只存模型、不存 optimizer（设计 §5），因此 `--resume-from-checkpoint` 只恢复权重语义
 
 ### 4.4 评测
@@ -225,7 +250,7 @@ greedy 生成逐行做（right-padding 下整批 generate 会把 pad 当上下�
 | 6. 超参 | 设计 §5 | `--lr-llm --lr-proj --lr-encoder --wd-llm --wd-other --micro-batch-size --grad-accum --warmup-ratio --grad-clip` |
 | 7. 总 epoch / 子采样 | 3 ep | `--epochs`、`--train-limit`（60k 子采样=60000） |
 | 8. ZeRO-3 vs FSDP2 | ZeRO-3 | `--deepspeed <json>`；传 `""` 关闭（FSDP2 **v1 未做**） |
-| 9. 评测频率/规模 | 每 epoch 快评 + 最终全评 | `--eval-limit`（Trainer 快评）、`eval.py --limit` |
+| 9. 评测频率/规模 | 训练后一次性全评 | **Trainer 内不 eval**（`--eval-limit` deprecated）；`eval.py --limit` |
 | 10. 随机预算臂 E | 不做 | **v1 未做**（预留 `--budget-set` 做子集臂） |
 | （§3 预算集合） | 1..8 | `--budget-set`，如 `2,4,8` |
 
@@ -254,6 +279,19 @@ greedy 生成逐行做（right-padding 下整批 generate 会把 pad 当上下�
 7. **`position_ids` 不传**（按硬事实 4）；`attention_mask` 是 2D right-padding。
 8. **`smoke.py` 的 4 个不变量**用极小替身 LM（真实 2560 维接口、内部 64 维）在 CPU 上
    验证；真实 Qwen 上的等价性仍需 Step-0 的 §7.2 数值门禁（见 §9）。
+9. **预测位置 = `label_pos − 1`（P0 修复）**：`expand_budget_rows` 的 `ans_pos` 由
+   "answer 自身位置"改成 "标准因果 shift 的预测位置"，并要求 `starts ≥ 1`（否则明确
+   报错）。`forward_rows` 的 gather/CE 口径不变（仍是 fp32 分块），只是下标来源变了。
+   `generate_budget` / `eval.py` **不依赖** `ans_pos`：生成走 prompt 长度，`eval.py`
+   只用 `forward()` 的 CE 与 `generate_budget`，无需改动。
+10. **Trainer 内不做 eval（P1#1 选型 A）**：`forward` 不返回 `logits`，HF
+    `prediction_step` 取不到 logits。选"默认 `eval_strategy="no"` + 不传 `eval_dataset`"，
+    评测交给 `eval.py`。已用微型替身模型跑过 1 步真实 `Trainer.train()`（`smoke.py::
+    check_trainer_no_eval`），确认训练循环不碰 `prediction_step`；**未**在真实 4B /
+    ZeRO-3 上验证（见 §11）。
+11. **冻结 encoder 保护（P1#2）**：`VLM8Budget.train()` 覆写 + `forward` / `forward_rows`
+    / `generate_budget` 入口的幂等 `_keep_frozen_encoder_in_eval()`。`AssocVTCEncoder`
+    的 `is_frozen` / `freeze()` / `unfreeze()` 保留，`EncoderFreezeCallback` 不变。
 
 ---
 
@@ -265,7 +303,7 @@ greedy 生成逐行做（right-padding 下整批 generate 会把 pad 当上下�
 | `data.py` | `build_image_transform` / `SelfDistillSFTDataset` / `EightBudgetCollator` |
 | `train.py` | argparse / tokenizer / dataset / `build_param_groups` / `VLM8BudgetTrainer` / 两个 callback / main |
 | `eval.py` | checkpoint loader（safetensors/bin + 分片）/ per-k CE + greedy / `eval.json` + `eval.md` |
-| `smoke.py` | CPU 逻辑自检（55 项，rc=0/1） |
+| `smoke.py` | CPU 逻辑自检（66 项，rc=0/1） |
 | `ds_zero3.json` | ZeRO-3：`stage=3`、bf16、`overlap_comm`、`reduce_scatter`、`stage3_gather_16bit_weights_on_model_save=true`、batch="auto"；**CPU offload 默认关**（`offload_optimizer/offload_param: {"device": "none"}`，打开会显著变慢，44G 盘/80G 卡不需要） |
 | `requirements.txt` | remote 实测版本（deepspeed 0.19.9 待装） |
 | `.gitignore` | `__pycache__/ output/ cache/ *.pt *.jsonl` 等 |
@@ -282,6 +320,9 @@ greedy 生成逐行做（right-padding 下整批 generate 会把 pad 当上下�
       —— 不一致会让 prompt/answer 切分点漂移（dataset 有前缀校验 + 兜底，但最好一致）
 - [ ] `lm.model(inputs_embeds=..., attention_mask=2D)` 返回 `last_hidden_state`（transformers 5.22.1 源码）
 - [ ] §7.2 四个数值门禁在真实 Qwen 上重跑（`smoke.py` 只证明了实现逻辑，不证明 Qwen 内核行为）
+- [ ] 真实 Qwen（bf16）上 `row_ce` 与 `F.cross_entropy(logits[:, :-1], labels[:, 1:])`
+      的等价性（本机 CPU fp32 是 `max|Δ|≈5e-7`；bf16 需实测，容差按 1e-5 量级看）
+- [ ] Trainer 1 步 + 冻结 encoder 的冒烟在真实 4B / ZeRO-3 上跑通（本机只用微型替身验证过）
 - [ ] E1→E2 解冻后 encoder 收到**非零 grad**（训练日志/探针；这是本实现唯一没在真机验证的机制点）
 - [ ] 32 img/step 的峰值显存（设计估 45–50G/卡）
 - [ ] 训练产物 `final/` 能被 `eval.py` 严格加载（tied `lm_head` 例外）
@@ -306,3 +347,48 @@ greedy 生成逐行做（right-padding 下整批 generate 会把 pad 当上下�
 - **打包路径**（8 预算拼一条序列 + 4D 块对角 mask）——已按 §4.2 裁决否掉。
 - 训练中实时 `acc`（Trainer 只记 CE；acc 走 `eval.py`）。
 - optimizer 状态断点续训（`save_only_model=True`）。
+
+---
+
+## 11. 状态 / 未验证项（2026-11-05 修复提交）
+
+### 11.1 本次修复（review 后追加）
+
+| 编号 | 问题 | 改法（文件 / 函数） |
+|---|---|---|
+| **P0** | answer 位置差一位：用 answer token **自身**位置的 hidden 预测它 ⇒ 因果自注意力可见自己，loss 可被"复制输入"压到 0（目标泄露） | `model.py::expand_budget_rows` 的 `ans_pos` 改为 `k + (label_pos − 1)`，并断言 `starts.min() ≥ 1`；`BudgetRows.ans_pos` / docstring 同步；`forward_rows` 的 gather 仍只取该位置、CE 仍 fp32 分块 |
+| **P1#1** | Trainer 内 eval 不可用：`forward` 不返回 `logits`，HF `prediction_step` 取不到 logits | `train.py`：`TRAINER_EVAL_STRATEGY="no"`、不构造/不传 `eval_dataset`、`--eval-limit`/`--val-jsonl` 标 deprecated；评测走 `eval.py`；`smoke.py::check_trainer_no_eval` 微型替身跑 1 步 `Trainer.train()` |
+| **P1#2** | `model.train()` 把冻结的 encoder 拉回 train（dropout 打开） | `model.py`：`VLM8Budget.train()` 覆写 + `_encoder_is_frozen()` + `_keep_frozen_encoder_in_eval()`，在 `forward` / `forward_rows` / `generate_budget` 入口幂等调用；`AssocVTCEncoder.is_frozen/freeze/unfreeze` 与 `EncoderFreezeCallback` 保留 |
+
+### 11.2 shift 语义（一句话公式）
+
+> **取 hidden 的位置 = `k + (label_pos − 1)`，targets = `labels[label_pos]`**；
+> 即文本位置 `p` 的 hidden 预测 `label[p + 1]`（标准因果 teacher forcing）。
+> `label_pos` 是 answer token 在文本里的位置（`starts + j`，`starts ≥ 1`），
+> `k` 是该行的 visual 前缀长度。行长度仍是 `k + T`，shape/显存口径不变。
+
+### 11.3 已验证（本机，torch 2.8 CPU / transformers 4.57）
+
+- `python3 smoke.py` → **66/66 PASS, rc=0**，包含：标准 shift 参考等价
+  （`max|Δ|≈5e-7`，容差 1e-5）、逐行逐元素 `ans_pos == label_pos − 1 + k`、
+  leak 回归（no-shift CE 与正确 CE `min|Δ| ≈ 1e-3 … 1e-1`）、冻结 encoder 5 项、
+  Trainer 默认路径 3 项。
+- `python3 -m py_compile vlm8b/*.py`、`python3 vlm8b/train.py --help`、
+  `python3 vlm8b/eval.py --help` 均通过（Qwen 仍是 lazy import）。
+- `generate_budget()` / `eval.py` 不依赖 `ans_pos`：生成用 prompt 长度
+  （`attention_mask.sum()`）拼 `[vis[:k]; text[:n]]`；`eval.py` 只用 `forward()` 的
+  `per_budget_ce_per_sample` 与 `generate_budget()`，因此**不受本次 shift 改动影响**
+  （CE 的数值含义变成"标准 next-token CE"，这是修正而非破坏）。
+
+### 11.4 仍未验证 / 需 Lead 决策
+
+1. **真实 Qwen3.5-4B + bf16**：`row_ce` 与 `logits[:, :-1]/labels[:, 1:]` 的等价性只
+   在 CPU fp32 替身模型上验证过；bf16 下的 Δ 量级未实测（容差按 1e-5 看）。
+2. **ZeRO-3 / 2×A800**：`Trainer.train()` 只在 CPU 单进程 + 微型替身上跑过 1 步；
+   ZeRO-3 下的冻结 encoder 模式保护、`--eval-limit` 废弃后的启动脚本兼容性未在真机跑。
+3. **E1→E2 解冻后 encoder 收到非零 grad**（历史遗留，唯一没在真机验证的机制点）。
+4. **`starts ≥ 1` 的硬约束**：若某条 SFT 数据的 chat template 把 answer 放在文本第 0
+   位（prompt 为空），现在会**显式报错**而不是静默错位；是否需要在 dataset 侧断言/兜底
+   由 Lead 定。
+5. **性能**：`forward` 里 `_keep_frozen_encoder_in_eval()` 是纯属性读 + 条件 `eval()`，
+   每步开销可忽略；但未在真机 profile。
