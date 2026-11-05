@@ -485,9 +485,9 @@
     "pca_psnr_interp": 18.1242,
     "pca_l1_255_interp": 22.9723,
     "pca_ssim_interp": 0.4616,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 20.4274,
+    "model_l1_255": 16.4851,
+    "delta_psnr_model_minus_pca_interp": 2.3032
    },
    {
     "t": 2,
@@ -502,9 +502,9 @@
     "pca_psnr_interp": 20.0134,
     "pca_l1_255_interp": 18.2722,
     "pca_ssim_interp": 0.4949,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 21.8106,
+    "model_l1_255": 13.9968,
+    "delta_psnr_model_minus_pca_interp": 1.7972
    },
    {
     "t": 3,
@@ -519,9 +519,9 @@
     "pca_psnr_interp": 20.9719,
     "pca_l1_255_interp": 16.0369,
     "pca_ssim_interp": 0.521,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 22.6267,
+    "model_l1_255": 12.7519,
+    "delta_psnr_model_minus_pca_interp": 1.6548
    },
    {
     "t": 4,
@@ -536,9 +536,9 @@
     "pca_psnr_interp": 21.7359,
     "pca_l1_255_interp": 14.7001,
     "pca_ssim_interp": 0.5428,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 23.2261,
+    "model_l1_255": 11.9407,
+    "delta_psnr_model_minus_pca_interp": 1.4902
    },
    {
     "t": 5,
@@ -553,9 +553,9 @@
     "pca_psnr_interp": 22.2608,
     "pca_l1_255_interp": 13.8731,
     "pca_ssim_interp": 0.56,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 23.6243,
+    "model_l1_255": 11.4286,
+    "delta_psnr_model_minus_pca_interp": 1.3635
    },
    {
     "t": 6,
@@ -570,9 +570,9 @@
     "pca_psnr_interp": 22.661,
     "pca_l1_255_interp": 13.2768,
     "pca_ssim_interp": 0.5761,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 23.9431,
+    "model_l1_255": 11.0454,
+    "delta_psnr_model_minus_pca_interp": 1.2821
    },
    {
     "t": 7,
@@ -587,9 +587,9 @@
     "pca_psnr_interp": 23.0215,
     "pca_l1_255_interp": 12.7049,
     "pca_ssim_interp": 0.5866,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.2602,
+    "model_l1_255": 10.6886,
+    "delta_psnr_model_minus_pca_interp": 1.2387
    },
    {
     "t": 8,
@@ -604,9 +604,9 @@
     "pca_psnr_interp": 23.3888,
     "pca_l1_255_interp": 12.2046,
     "pca_ssim_interp": 0.5985,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.4727,
+    "model_l1_255": 10.4592,
+    "delta_psnr_model_minus_pca_interp": 1.0839
    },
    {
     "t": 9,
@@ -621,9 +621,9 @@
     "pca_psnr_interp": 23.6986,
     "pca_l1_255_interp": 11.7891,
     "pca_ssim_interp": 0.6094,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.5547,
+    "model_l1_255": 10.3641,
+    "delta_psnr_model_minus_pca_interp": 0.8561
    },
    {
     "t": 10,
@@ -638,9 +638,9 @@
     "pca_psnr_interp": 23.9658,
     "pca_l1_255_interp": 11.459,
     "pca_ssim_interp": 0.6202,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.6502,
+    "model_l1_255": 10.254,
+    "delta_psnr_model_minus_pca_interp": 0.6844
    },
    {
     "t": 11,
@@ -655,9 +655,9 @@
     "pca_psnr_interp": 24.2321,
     "pca_l1_255_interp": 11.1453,
     "pca_ssim_interp": 0.6307,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.6935,
+    "model_l1_255": 10.208,
+    "delta_psnr_model_minus_pca_interp": 0.4614
    },
    {
     "t": 12,
@@ -672,9 +672,9 @@
     "pca_psnr_interp": 24.4371,
     "pca_l1_255_interp": 10.9124,
     "pca_ssim_interp": 0.6409,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.7541,
+    "model_l1_255": 10.1437,
+    "delta_psnr_model_minus_pca_interp": 0.317
    },
    {
     "t": 13,
@@ -689,9 +689,9 @@
     "pca_psnr_interp": 24.6457,
     "pca_l1_255_interp": 10.6769,
     "pca_ssim_interp": 0.6498,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.8147,
+    "model_l1_255": 10.0783,
+    "delta_psnr_model_minus_pca_interp": 0.169
    },
    {
     "t": 14,
@@ -706,9 +706,9 @@
     "pca_psnr_interp": 24.8512,
     "pca_l1_255_interp": 10.457,
     "pca_ssim_interp": 0.6583,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.8646,
+    "model_l1_255": 10.0244,
+    "delta_psnr_model_minus_pca_interp": 0.0134
    },
    {
     "t": 15,
@@ -723,9 +723,9 @@
     "pca_psnr_interp": 25.0163,
     "pca_l1_255_interp": 10.2788,
     "pca_ssim_interp": 0.6664,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.8693,
+    "model_l1_255": 10.0178,
+    "delta_psnr_model_minus_pca_interp": -0.147
    },
    {
     "t": 16,
@@ -740,9 +740,9 @@
     "pca_psnr_interp": 25.1886,
     "pca_l1_255_interp": 10.0879,
     "pca_ssim_interp": 0.6725,
-    "model_psnr": null,
-    "model_l1_255": null,
-    "delta_psnr_model_minus_pca_interp": null
+    "model_psnr": 24.8694,
+    "model_l1_255": 10.0168,
+    "delta_psnr_model_minus_pca_interp": -0.3192
    }
   ],
   "timing": {
@@ -751,9 +751,50 @@
    "total_seconds": 194.26
   },
   "model_column": {
-   "status": "TODO",
-   "expected_path": "/root/autodl-tmp/exp448/eval/stage3_stepwise.json",
-   "note": "主线 S3 臂逐步 eval 产出后，用同一条命令重跑 pca_448_baseline.py （--model_json 指向该 json）即可自动填模型列；或用 `python build_results.py --fill-model` 在本地读该 json 后重算差值"
+   "status": "filled",
+   "source": "/home/linaro/dsh/exp448_bench/artifacts/eval/stage3_stepwise.json",
+   "ckpt": "/root/autodl-tmp/exp448/S3/ckpt_best.pt",
+   "step": 5703,
+   "n_images": 5000,
+   "T": 16,
+   "K": 32,
+   "psnr": [
+    20.42742952270508,
+    21.810612536621093,
+    22.626681967163087,
+    23.226148388671874,
+    23.62434313964844,
+    23.943073046875,
+    24.260198614501952,
+    24.472713958740233,
+    24.554667013549803,
+    24.650247381591797,
+    24.693509545898436,
+    24.754130963134767,
+    24.81466707763672,
+    24.864580072021486,
+    24.869304693603517,
+    24.869379119873045
+   ],
+   "l1_255": [
+    16.485143339538574,
+    13.996789698791504,
+    12.751873976135254,
+    11.94071049194336,
+    11.428599104309082,
+    11.045399813842774,
+    10.688612545776367,
+    10.459165182495116,
+    10.364072721862794,
+    10.253987406921386,
+    10.207999320983888,
+    10.143694578552246,
+    10.078260772705079,
+    10.024420178222655,
+    10.01776434326172,
+    10.016767799377442
+   ],
+   "note": "模型列 = 主线 S3 臂 448²/p32/960M/zs_dim224 的逐档 eval；模型值数 = 2t×224，与 PCA 侧 196r 按「同值数」对齐（Δ = 模型 − PCA 插值）"
   }
  },
  "baseline_224_selfcheck": {
@@ -1459,7 +1500,7 @@
   "PCA 基在 train 上拟合、val 上评测（非逐图 oracle，也非 transductive）；与论文表 2 的 PCA 行同族口径",
   "PCA 保留 N=196 个空间位置的码（每位置 r 个系数），模型把整图路由进 32 个 token；值数相同 ≠ 序列长度/结构相同——这是论文「同值数」对照的既定口径，不是 bug",
   "448 的 PCA 每图值数 N×r 与 224 相同（N 都是 196），但每 patch 覆盖 4× 像素（3072 维 vs 768 维）⇒ 同值数下 448 的 PCA 重建明显更弱（见 compare_448_vs_224_same_values，满预算 7168 值差 −1.06 dB）",
-  "模型列 TODO：S3 臂 eval（/root/autodl-tmp/exp448/eval/stage3_stepwise.json）尚未产出（A 相训练中），产出后重跑即可自动填",
+  "模型列已填（S3 臂 448²/p32/960M 逐档 eval）；模型 SSIM 在 eval json 里未记录，故本表只给 PSNR/L1_255 两列",
   "单种子；像素指标 ≠ 任务保真；SSIM 在主报告里只用于末步/汇总，本表为逐 rank 口径"
  ],
  "repro_commands": [

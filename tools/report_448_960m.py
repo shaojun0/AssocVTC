@@ -42,8 +42,8 @@ CFG448 = {
     "enc_dwconv": True, "enc_qk_norm": True, "enc_attn": "std",
     "dropout": 0.0, "amp": 1,
 }
-PARAMS448 = {"enc_M": 480.35, "dec_M": 478.72, "total_M": 959.07,
-             "enc": 480345000, "dec": 478720000}
+PARAMS448 = {"enc_M": 480.537, "dec_M": 479.666, "total_M": 960.203,
+             "enc": 480536528, "dec": 479666176}
 CFG224 = {"img_size": 224, "patch": 16, "num_patches": 196,
           "enc_dim": 1248, "enc_depth": 13, "dec_dim": 1440, "dec_depth": 7,
           "pixel_hidden": 1024, "enc_M": 244.43, "dec_M": 237.11, "total_M": 481.54}
@@ -73,6 +73,13 @@ BASELINE224_REF = {
 
 VAL_PER_IMAGE_448 = {"stage1": 32 * 1744, "stage2": 32 * 2048, "stage3": 32 * 224}
 VAL_PER_IMAGE_224 = {"stage1": 32 * 1248, "stage2": 32 * 1248, "stage3": 32 * 224}
+
+# 论文 v2.0 表 2「本文」行（224²/p16, enc 1248/dec 1440, zs_dim=224）逐档 PSNR
+# 来源: /userdata/paper/pp_zh/sec4_exp.tex tab:psnr（预算 448…7168）
+PAPER224_MODEL_PSNR = [21.03, 22.04, 22.91, 23.66, 24.19, 24.51, 24.86, 25.21,
+                       25.50, 25.69, 25.75, 25.92, 25.93, 26.02, 26.08, 26.08]
+PAPER224_MODEL_SRC = "论文 v2.0 表 2「本文」行（sec4_exp.tex tab:psnr）"
+DEFAULT_PCA448_JSON = "/home/linaro/dsh/exp448_bench/pca/pca_448_results.json"
 
 TITLE = "AssocVTC 448²/patch32/编码器·解码器各 ~480M（合计 ~960M）三阶段训练与评测报告"
 
@@ -377,51 +384,78 @@ def step_table(rec, st):
     return "\n".join(lines)
 
 
-def baseline_blank_table(records_by_stage, train_stats):
-    """与 224 论文基线同值数对照：论文数字留空位，本实验侧自动填。"""
-    lines = [
-        "| 臂 | 每图值数（448 / 224） | 224 论文基线 PSNR | 224 SSIM | 224 L1_255 | "
-        "本实验 448 PSNR | 本实验 SSIM | 本实验 L1_255 | ΔPSNR(448−224) |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ]
+def baseline_compare_section(records_by_stage, train_stats, pca):
+    """与 224 论文基线「同值数」对照：S3 臂逐档（严格可比）+ A/B 相参考。"""
+    L = []
+    A = L.append
+    recs3 = records_by_stage.get("stage3") or []
+    rec3 = recs3[0] if recs3 else None
+    ps3 = (rec3 or {}).get("psnr") or []
+    if not ps3:
+        A("> 阶段3 评测尚未产出，本节待填。")
+        return "\n".join(L)
+    rows = None
+    if pca and pca.get("results_448", {}).get("same_value_table"):
+        rows = pca["results_448"]["same_value_table"]
+
+    def best(seq):
+        return max(seq) if seq else None
+
+    end3 = ps3[-1]
+    A("**汇总（S3 臂是唯一与论文同值数口径可直接配对的臂）**：")
+    A("")
+    A("| 臂 | 448 值/图 | 224 值/图 | 224 论文「本文」 | 448 本实验 | ΔPSNR(448−224) |")
+    A("|---|---|---|---|---|---|")
+    A("| 阶段3-S3（448…7,168 值，zs_dim=224） | %s | 7,168 | %.2f dB（末步） | %.3f dB（末步） | **%+.3f** |" % (
+        "{:,}".format(VAL_PER_IMAGE_448["stage3"]), PAPER224_MODEL_PSNR[-1], end3,
+        end3 - PAPER224_MODEL_PSNR[-1]))
+    A("")
+    A("> 口径：都是「每图 2t×224 个连续值、逐图 PSNR 再平均」。A/B 相是 1248/2048 维/token 的完整宽度臂"
+      "（448 侧 55,808 / 65,536 值/图），论文表 2 无同值数行，故只作过程参考（见文末「仓库既有 224 实测」）。")
+    A("")
+    A("**16 档逐档对照**（第 3 列 = 224 论文表 2「本文」行，来源 `%s`；末两列 = 448 PCA 同值数基线）：" % PAPER224_MODEL_SRC)
+    A("")
+    A("| t | 每图值数 | 224 论文本文 / dB | 448 本实验 / dB | Δ(448−224) 跨分辨率 | 448 PCA / dB | Δ(448 模型−448 PCA) 同分辨率 |")
+    A("|---|---|---|---|---|---|---|")
+    for i in range(min(len(ps3), len(PAPER224_MODEL_PSNR))):
+        paper = PAPER224_MODEL_PSNR[i]
+        pca_psnr = rows[i].get("pca_psnr_interp") if (rows and i < len(rows)) else None
+        A("| %d | %s | %.2f | %.3f | %+.3f | %s | %s |" % (
+            i + 1, "{:,}".format(448 * (i + 1)), paper, ps3[i], ps3[i] - paper,
+            fmt(pca_psnr, 3, "—"),
+            fmt((ps3[i] - pca_psnr) if pca_psnr is not None else None, 3, "—")))
+    if rows and len(rows) >= len(ps3):
+        d = [ps3[i] - rows[i]["pca_psnr_interp"] for i in range(len(ps3))]
+        cross0 = ps3[0] - PAPER224_MODEL_PSNR[0]
+        crossN = ps3[-1] - PAPER224_MODEL_PSNR[-1]
+        zero = next((i + 1 for i in range(len(d)) if d[i] < 0), len(d))
+        A("")
+        A("读法：")
+        A("")
+        A("- **跨分辨率同值数**（Δ(448−224) 列）：448 用 4× 像素 + 2× 参数，在 448 值处 **%+.2f dB**，"
+          "到 7,168 值扩到 **%+.2f dB** —— 预算越宽分辨率劣势越明显（与 PCA 跨分辨率差 −0.27→−1.06 dB 同形）。"
+          % (cross0, crossN))
+        A("- **同分辨率模型 vs PCA**（末列）：**%+.2f dB**（448 值）单调收窄到 **%+.2f dB**（7,168 值），"
+          "t=%d–%d 之间过零（%s→%s 值）；224 论文同口径是 **+2.63 → −0.17 dB**。"
+          "⇒ 分辨率 ×4 后「紧预算端模型显著强于 PCA」这一核心结论**保留**，只缩水约 %.2f dB。"
+          % (d[0], d[-1], zero - 1, zero,
+             "{:,}".format(448 * (zero - 1)), "{:,}".format(448 * zero), abs(d[0] - 2.63)))
+        A("- L1 交叉验证：224 侧模型比 PCA 的 L1 优势 6.84→0.22 px（全程不交叉）；448 侧是 "
+          "%.2f→%.2f px，**同样全程不交叉**。" % (22.972 - 16.485, 10.088 - 10.017))
+    A("")
+    A("**仓库既有 224 实测（非论文表 2 口径，仅参考）**：")
     for st in STAGES:
         key = st["key"]
-        recs = records_by_stage.get(key) or []
-        rec = recs[0] if recs else None
-        psnr = rec.get("psnr") if rec else None
-        ssim = rec.get("ssim") if rec else None
-        l1 = rec.get("l1_255") if rec else None
-        # 取"末步/最优步"作为代表值（S3 用末步，A 用唯一值）
-        def last(seq):
-            return seq[-1] if seq else None
-        best = max(psnr) if psnr else None
-        lines.append("| %s | %s / %s | （待填） | （待填） | （待填） | %s | %s | %s | （待填） |" % (
-            st["label"].split("：")[0],
-            "{:,}".format(VAL_PER_IMAGE_448[key]), "{:,}".format(VAL_PER_IMAGE_224[key]),
-            fmt(best, 3, "待补"), fmt(last(ssim), 4, "待补"), fmt(last(l1), 3, "待补")))
-    lines.append("")
-    lines.append("**怎么填**：")
-    lines.append("- 「224 论文基线」列：从论文 v2.0 表 2 / 正文取同值数口径的 PSNR/SSIM/L1_255 填进去"
-                 "（S3 臂每图 7,168 值，与 448-S3 **同值数，可直接配对比较**；A/B 相是 1248/2048 维/token 的"
-                 "完整宽度臂，仅作训练过程参考）。")
-    lines.append("- 「ΔPSNR」= 本实验值 − 论文 224 值；S3 行是唯一严格可比的格子。")
-    lines.append("")
-    lines.append("**仓库既有 224 实测（非论文口径，仅参考）**：")
-    for st in STAGES:
-        key = st["key"]
+        rec = (records_by_stage.get(key) or [None])[0]
+        p = (rec or {}).get("psnr") or []
         ref = BASELINE224_REF.get(key, {})
-        recs = records_by_stage.get(key) or []
-        rec = recs[0] if recs else None
-        psnr = rec.get("psnr") if rec else None
-        mine = max(psnr) if psnr else None
-        lines.append("- %s：224 参考 **%s dB**（%s）→ 448 本实验 %s dB" % (
-            st["label"].split("：")[0], fmt(ref.get("psnr"), 2, "待补"),
-            ref.get("source", "—"), fmt(mine, 3, "待补")))
-    return "\n".join(lines)
+        A("- %s：224 参考 **%s dB**（%s）→ 448 本实验 **%s dB**（Δ %s）" % (
+            st["label"].split("：")[0], fmt(ref.get("psnr"), 2, "待补"), ref.get("source", "—"),
+            fmt(best(p), 3, "待补"),
+            ("%+.2f" % (best(p) - ref["psnr"])) if (p and ref.get("psnr")) else "—"))
+    return "\n".join(L)
 
 
-# ---------------------------------------------------------------------------
-# 画图（matplotlib 可用才画）
 # ---------------------------------------------------------------------------
 def try_matplotlib():
     try:
@@ -604,14 +638,16 @@ def build_report(args, records, train_stats, pngs, mpl_ok, run_markers):
     A = L.append
     A("# %s" % TITLE)
     A("")
-    A("日期：2026-11-04 ｜ 机器：`ssh -p 23556 root@connect.nma1.seetacloud.com`"
+    A("日期：2026-11-04 ~ 11-05（完成于 11-05 13:52）｜ 机器：`ssh -p 23556 root@connect.nma1.seetacloud.com`"
       "（AutoDL 2×A800 80GB PCIe，112 核）｜ 状态：%s" % status)
     A("｜ 生成：`tools/report_448_960m.py` v%s（matplotlib %s）" % (
         VERSION, "可用，已出图" if mpl_ok else "不可用 → 纯 markdown"))
     A("")
-    A("**一句话结论**：（待填）—— 448²/patch32 + 960M 在论文三阶段协议下，"
-      "阶段3（zs_dim=224，每图 7,168 值）相对 224 论文基线的 PSNR/SSIM/L1 变化见 §3；"
-      "A/B 相为完整宽度臂，仅作训练过程参考。")
+    A("**一句话结论**：448²/p32 + 960M 在论文三阶段协议下跑通（训练 25.6 h，双卡 DDP）："
+      "阶段3（zs_dim=224，7,168 值/图）末步 **24.869 dB**，比 224 论文基线（26.08 dB）低 **1.21 dB**；"
+      "**但相对同分辨率（448）PCA 基线仍高 2.30 dB（448 值）→ 低 0.32 dB（7,168 值）**，"
+      "与论文在 224 上的 +2.63 → −0.17 dB 形状一致 ⇒ 分辨率 ×4 没有推翻「紧预算端模型强于 PCA」的结论，"
+      "只是绝对 PSNR 因 4× 像素而下降。")
     A("")
     A("---")
     A("")
@@ -621,7 +657,7 @@ def build_report(args, records, train_stats, pngs, mpl_ok, run_markers):
     A("|---|---|")
     A("| 224² → **448²** | `--img_size 448` |")
     A("| 分块面积 ×4（patch 16 → **32**），N 保持 196 | `--patch 32`，N=(448/32)²=196 |")
-    A("| 编码器/解码器参数量**各 480M**（合计 ~960M） | enc 1744×13/h16 ≈ 480.35M；dec 2048×7/h16 ≈ 478.72M |")
+    A("| 编码器/解码器参数量**各 480M**（合计 ~960M） | enc 1744×13/h16 ≈ 480.54M；dec 2048×7/h16 ≈ 479.67M（合计 960.20M） |")
     A("| 沿用论文**三阶段**训练协议 | 阶段1 单步读满 45ep / 阶段2 T=16 6ep / 阶段3 zs_dim=224 3ep |")
     A("")
     A("## 1. 配置（448² 本实验 vs 224 论文基线）")
@@ -661,9 +697,9 @@ def build_report(args, records, train_stats, pngs, mpl_ok, run_markers):
                 A("![逐 step 指标](%s)" % os.path.relpath(
                     [p for p in pngs if "per_step" in p][0], os.path.dirname(args.out)))
                 A("")
-    A("### 3.4 与 224 论文基线「同值数」对照（待填空白位）")
+    A("### 3.4 与 224 论文基线「同值数」对照（已填：论文表 2「本文」行 + 448 PCA 基线）")
     A("")
-    A(baseline_blank_table(records_by_stage, train_stats))
+    A(baseline_compare_section(records_by_stage, train_stats, getattr(args, "pca", None)))
     A("")
     A("## 4. 训练曲线")
     A("")
@@ -696,21 +732,66 @@ def build_report(args, records, train_stats, pngs, mpl_ok, run_markers):
             A("%-7s psnr  （无 val 记录）" % st["key"])
     A("```")
     A("")
-    A("## 5. 结论模板（待填）")
+    A("## 5. 结论")
     A("")
-    A("1. **参数/显存可行性**：960M（enc %.2fM + dec %.2fM）在 448²/patch32 下实测峰值显存 ___G / 80G；"
-      "阶段2 T=16 反传峰值 ___G；是否启用 `--dec_grad_ckpt`：___。" % (PARAMS448["enc_M"], PARAMS448["dec_M"]))
-    A("2. **墙钟**：三阶段合计 ___h（阶段1 ___h / 阶段2 ___h / 阶段3 ___h），"
-      "评测 ___h；与 DESIGN 预估（~20–26h）对照：___。")
-    A("3. **阶段3（同值数可比臂）**：448-S3 vs 224 论文基线 = ___ dB（Δ=___）；"
-      "SSIM ___ → ___；L1_255 ___ → ___。结论：___。")
-    A("4. **A/B 相过程参考**：A 相（单步读满）PSNR ___dB；B 相末步 ___dB；"
-      "相对 224 同协议（32.35 / 27.94）的变化 ___。")
-    A("5. **与 scaling 假设的关系**：只加宽（enc 13 层 / dec 7 层不变）到 2× 参数，"
-      "在 N=196、K=32、T=16 全同的前提下，同值数重建质量 ___；是否支持「宽度 scaling 有效」：___。")
-    A("6. **风险/偏置**：单种子（seed 0）；`--dec_grad_ckpt` 全阶段是否同一值：___；"
-      "448 数据吞吐是否成为瓶颈：___。")
+    rec1 = (records_by_stage.get("stage1") or [{}])[0]
+    rec2 = (records_by_stage.get("stage2") or [{}])[0]
+    rec3 = (records_by_stage.get("stage3") or [{}])[0]
+    ps1 = rec1.get("psnr") or []
+    ps2 = rec2.get("psnr") or []
+    ps3 = rec3.get("psnr") or []
+
+    def _vram(key):
+        pr = (train_stats.get(key, {}) or {}).get("progress") or []
+        vv = [p["vram"] for p in pr if p.get("vram")]
+        return max(vv) if vv else None
+
+    def _wall(key):
+        line = (train_stats.get(key, {}) or {}).get("done_line") or ""
+        m = re.search(r"wall=([0-9.]+)min", line)
+        return float(m.group(1)) if m else None
+
+    w1, w2, w3 = _wall("stage1"), _wall("stage2"), _wall("stage3")
+    tot = (w1 or 0) + (w2 or 0) + (w3 or 0)
+    fmt_h = (lambda m: "%.2f h（%.1f min）" % (m / 60.0, m)) if w1 else (lambda m: "—")
+    A("1. **参数/显存可行性**：enc **%.3fM** + dec **%.3fM** = **%.3fM**（论文 224 基线 481.54M 的 2.0×），"
+      "448²/p32/N=196 下实测峰值显存：A 相 **%sG**、B/S3 相 **%sG**（80G 卡余量 ~15G）；"
+      "`--dec_grad_ckpt 0` 全阶段一致（该开关对 std 注意力解码器本就无效，见 BENCH 文档）。" % (
+          PARAMS448["enc_M"], PARAMS448["dec_M"], PARAMS448["total_M"],
+          fmt(_vram("stage1"), 1), fmt(_vram("stage2"), 1)))
     A("")
+    A("2. **墙钟**：A 相 %s（单卡，113 img/s）+ B 相 %s（双卡 DDP，25 img/s/卡）+ S3 相 %s（双卡 DDP）"
+      " = **训练 %.2f h**；3 次评测共 5.1 min（31 s / 137 s / 136 s）。DDP 把 B/S3 从单卡估的 14.0/6.9 h "
+      "压到 8.06/4.04 h（实测 1.79×）。总墙钟 **%.2f h**，落在 DESIGN 预期（~20–26h）区间。" % (
+          fmt_h(w1) if w1 else "—", fmt_h(w2) if w2 else "—", fmt_h(w3) if w3 else "—",
+          tot / 60.0, tot / 60.0 + 5.1 / 60.0))
+    A("")
+    A("3. **阶段3（同值数可比臂，唯一严格可配对）**：448-S3 末步 **%s dB** vs 224 论文表 2「本文」**26.08 dB**"
+      "（**Δ=%+.2f dB**）；448 值档 **%s dB** vs 21.03 dB（Δ=%+.2f）。**同分辨率下模型仍显著强于 PCA**："
+      "+2.30 dB（448 值）→ −0.32 dB（7,168 值），224 论文同口径 +2.63 → −0.17 dB ⇒ **结论形状保持、"
+      "幅度只缩水约 0.3 dB**，交叉点仍在满预算附近（448 侧 t≈14 / 6,272 值）。SSIM 主线 eval json 未记录，"
+      "训练末 val 为 S3 **0.6421** / B **0.6958**（同图同划分，仅供趋势参考）。" % (
+          fmt(ps3[-1] if ps3 else None, 3, "—"), (ps3[-1] - 26.08) if ps3 else 0.0,
+          fmt(ps3[0] if ps3 else None, 3, "—"), (ps3[0] - 21.03) if ps3 else 0.0))
+    A("")
+    A("4. **A/B 相过程参考**（完整宽度臂，跨分辨率不与论文表 2 配同值数）：A 相（单步读满，55,808 值/图）"
+      "**%s dB** vs 224 同协议 32.35 dB（Δ=%+.2f）；B 相末步（65,536 值/图）**%s dB** vs 27.94 dB（Δ=%+.2f）。"
+      "⇒ 448 在 A 相掉得最多（−3.6 dB），B/S3 相收敛到 −1.2~−1.8 dB：**分辨率代价主要在「单步读满」"
+      "这一最难档位**，逐步读出把差距拉回。" % (
+          fmt(max(ps1) if ps1 else None, 3, "—"), (max(ps1) - 32.35) if ps1 else 0.0,
+          fmt(max(ps2) if ps2 else None, 3, "—"), (max(ps2) - 27.94) if ps2 else 0.0))
+    A("")
+    A("5. **与 scaling 假设的关系**：只加宽（enc 13 层 / dec 7 层不变）到 2× 参数、同时像素 ×4，"
+      "在 N=196、K=32、T=16、7,168 值/图全同的前提下，同值数 PSNR 比 224 论文低 1.21 dB；"
+      "**2× 参数没有抵消 4× 像素带来的信息密度损失**，故本实验**不支持**「仅靠宽度 scaling 就能在"
+      "同值数下维持 224 的质量」；但它相对同分辨率 PCA 的优势几乎原样保留，说明**宽度 scaling 保住的是"
+      "「相对非学习方法（PCA）的架构收益」**，而不是绝对 PSNR。"
+      "若要在 448 恢复 26 dB 级，需提高值预算（7168→~2×）或改 patch/分辨率策略，而不是继续加宽。")
+    A("")
+    A("6. **风险/偏置**：单种子（seed 0）；三阶段 `dec_grad_ckpt` 一致 = 0；448 吞吐是真瓶颈"
+      "（A 相 113 img/s vs 224 基线 ~357 img/s，4× 像素带来的 ~3× 变慢；B/S3 单卡 25 img/s，"
+      "靠 DDP 才把墙钟压住）；PSNR 是像素级指标、不等于任务保真；448↔224 是**跨分辨率**比较，"
+      "同值数口径只能消掉「值数」这一维，不能消掉「4× 像素/样本」这一维——这正是本实验要量的量。")
     A("## 6. 产物与复现")
     A("")
     A("- 评测输入：`%s/*.json`（共 %d 个文件 / %d 组结果）" % (
@@ -728,8 +809,8 @@ def build_report(args, records, train_stats, pngs, mpl_ok, run_markers):
     return "\n".join(L) + "\n"
 
 
-def detect_run_markers(eval_dir):
-    root = os.path.dirname(os.path.abspath(eval_dir))
+def detect_run_markers(markers_dir):
+    root = os.path.abspath(markers_dir)
     markers = {"ALL_DONE": False, "FAILED": False, "STAGE_DONE": {}}
     for name in ("ALL_DONE", "FAILED"):
         markers[name] = os.path.exists(os.path.join(root, name))
@@ -767,6 +848,10 @@ def main():
                                                   "REPORT_448_960M_3stage.md"))
     ap.add_argument("--artifacts", default=os.path.join(repo, "doc", "2026-11-04",
                                                         "artifacts_448_960m"))
+    ap.add_argument("--pca-json", default=DEFAULT_PCA448_JSON,
+                    help="448 PCA 同值数基线结果（build_results.py 产物），缺则 3.4 节省略 PCA 列")
+    ap.add_argument("--markers-dir", default=None,
+                    help="ALL_DONE/STAGE*_DONE 标记目录（默认 eval_dir 的父目录）")
     ap.add_argument("--no-plot", action="store_true", help="强制纯 markdown（不生成 PNG）")
     ap.add_argument("--check", action="store_true", help="只检查输入/环境，不写文件")
     ap.add_argument("--version", action="version", version="report_448_960m.py v" + VERSION)
@@ -774,7 +859,9 @@ def main():
 
     records = collect_evals(args.eval_dir)
     train_stats = parse_train_logs(args.logs_dir)
-    markers = detect_run_markers(args.eval_dir)
+    markers = detect_run_markers(args.markers_dir or
+                                 os.path.dirname(os.path.abspath(args.eval_dir)))
+    args.pca = read_json(args.pca_json) if args.pca_json else None
     mpl = try_matplotlib()
     n_logs = sum(1 for st in STAGES if train_stats.get(st["key"], {}).get("path"))
 
