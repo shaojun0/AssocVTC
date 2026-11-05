@@ -1,7 +1,0 @@
-===== REPRO REPRO_sq_square plan=square block=0 19:47:08
-===== rc=0 REPRO_sq_square 20:00:23
-[112_REPRO_sq_square-patch] PSNR: 16.44 17.57 18.89 20.05 21.24 22.77 24.61 24.59
-===== REPRO REPRO_fx_fixed plan=fixed block=4 20:00:23
-===== rc=0 REPRO_fx_fixed 20:17:26
-[112_REPRO_fx_fixed-patch-fixw4] PSNR: 16.56 17.31 18.28 18.86 19.38 19.81 20.13 20.42 20.73 21.01 21.25 21.49 21.69 21.88 22.03 22.16
-REPRO112_DONE 20:17:26

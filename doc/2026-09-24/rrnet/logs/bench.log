@@ -1,25 +1,0 @@
-Loading weights:   0%|          | 0/72 [00:00<?, ?it/s]Loading weights: 100%|██████████| 72/72 [00:00<00:00, 11007.87it/s]
-{"backbone": "resnet-10", "res": 224, "bs": 16, "s_it": 0.134, "peak_GB": 1.97, "steps_per_epoch": 50, "epoch_min": 0.11, "run40_min": 4.5}
-Loading weights:   0%|          | 0/120 [00:00<?, ?it/s]Loading weights: 100%|██████████| 120/120 [00:00<00:00, 7446.50it/s]
-{"backbone": "resnet-18", "res": 224, "bs": 16, "s_it": 0.136, "peak_GB": 2.31, "steps_per_epoch": 50, "epoch_min": 0.11, "run40_min": 4.5}
-Loading weights:   0%|          | 0/216 [00:00<?, ?it/s]Loading weights: 100%|██████████| 216/216 [00:00<00:00, 7450.65it/s]
-{"backbone": "resnet-34", "res": 224, "bs": 16, "s_it": 0.152, "peak_GB": 2.9, "steps_per_epoch": 50, "epoch_min": 0.13, "run40_min": 5.1}
-Loading weights:   0%|          | 0/318 [00:00<?, ?it/s]Loading weights: 100%|██████████| 318/318 [00:00<00:00, 7583.34it/s]
-{"backbone": "resnet-50", "res": 224, "bs": 16, "s_it": 0.169, "peak_GB": 5.35, "steps_per_epoch": 50, "epoch_min": 0.14, "run40_min": 5.6}
-Loading weights:   0%|          | 0/624 [00:00<?, ?it/s]Loading weights: 100%|██████████| 624/624 [00:00<00:00, 25685.46it/s]
-{"backbone": "resnet-101", "res": 224, "bs": 16, "s_it": 0.216, "peak_GB": 7.65, "steps_per_epoch": 50, "epoch_min": 0.18, "run40_min": 7.2}
-Loading weights:   0%|          | 0/930 [00:00<?, ?it/s]Loading weights:  58%|█████▊    | 535/930 [00:00<00:00, 5331.66it/s]Loading weights: 100%|██████████| 930/930 [00:00<00:00, 4948.81it/s]
-{"backbone": "resnet-152", "res": 224, "bs": 16, "s_it": 0.265, "peak_GB": 10.36, "steps_per_epoch": 50, "epoch_min": 0.22, "run40_min": 8.8}
-Loading weights:   0%|          | 0/72 [00:00<?, ?it/s]Loading weights: 100%|██████████| 72/72 [00:00<00:00, 7450.29it/s]
-{"backbone": "resnet-10", "res": 448, "bs": 8, "s_it": 0.249, "peak_GB": 3.88, "steps_per_epoch": 100, "epoch_min": 0.42, "run40_min": 16.6}
-Loading weights:   0%|          | 0/120 [00:00<?, ?it/s]Loading weights: 100%|██████████| 120/120 [00:00<00:00, 6890.88it/s]
-{"backbone": "resnet-18", "res": 448, "bs": 8, "s_it": 0.257, "peak_GB": 4.1, "steps_per_epoch": 100, "epoch_min": 0.43, "run40_min": 17.2}
-Loading weights:   0%|          | 0/216 [00:00<?, ?it/s]Loading weights: 100%|██████████| 216/216 [00:00<00:00, 8067.98it/s]
-{"backbone": "resnet-34", "res": 448, "bs": 8, "s_it": 0.272, "peak_GB": 5.12, "steps_per_epoch": 100, "epoch_min": 0.45, "run40_min": 18.2}
-Loading weights:   0%|          | 0/318 [00:00<?, ?it/s]Loading weights: 100%|██████████| 318/318 [00:00<00:00, 5576.09it/s]
-{"backbone": "resnet-50", "res": 448, "bs": 8, "s_it": 0.346, "peak_GB": 9.45, "steps_per_epoch": 100, "epoch_min": 0.58, "run40_min": 23.1}
-Loading weights:   0%|          | 0/624 [00:00<?, ?it/s]Loading weights: 100%|██████████| 624/624 [00:00<00:00, 20150.17it/s]
-{"backbone": "resnet-101", "res": 448, "bs": 8, "s_it": 0.416, "peak_GB": 13.72, "steps_per_epoch": 100, "epoch_min": 0.69, "run40_min": 27.7}
-Loading weights:   0%|          | 0/930 [00:00<?, ?it/s]Loading weights:  56%|█████▋    | 524/930 [00:00<00:00, 5235.95it/s]Loading weights: 100%|██████████| 930/930 [00:00<00:00, 4921.49it/s]
-{"backbone": "resnet-152", "res": 448, "bs": 8, "s_it": 0.493, "peak_GB": 18.85, "steps_per_epoch": 100, "epoch_min": 0.82, "run40_min": 32.9}
-TOTAL 12 runs (40 ep) = 2.86 h

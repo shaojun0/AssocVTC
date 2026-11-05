@@ -1,8 +1,0 @@
-{
- "step": 42750,
- "epoch": 45,
- "best_psnr": 21.884410888671876,
- "elapsed_min": 352.96,
- "running": false,
- "done": true
-}

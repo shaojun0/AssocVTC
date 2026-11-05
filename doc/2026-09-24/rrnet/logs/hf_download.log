@@ -1,12 +1,0 @@
-Loading weights:   0%|          | 0/122 [00:00<?, ?it/s]Loading weights: 100%|██████████| 122/122 [00:00<00:00, 8062.28it/s]
-resnet-18 OK 11.69 M
-Loading weights:   0%|          | 0/218 [00:00<?, ?it/s]Loading weights: 100%|██████████| 218/218 [00:00<00:00, 6071.11it/s]
-resnet-34 OK 21.8 M
-Loading weights:   0%|          | 0/320 [00:00<?, ?it/s]Loading weights: 100%|██████████| 320/320 [00:00<00:00, 7008.61it/s]
-resnet-50 OK 25.56 M
-Loading weights:   0%|          | 0/626 [00:00<?, ?it/s]Loading weights: 100%|██████████| 626/626 [00:00<00:00, 24038.11it/s]
-resnet-101 OK 44.55 M
-Loading weights:   0%|          | 0/932 [00:00<?, ?it/s]Loading weights:  51%|█████     | 472/932 [00:00<00:00, 4718.87it/s]Loading weights: 100%|██████████| 932/932 [00:00<00:00, 4343.04it/s]
-resnet-152 OK 60.19 M
-Error while downloading from https://cas-bridge.xethub.hf.co/xet-bridge-us/623205ac3e32d5aa1b7e062a/69f7556312634a09700267b11e0f27c0cfb723cd2162f7953d15d2f807b1d63d?Expires=1790235733&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9jYXMtYnJpZGdlLnhldGh1Yi5oZi5jby94ZXQtYnJpZGdlLXVzLzYyMzIwNWFjM2UzMmQ1YWExYjdlMDYyYS82OWY3NTU2MzEyNjM0YTA5NzAwMjY3YjExZTBmMjdjMGNmYjcyM2NkMjE2MmY3OTUzZDE1ZDJmODA3YjFkNjNkKiIsIkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6MTc5MDIzNTczM319fV19&Signature=MEYCIQDSQmH%7Ea7CKYTWikOyXEFxotgQI3%7EVB7JBiE5J2LiQHmQIhALqxncK3lPsoFpmnqiidfqvWlwGhf2ycSt6iWOapDfnP&Key-Pair-Id=K3EPXBYC3CKDRZ&response-content-disposition=inline%3B+filename*%3DUTF-8%27%27model.safetensors%3B+filename%3D%22model.safetensors%22%3B&X-Xet-Cas-Uid=62171e3b6a99db28e0b3159d&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cas%2F20260924%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260924T064213Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=a03c07c5488dfcbc48e5bc0d74ea1e9a71de0a275aa08303a5e324451e353139: The read operation timed out
-Trying to resume download...

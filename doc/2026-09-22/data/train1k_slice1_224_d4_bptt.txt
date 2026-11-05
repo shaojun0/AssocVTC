@@ -1,36 +1,0 @@
-Loading weights:   0%|          | 0/439 [00:00<?, ?it/s]Loading weights: 100%|██████████| 439/439 [00:00<00:00, 6215.06it/s]
-[model] loaded /root/autodl-tmp/construction_site/out_224_d4_bptt_slice1/final_model.pt: N=144, K(num_specials)=144, decoder 采样 11 步 [4, 9, 16, 25, 36, 49]...[100, 121, 144]
-[model] 读窗口口径: layer_tap=False（平方块, 末层 z_s）
-[ok] 推理参数与训练侧 model_info.json 对齐 (/root/autodl-tmp/construction_site/out_224_d4_bptt_slice1/model_info.json)
-Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 224 examples [00:00, 547.29 examples/s]Generating train split: 448 examples [00:00, 795.69 examples/s]Generating train split: 672 examples [00:00, 988.21 examples/s]Generating train split: 1000 examples [00:00, 1419.69 examples/s]Generating train split: 1000 examples [00:00, 1125.52 examples/s]
-[data] 1000 条 from 1 parquet
-[data] 1000 条 test
-  ... 320/1000 (8s)
-  ... 640/1000 (15s)
-  ... 960/1000 (22s)
-  ... 1000/1000 (23s)
-
-[full] 全量重建像素 L1 (归一化空间) = 0.220367
-[full] 全量重建像素 L1 (0-255 空间) = 12.66 ± 4.65
-[full] 全画布 MSE(0-255) = 10.9438 (仅末批) | PSNR = 21.51 dB
-[mask] 内容区占比 = 77.01% (padding 22.99%, fill=(0,0,0))
-[triv] 平凡基线(全黑画布): 全画布 L1=99.24 PSNR=6.15 dB | 内容区 L1=128.67 PSNR=5.03 dB
-       ⚠️ 最左端 (t=1) 的全画布 PSNR=20.31 dB 必须显著高于 6.15 dB 才算真重建, 否则曲线左端是 padding 撑的
-       参照(旧实验): 全图平均色≈61, 每patch平均色≈?, 质心基线见 pixel_recon_check
-
-[steps] 渐进曲线 (11 步, 0-255; tokens = t+1, bpp = (t+1)·1024/28224 @β=1):
-       t  tokens     bpp       L1    PSNR  MS-SSIM     L1内容区    PSNR内容区
-       4       5   0.181   14.044   20.31   0.6987    18.177      19.17
-       9      10   0.363   13.132   20.74   0.7247    17.014      19.60
-      16      17   0.617   12.830   20.89   0.7332    16.630      19.75
-      25      26   0.943   12.716   20.95   0.7366    16.486      19.81
-      36      37   1.342   12.657   20.97   0.7384    16.410      19.83
-      49      50   1.814   12.630   20.99   0.7392    16.376      19.85
-      64      65   2.358   12.615   20.99   0.7396    16.356      19.85
-      81      82   2.975   12.611   20.99   0.7397    16.349      19.85
-     100     101   3.664   12.618   20.99   0.7395    16.355      19.85
-     121     122   4.426   12.634   20.99   0.7393    16.371      19.84
-     144     145   5.261   12.660   20.99   0.7390    16.404      19.84
-[steps] 前段(早步) 13.18 | 后段(晚步) 12.63 | 首步/末步 = 14.04/12.66
-[time] 23s | 1000 图
-[save] /root/autodl-tmp/cot_l1/eval_224_d4_slice1/train1k_224_d4_bptt_slice1.json

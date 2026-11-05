@@ -1,21 +1,12 @@
-# Checkpoints & outputs
-sr_qwen_vl_v10_output/
+# vlm8b 运行产物（本项目即仓库根）
+__pycache__/
+*.pyc
+output/
+cache/
+logs/
+wandb/
 *.pt
 *.bin
 *.safetensors
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.DS_Store
-
-# IDE
-.vscode/
-.idea/
-
-# Logs
+*.jsonl
 *.log
-
-# SVD cache (large)
-svd_cache/
