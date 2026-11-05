@@ -37,8 +37,11 @@ DEFAULT_IMAGE_ROOT = "/root/autodl-tmp/datasets/imagenet100"
 DEFAULT_DATA_DIR = "/root/autodl-tmp/exp_qwen/in100_selfdistill/sft"
 DEFAULT_TRAIN_JSONL = os.path.join(DEFAULT_DATA_DIR, "train_nothink_all.jsonl")
 DEFAULT_OUTPUT_DIR = "/root/autodl-tmp/vlm8b/output/run1"
+# ZeRO-2 是默认：ZeRO-3 在 torch 2.12 + deepspeed 0.19.9 上第 1 步 backward 就
+# collective 死锁（同一 seq 号两侧 op 类型不同）；ZeRO-2 显存也够（~35GB/卡）。
+# 想试 ZeRO-3 传 `--deepspeed ds_zero3.json`。
 DEFAULT_DEEPSPEED = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "ds_zero3.json")
+                                 "ds_zero2.json")
 DEFAULT_BUDGET_SET = "1,2,3,4,5,6,7,8"
 
 EPOCHS, MICRO_BATCH, GRAD_ACCUM = 3, 2, 8        # 2 img/GPU ×8 accum ×2 GPU
