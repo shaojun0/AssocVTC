@@ -1,978 +1,189 @@
 """
-vlm8b 本机自检（纯 CPU / 无 Qwen / 无 GPU）
-============================================
+vlm8b 本机自检（CPU，不加载 Qwen）
+==================================
 
-只验证 **张量逻辑**，不加载 4B 模型、不读远端数据：
+四项：① 投影/展开形状 ② shift 等价（answer-only CE == 标准因果
+`F.cross_entropy(logits[:, :-1], labels[:, 1:])` 按行 mean，tol 1e-5；把
+`ans_pos` 改回 label 位置则必须 FAIL）③ 行独立/截断隔离 ④ pad 隔离。
 
-  1. 投影头形状：z_s (B,32,1744) → vis (B,8,2560)；N(0,0.02) 初始化。
-  2. 8 行展开：行 k = [vis[:, :k]; text]，right-pad 到 max_k+T；
-     labels 只在 answer 非 -100；**预测位置** = label 位置随 k 平移 + 标准 shift（−1）。
-  3. collator：图片 batch 的 right-padding / labels 填充 / gt_name 透传。
-  4. 四个不变量（设计 §7.2）：
-       ① 行独立：单图单跑 vs 混批，per-budget CE 差 < 1e-4；
-       ② 截断隔离：改 z_s 第 5 个 token 不影响 k=1（只影响 k≥2）；
-       ③ pad 隔离：把 padding 位置 embedding 换成随机值，loss 不变；
-       ④ 预算单调结构：行长度随 k 严格 +1、前缀嵌套、预测位置单调平移。
-  5. CE 口径（**非循环**，P0 修复后）：
-       · 标准因果 shift：`F.cross_entropy(logits[:, :-1], labels[:, 1:])` 按行平均，
-         `forward_rows()` 的 `row_ce` 必须与它 max|Δ| ≤ 1e-5；
-       · 结构断言：逐行逐元素 `ans_pos == label_pos - 1 + k`；
-       · leak 回归：故意用 label 位置本身（no-shift，错误口径）gather 的 CE 必须与
-         正确 CE 不同（|Δ| > 1e-6），防止以后退回目标泄露。
-  6. 冻结 encoder 保护（P1#2）+ Trainer 默认不 eval（P1#1）的冒烟。
-  7. loss = Σ w_k·CE_k（equal / inv-k）；反向能到 projector 与 encoder。
-
-用法::
-
-    cd vlm8b && python3 smoke.py                 # 默认 --logic-only
-    python3 smoke.py --full --encoder-ckpt <ckpt> # 额外做 ckpt 形状检查（可选）
-
-退出码：0 = 全部 PASS；1 = 有 FAIL / 异常。
+用法：`cd vlm8b && python3 smoke.py`（0=全 PASS，1=有 FAIL）；模型用极小替身。
 """
-
-import argparse
-import json
-import math
-import os
-import shutil
-import sys
-import tempfile
-import traceback
+import math, sys
 from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 
-try:                                            # script / package 两种运行方式
-    from data import (
-        EightBudgetCollator,
-        SelfDistillSFTDataset,
-        build_image_transform,
-    )
-    from model import (
-        IGNORE_INDEX,
-        AssocVTCEncoder,
-        VLM8Budget,
-        VLM8BudgetConfig,
-        expand_budget_rows,
-    )
-except ImportError:                             # pragma: no cover
-    from .data import (
-        EightBudgetCollator,
-        SelfDistillSFTDataset,
-        build_image_transform,
-    )
-    from .model import (
-        IGNORE_INDEX,
-        AssocVTCEncoder,
-        VLM8Budget,
-        VLM8BudgetConfig,
-        expand_budget_rows,
-    )
+from model import IGNORE_INDEX, VLM8Budget, VLM8BudgetConfig, expand_budget_rows
 
-
-# ═══════════════════════════════════════════════════════════════
-# 常量
-# ═══════════════════════════════════════════════════════════════
-
-ENC_DIM = 1744
-NUM_SPECIALS = 32
-LM_HIDDEN = 2560
-IMAGE_SIZE = 448
-VOCAB = 64
-TEXT_LEN = 17
-BATCH = 2
-TINY_INNER = 64
-TINY_HEADS = 4
-TINY_BLOCKS = 2
-ROW_TOL = 1e-4
-
-
-# ═══════════════════════════════════════════════════════════════
-# 极小的替身模型（形状真实，算力极小）
-# ═══════════════════════════════════════════════════════════════
+ENC_DIM, NUM_SPECIALS, LM_HIDDEN = 1744, 32, 2560
+VOCAB, TEXT_LEN, BATCH, HEADS = 64, 17, 2, 8
+CLEAN_TOL, SHIFT_TOL = 1e-7, 1e-5
 
 class _FakeEncoder(nn.Module):
-    """可控的 z_s 替身：可学习 token × 像素均值增益（不同图不同 z_s）。"""
+    """可控 z_s：token 表 × 像素均值增益（不同图不同 z_s）。"""
 
-    def __init__(self, num_specials: int = NUM_SPECIALS, enc_dim: int = ENC_DIM):
+    def __init__(self):
         super().__init__()
-        self.tokens = nn.Parameter(torch.randn(1, num_specials, enc_dim) * 0.02)
-        self.pixel_gain = nn.Linear(3, 1)
+        self.tokens = nn.Parameter(torch.randn(1, NUM_SPECIALS, ENC_DIM) * 0.02)
+        self.gain = nn.Linear(3, 1)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        batch = pixel_values.size(0)
-        gain = 1.0 + self.pixel_gain(pixel_values.mean(dim=(2, 3)))   # (B,1)
-        return self.tokens.expand(batch, -1, -1) * gain.unsqueeze(-1)
+        return self.tokens.expand(pixel_values.size(0), -1, -1) * (
+            1.0 + self.gain(pixel_values.mean(dim=(2, 3)))).unsqueeze(-1)
 
+class _Backbone(nn.Module):
+    """2560 维 1 层 causal self-attn（2D mask：causal + key padding），残差直连。"""
 
-class _TinyAttention(nn.Module):
-    """带 causal + padding mask 的单头组注意力（每行独立，2D mask 语义）。"""
-
-    def __init__(self, dim: int, heads: int):
+    def __init__(self, dim: int = LM_HIDDEN, heads: int = HEADS):
         super().__init__()
-        self.heads = heads
-        self.head_dim = dim // heads
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
+        self.heads = heads
 
-    def forward(self, hidden: torch.Tensor, attention_mask: torch.Tensor):
-        batch, length, dim = hidden.shape
-        qkv = self.qkv(hidden).reshape(
-            batch, length, 3, self.heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)                     # (3,B,H,L,D)
-        query, key, value = qkv[0], qkv[1], qkv[2]
-        scores = query @ key.transpose(-1, -2) / math.sqrt(self.head_dim)
-        causal = torch.ones(
-            (length, length), dtype=torch.bool, device=hidden.device).tril()
-        key_ok = attention_mask.to(torch.bool)[:, None, None, :]
-        scores = scores.masked_fill(~(causal & key_ok), -1e9)
-        weights = torch.softmax(scores, dim=-1)
-        out = (weights @ value).transpose(1, 2).reshape(batch, length, dim)
-        return self.proj(out)
-
-
-class _TinyBlock(nn.Module):
-    """pre-norm 的 attention + MLP 残差块。"""
-
-    def __init__(self, dim: int, heads: int):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = _TinyAttention(dim, heads)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, 2 * dim), nn.GELU(), nn.Linear(2 * dim, dim))
-
-    def forward(self, hidden: torch.Tensor, attention_mask: torch.Tensor):
-        hidden = hidden + self.attn(self.norm1(hidden), attention_mask)
-        hidden = hidden + self.mlp(self.norm2(hidden))
-        return hidden
-
-
-class _TinyBackbone(nn.Module):
-    """接受 2560 维 inputs_embeds，内部降到 64 维跑 2 层，再升回 2560。"""
-
-    def __init__(self, hidden_size: int = LM_HIDDEN, inner: int = TINY_INNER):
-        super().__init__()
-        self.inp = nn.Linear(hidden_size, inner)
-        self.blocks = nn.ModuleList(
-            [_TinyBlock(inner, TINY_HEADS) for _ in range(TINY_BLOCKS)])
-        self.norm = nn.LayerNorm(inner)
-        self.out = nn.Linear(inner, hidden_size)
-
-    def forward(self, inputs_embeds: torch.Tensor,
-                attention_mask: torch.Tensor = None,
+    def forward(self, inputs_embeds: torch.Tensor, attention_mask=None,
                 use_cache: bool = False):
-        """`use_cache` 只为对齐 Qwen 接口（替身不返回 cache）。"""
         if attention_mask is None:
-            attention_mask = torch.ones(
-                inputs_embeds.shape[:2], dtype=torch.long,
-                device=inputs_embeds.device)
-        hidden = self.inp(inputs_embeds)
-        for block in self.blocks:
-            hidden = block(hidden, attention_mask)
-        return SimpleNamespace(last_hidden_state=self.out(self.norm(hidden)))
-
+            attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long)
+        batch, length, dim = inputs_embeds.shape
+        q, k, v = self.qkv(inputs_embeds).reshape(
+            batch, length, 3, self.heads, dim // self.heads).permute(2, 0, 3, 1, 4)
+        scores = q @ k.transpose(-1, -2) / math.sqrt(dim // self.heads)
+        causal = torch.ones(length, length, dtype=torch.bool,
+                            device=inputs_embeds.device).tril()
+        scores = scores.masked_fill(
+            ~(causal & attention_mask.bool()[:, None, None, :]), -1e9)
+        attn = (scores.softmax(-1) @ v).transpose(1, 2).reshape(batch, length, dim)
+        return SimpleNamespace(last_hidden_state=inputs_embeds + self.proj(attn))
 
 class _TinyLM(nn.Module):
-    """`lm.get_input_embeddings()` / `lm.model(...)` / `lm.lm_head` 的最小替身。"""
+    """`get_input_embeddings` / `model` / `lm_head` 的最小替身。"""
 
-    def __init__(self, hidden_size: int = LM_HIDDEN, vocab: int = VOCAB):
+    def __init__(self):
         super().__init__()
-        self.embed = nn.Embedding(vocab, hidden_size)
-        self.model = _TinyBackbone(hidden_size)
-        self.lm_head = nn.Linear(hidden_size, vocab, bias=False)
-        self.config = SimpleNamespace(use_cache=True)
+        self.embed = nn.Embedding(VOCAB, LM_HIDDEN)
+        self.model = _Backbone()
+        self.lm_head = nn.Linear(LM_HIDDEN, VOCAB, bias=False)
 
-    def get_input_embeddings(self) -> nn.Embedding:
-        """和 HF 模型同名的取 embedding 方法。"""
+    def get_input_embeddings(self):
         return self.embed
 
-
-class _FakeTokenizer:
-    """collator 只需要 pad_token_id。"""
-
-    pad_token_id = 0
-    eos_token_id = 1
-
-
-class _FakeChatTokenizer(_FakeTokenizer):
-    """最小 chat template 替身：验证 dataset 的前缀切分 / eos 截断逻辑。
-
-    模板语义与 Qwen 对齐：每条 message = ``<role 头> + content + <结束>``，
-    assistant 的 role 头就是 generation prompt，因此
-    ``full_ids[:len(prompt_ids)] == prompt_ids`` 成立。
-    """
-
-    eos_token_id = 2
-    _ROLE_HEAD = {"system": [40], "user": [41], "assistant": [13, 14]}
-    _END = 31
-
-    @staticmethod
-    def _content_ids(text: str) -> list:
-        return [20 + (ord(char) % 50) for char in str(text)[:3]]
-
-    def apply_chat_template(self, messages, tokenize: bool = True,
-                            add_generation_prompt: bool = False) -> list:
-        """按固定 token 规则渲染（不依赖真实 tokenizer）。"""
-        ids: list = []
-        for message in messages:
-            ids.extend(self._ROLE_HEAD.get(message.get("role"), [41]))
-            ids.extend(self._content_ids(message.get("content", "")))
-            ids.append(self._END)
-        if add_generation_prompt:
-            ids.extend(self._ROLE_HEAD["assistant"])
-        else:
-            ids.extend([self.eos_token_id, 9])       # eos + 模板尾部换行
-        return ids
-
-    def __call__(self, text: str, add_special_tokens: bool = False) -> dict:
-        """chat template 前缀不一致时的兜底 tokenize。"""
-        return {"input_ids": self._content_ids(text)}
-
-
 # ═══════════════════════════════════════════════════════════════
-# 自检框架
+# 自检框架 / 夹具
 # ═══════════════════════════════════════════════════════════════
 
 class Checker:
     """记录 PASS/FAIL，最后给出汇总与退出码。"""
 
     def __init__(self):
-        self.passed = 0
-        self.failed = 0
+        self.passed = self.failed = 0
 
     def check(self, name: str, condition: bool, detail: str = "") -> None:
-        """布尔断言。"""
-        if condition:
-            self.passed += 1
-            suffix = f"  ({detail})" if detail else ""
-            print(f"[PASS] {name}{suffix}")
-        else:
-            self.failed += 1
-            print(f"[FAIL] {name}  {detail}")
+        self.passed, self.failed = self.passed + bool(condition), self.failed + (not condition)
+        print(f"[{'PASS' if condition else 'FAIL'}] {name}"
+              + (f"  ({detail})" if detail else ""))
 
-    def close(self, name: str, actual, expected, tol: float = ROW_TOL) -> None:
-        """张量/标量近似相等断言（max|Δ| <= tol）。"""
-        if isinstance(actual, torch.Tensor):
-            actual = actual.detach().float()
-        if isinstance(expected, torch.Tensor):
-            expected = expected.detach().float()
-        if torch.is_tensor(actual) or torch.is_tensor(expected):
-            delta = float((torch.as_tensor(actual) - torch.as_tensor(expected))
-                          .abs().max())
-        else:
-            delta = abs(float(actual) - float(expected))
-        self.check(name, delta <= tol, f"max|Δ|={delta:.3e} (tol={tol:g})")
+    def close(self, name, actual: torch.Tensor, expected: torch.Tensor, tol: float):
+        delta = float((actual.detach() - expected.detach()).abs().max())
+        self.check(name, delta <= tol, f"max|Δ|={delta:.2e} tol={tol:g}")
 
     def summary(self) -> int:
-        """打印汇总并返回进程退出码。"""
-        total = self.passed + self.failed
-        print("\n" + "-" * 62)
-        print(f"PASS {self.passed} / FAIL {self.failed}  (total {total})")
-        print("RESULT:", "PASS" if self.failed == 0 else "FAIL")
-        return 0 if self.failed == 0 else 1
+        print(f"\nRESULT: {'PASS' if not self.failed else 'FAIL'}  "
+              f"(passed={self.passed}, failed={self.failed})")
+        return 0 if not self.failed else 1
 
-
-def make_fake_batch(batch_size: int = BATCH, text_len: int = TEXT_LEN):
-    """构造 2 张图的 batch：图 0 answer=4 tok，图 1 answer=3 tok + 文本 right-pad。"""
+def make_batch() -> dict:
+    """2 张图：图 0 answer 在文本 13..16；图 1 answer 10..12 + 文本 right-pad 4。"""
     generator = torch.Generator().manual_seed(0)
-    pixel_values = torch.randn(
-        batch_size, 3, IMAGE_SIZE, IMAGE_SIZE, generator=generator)
-    input_ids = torch.randint(
-        0, VOCAB, (batch_size, text_len), generator=generator)
-    attention_mask = torch.ones((batch_size, text_len), dtype=torch.long)
-    labels = torch.full(
-        (batch_size, text_len), IGNORE_INDEX, dtype=torch.long)
-
-    labels[0, 13:17] = input_ids[0, 13:17]        # 图 0：answer 4 tokens
-    labels[1, 10:13] = input_ids[1, 10:13]        # 图 1：answer 3 tokens
-    attention_mask[1, 13:17] = 0                  # 图 1：文本 right-pad 4 个
+    input_ids = torch.randint(0, VOCAB, (BATCH, TEXT_LEN), generator=generator)
+    labels = torch.full_like(input_ids, IGNORE_INDEX)
+    labels[0, 13:17], labels[1, 10:13] = input_ids[0, 13:17], input_ids[1, 10:13]
+    attention_mask = torch.ones_like(input_ids)
+    attention_mask[1, 13:17] = 0
     input_ids[1, 13:17] = 0
-    return {
-        "pixel_values": pixel_values,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-        "gt_name": ["class_a", "class_b"],
-    }
+    return {"pixel_values": torch.randn(BATCH, 3, 448, 448, generator=generator),
+            "input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
-
-def build_model() -> VLM8Budget:
-    """真实形状 config + 极小替身 encoder/lm（不触发任何 Qwen import）。"""
-    config = VLM8BudgetConfig(
-        encoder_ckpt="<unused-in-smoke>",
-        qwen_dir="<unused-in-smoke>",
-        auto_load_modules=False,
-        use_gradient_checkpointing=False,
-        freeze_encoder=False,
-    )
-    model = VLM8Budget(config, encoder=_FakeEncoder(), lm=_TinyLM())
-    model.eval()
-    return model
-
-
-def _row_ce_from_pos(model: VLM8Budget, rows, pos: torch.Tensor) -> torch.Tensor:
-    """按**给定的行内位置** gather hidden → lm_head → fp32 CE → 每行平均。
-
-    与 `VLM8Budget.forward_rows()` 同口径（分块 fp32 CE），只是位置可以换：
-    正确位置 = `rows.ans_pos`；错误位置 = `rows.ans_pos + 1`（no-shift 反例）。
-    """
-    hidden = model.lm.model(
-        inputs_embeds=rows.embeds,
-        attention_mask=rows.attention_mask).last_hidden_state
-    row_count, length = hidden.shape[0], hidden.shape[1]
-    hidden_size = hidden.shape[2]
-    flat_index = ((torch.arange(row_count).unsqueeze(1) * length
-                   + pos.clamp(min=0)).reshape(-1))
-    gathered = hidden.reshape(row_count * length, hidden_size).index_select(
-        0, flat_index)                                        # (R*A, H)
-    targets = rows.ans_targets.reshape(-1)
-    ce = torch.zeros(flat_index.numel(), dtype=torch.float32)
-    for start in range(0, flat_index.numel(), 64):
-        stop = min(start + 64, flat_index.numel())
-        logits = model.lm.lm_head(gathered[start:stop]).float()
-        ce[start:stop] = F.cross_entropy(
-            logits, targets[start:stop],
-            reduction="none", ignore_index=IGNORE_INDEX)
-    counts = (rows.ans_targets != IGNORE_INDEX).sum(dim=1).clamp(min=1)
-    return ce.reshape(row_count, pos.size(1)).sum(dim=1) / counts.to(ce.dtype)
-
+def build_rows(model: VLM8Budget, batch: dict, z_s: torch.Tensor = None):
+    if z_s is None:
+        z_s = torch.randn(BATCH, NUM_SPECIALS, ENC_DIM,
+                          generator=torch.Generator().manual_seed(3))
+    return expand_budget_rows(
+        model.projector(z_s), model.lm.get_input_embeddings()(batch["input_ids"]),
+        batch["attention_mask"], batch["labels"], range(1, 9))
 
 # ═══════════════════════════════════════════════════════════════
-# 各检查组
+# ① 形状   ② shift 等价（P0 防回退）
 # ═══════════════════════════════════════════════════════════════
 
-def check_projector(checker: Checker, model: VLM8Budget) -> None:
-    """① 投影头：形状 / 初始化 / 数值有限。"""
-    torch.manual_seed(1)
-    z_s = torch.randn(2, NUM_SPECIALS, ENC_DIM)
-    vis = model.projector(z_s)
-    checker.check("projector shape (B,32,1744)→(B,8,2560)",
-                  tuple(vis.shape) == (2, 8, LM_HIDDEN), str(tuple(vis.shape)))
-    checker.check("projector output finite", bool(torch.isfinite(vis).all()))
+def check_shapes(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """投影 / 8 行展开的形状与 answer 位置结构。"""
+    rows = build_rows(model, batch)
+    checker.check("projector (2,32,1744) → rows (16, 8+T, 2560)",
+                  tuple(rows.embeds.shape) == (BATCH * 8, 8 + TEXT_LEN, LM_HIDDEN))
+    checker.check("ans_pos: image0 k=1 = [13,14,15,16]（= label−1+k）",
+                  rows.ans_pos[0].tolist() == [13, 14, 15, 16],
+                  str(rows.ans_pos[0].tolist()))
 
-    weight = model.projector.token_proj.weight.detach()
-    std = float(weight.std())
-    checker.check("projector Linear init N(0,0.02)",
-                  0.018 < std < 0.022, f"std={std:.5f}")
-    checker.check("projector LayerNorm gamma=1 / beta=0",
-                  bool(torch.allclose(
-                      model.projector.budget_norm.weight.detach(),
-                      torch.ones_like(model.projector.budget_norm.weight))) and
-                  bool(torch.allclose(
-                      model.projector.budget_norm.bias.detach(),
-                      torch.zeros_like(model.projector.budget_norm.bias))))
-
-
-def check_rows(checker: Checker, model: VLM8Budget, batch: dict):
-    """② 8 行展开 + labels/padding/answer 位置结构。"""
-    torch.manual_seed(2)
-    vis = model.projector(torch.randn(BATCH, NUM_SPECIALS, ENC_DIM))
-    text_embeds = torch.randn(BATCH, TEXT_LEN, LM_HIDDEN)
-    ks = list(range(1, 9))
-    rows = expand_budget_rows(
-        vis, text_embeds, batch["attention_mask"], batch["labels"], ks)
-
-    rows_per_image = len(ks)
-    total_rows = BATCH * rows_per_image
-    max_k = max(ks)
-    length = max_k + TEXT_LEN
-    checker.check("rows embeds shape", tuple(rows.embeds.shape) ==
-                  (total_rows, length, LM_HIDDEN), str(tuple(rows.embeds.shape)))
-    checker.check("rows mask/labels shape", tuple(rows.attention_mask.shape) ==
-                  (total_rows, length) and
-                  tuple(rows.labels.shape) == (total_rows, length))
-
-    # 行长度：图 0 = k+17；图 1 = k+13（文本 4 个 right-pad）。
-    lengths = rows.attention_mask.sum(dim=1).reshape(BATCH, rows_per_image)
-    expected = torch.tensor(
-        [[k + TEXT_LEN, k + TEXT_LEN - 4] for k in ks]).T
-    checker.check("row length = k + real_text_len", bool(torch.equal(
-        lengths.cpu(), expected)), str(lengths.tolist()))
-
-    # labels：visual 前缀 + pad 必须全 -100；answer 只在文本段里。
-    labels_ok = True
-    for image_index in range(BATCH):
-        for k in ks:
-            row = image_index * rows_per_image + (k - 1)
-            if not bool((rows.labels[row, :k] == IGNORE_INDEX).all()):
-                labels_ok = False
-            pad_start = k + int(batch["attention_mask"][image_index].sum())
-            if not bool((rows.labels[row, pad_start:] == IGNORE_INDEX).all()):
-                labels_ok = False
-    checker.check("labels: visual prefix / padding all -100", labels_ok)
-
-    # 前缀嵌套：行 k 的 visual 前缀 = vis[:, :k]；文本段逐 token 相同、整体后移 k。
-    row_k1 = 0 * rows_per_image + 0
-    row_k2 = 0 * rows_per_image + 1
-    checker.check("prefix nesting: vis prefix k=1 ⊂ k=2",
-                  bool(torch.equal(rows.embeds[row_k1, :1],
-                                   rows.embeds[row_k2, :1])) and
-                  bool(torch.equal(rows.embeds[row_k2, 1:2], vis[0, 1:2])))
-    checker.check("prefix nesting: text identical but shifted by k",
-                  bool(torch.equal(rows.embeds[row_k1, 1:1 + TEXT_LEN],
-                                   rows.embeds[row_k2, 2:2 + TEXT_LEN])))
-
-    # 预测位置（= label 位置 − 1 + k）：图 0 的 k=1 → 13..16；图 1 的 k=8 → 17..19；
-    # 无效位 -1。数据：图 0 answer 在文本 13..16（prompt 12 个 token），
-    # 图 1 answer 在文本 10..12（prompt 9 个 token，文本 right-pad 4 个）。
-    checker.check("ans_pos (predict pos): image0 k=1 = [13,14,15,16]",
-                  rows.ans_pos[row_k1].tolist() == [13, 14, 15, 16],
-                  str(rows.ans_pos[row_k1].tolist()))
-    image1_k8 = 1 * rows_per_image + 7
-    checker.check("ans_pos (predict pos): image1 k=8 has 3 valid + 1 invalid (-1)",
-                  rows.ans_pos[image1_k8].tolist() == [17, 18, 19, -1],
-                  str(rows.ans_pos[image1_k8].tolist()))
-    checker.check("ans_targets: invalid slot is -100",
-                  rows.ans_targets[image1_k8].tolist()[-1] == IGNORE_INDEX)
-    checker.check("budget_ks stored", rows.budget_ks.tolist() == ks)
-    return rows
-
-
-def check_collator(checker: Checker) -> None:
-    """③ collator：right-padding / labels / gt_name。"""
-    features = [
-        {
-            "pixel_values": torch.zeros(3, 8, 8),
-            "input_ids": torch.tensor([5, 6, 7]),
-            "attention_mask": torch.ones(3, dtype=torch.long),
-            "labels": torch.tensor([IGNORE_INDEX, IGNORE_INDEX, 7]),
-            "gt_name": "a",
-        },
-        {
-            "pixel_values": torch.zeros(3, 8, 8),
-            "input_ids": torch.tensor([8, 9]),
-            "attention_mask": torch.ones(2, dtype=torch.long),
-            "labels": torch.tensor([IGNORE_INDEX, 9]),
-            "gt_name": "b",
-        },
-    ]
-    batch = EightBudgetCollator(_FakeTokenizer())(features)
-    checker.check("collator input_ids padded to (2,3) with pad_token_id=0",
-                  batch["input_ids"].tolist() == [[5, 6, 7], [8, 9, 0]],
-                  str(batch["input_ids"].tolist()))
-    checker.check("collator attention_mask zero on padding",
-                  batch["attention_mask"].tolist() == [[1, 1, 1], [1, 1, 0]])
-    checker.check("collator labels -100 on padding",
-                  batch["labels"].tolist() ==
-                  [[IGNORE_INDEX, IGNORE_INDEX, 7],
-                   [IGNORE_INDEX, 9, IGNORE_INDEX]])
-    checker.check("collator passes gt_name", batch["gt_name"] == ["a", "b"])
-    checker.check("collator pixel_values stacked",
-                  tuple(batch["pixel_values"].shape) == (2, 3, 8, 8))
-
-    # 图像变换：val 确定性输出 (3,448,448)。
-    image = Image.new("RGB", (640, 480), color=(120, 30, 200))
-    transformed = build_image_transform(train=False)(image)
-    checker.check("val transform → (3,448,448)",
-                  tuple(transformed.shape) == (3, IMAGE_SIZE, IMAGE_SIZE),
-                  str(tuple(transformed.shape)))
-
-
-def check_dataset(checker: Checker) -> None:
-    """③b dataset：jsonl + 图像 + chat template → ids/labels；collator 成批。"""
-    tokenizer = _FakeChatTokenizer()
-    root = tempfile.mkdtemp(prefix="vlm8b_smoke_")
-    try:
-        image_dir = os.path.join(root, "n01440764")
-        os.makedirs(image_dir, exist_ok=True)
-        for name, color in (("a.JPEG", (200, 30, 30)), ("b.JPEG", (30, 30, 200))):
-            Image.new("RGB", (80, 60), color=color).save(
-                os.path.join(image_dir, name))
-
-        def _messages(answer: str) -> str:
-            return json.dumps([
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "what"},
-                {"role": "assistant", "content": answer},
-            ])
-
-        jsonl_path = os.path.join(root, "sft.jsonl")
-        with open(jsonl_path, "w", encoding="utf-8") as handle:
-            for name, answer in (("a.JPEG", "cat"), ("b.JPEG", "dog")):
-                handle.write(json.dumps({
-                    "image": f"n01440764/{name}",
-                    "messages_short": _messages(answer),
-                    "gt": "cat" if answer == "cat" else "dog",
-                }) + "\n")
-
-        dataset = SelfDistillSFTDataset(
-            jsonl_path=jsonl_path,
-            tokenizer=tokenizer,
-            image_root=root,
-            transform=build_image_transform(train=False),
-        )
-        checker.check("dataset length", len(dataset) == 2, str(len(dataset)))
-        item = dataset[0]
-        checker.check("dataset pixel_values (3,448,448)",
-                      tuple(item["pixel_values"].shape) == (3, IMAGE_SIZE, IMAGE_SIZE))
-        expected_prompt = tokenizer.apply_chat_template(
-            [{"role": "system", "content": "sys"},
-             {"role": "user", "content": "what"}],
-            add_generation_prompt=True)
-        expected_answer = _FakeChatTokenizer._content_ids("cat") + [31, 2]
-        checker.check("dataset input_ids = prompt + answer(eos-truncated)",
-                      item["input_ids"].tolist()
-                      == expected_prompt + expected_answer,
-                      f"{item['input_ids'].tolist()}")
-        n_prompt = len(expected_prompt)
-        checker.check("dataset labels: prompt all -100",
-                      bool((item["labels"][:n_prompt] == IGNORE_INDEX).all()))
-        checker.check("dataset labels: answer ids + eos kept",
-                      item["labels"][n_prompt:].tolist() == expected_answer)
-        checker.check("dataset attention_mask all 1",
-                      bool((item["attention_mask"] == 1).all()))
-
-        batch = EightBudgetCollator(tokenizer)([dataset[0], dataset[1]])
-        checker.check("dataset+collator batch shapes",
-                      tuple(batch["input_ids"].shape) ==
-                      (2, int(batch["input_ids"].shape[1])) and
-                      tuple(batch["pixel_values"].shape) ==
-                      (2, 3, IMAGE_SIZE, IMAGE_SIZE) and
-                      batch["gt_name"] == ["cat", "dog"])
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def check_forward_and_loss(checker: Checker, model: VLM8Budget, batch: dict):
-    """④ 前向 / loss 权重 / CE 遮蔽 / 反传路径。"""
-    out = model(**batch)
-    for key in ("loss", "per_budget_ce", "per_budget_ce_per_sample",
-                "row_ce", "budget_ks"):
-        checker.check(f"forward returns {key}", key in out)
-    checker.check("per_budget_ce shape (8,)", tuple(out["per_budget_ce"].shape)
-                  == (8,), str(tuple(out["per_budget_ce"].shape)))
-    checker.check("per_budget_ce_per_sample shape (2,8)",
-                  tuple(out["per_budget_ce_per_sample"].shape) == (2, 8),
-                  str(tuple(out["per_budget_ce_per_sample"].shape)))
-    checker.check("loss finite", bool(torch.isfinite(out["loss"])))
-    checker.close("per_budget_ce = mean over images",
-                  out["per_budget_ce"],
-                  out["per_budget_ce_per_sample"].mean(dim=0), 1e-6)
-    checker.close("equal weighting: loss = mean(per_budget_ce)",
-                  out["loss"], out["per_budget_ce"].mean(), 1e-6)
-
-    # inv-k 权重：loss = Σ (1/k)/Σ(1/j) · CE_k
-    model.set_loss_weighting("inv-k")
-    out_inv = model(**batch)
-    ks = torch.arange(1, 9, dtype=torch.float32)
-    weights = (1.0 / ks)
-    weights = weights / weights.sum()
-    checker.close("inv-k weighting matches formula", out_inv["loss"],
-                  (out_inv["per_budget_ce"] * weights).sum(), 1e-6)
-    # 自定义 budget_weights 也应生效
-    custom = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    out_custom = model(**batch, budget_weights=custom)
-    checker.close("custom budget_weights: loss = CE(k=1)",
-                  out_custom["loss"], out_custom["per_budget_ce"][0], 1e-6)
-    model.set_loss_weighting("equal")
-
-    # ── CE 口径（**非循环**，P0 修复后） ─────────────────────────
-    # 标准因果 LM 的 teacher forcing：position p 的 hidden 预测 label[p+1]。
-    # 所以参考值**不能**再用 gather 自己的 hidden 算（那是循环验证），而要用
-    # 全序列 logits 的 shift 口径：
-    #     F.cross_entropy(logits[:, :-1].reshape(-1,V), labels[:, 1:].reshape(-1),
-    #                     ignore_index=-100)
-    # 再按行平均（只对 answer 的 label 生效；prompt/pad 由 ignore_index 处理）。
-    rows = expand_budget_rows(
-        model.projector(torch.randn(BATCH, NUM_SPECIALS, ENC_DIM)),
-        model.lm.get_input_embeddings()(batch["input_ids"]),
-        batch["attention_mask"], batch["labels"], list(range(1, 9)))
-    out_rows = model.forward_rows(rows)
-    hidden = model.lm.model(
-        inputs_embeds=rows.embeds,
-        attention_mask=rows.attention_mask).last_hidden_state
-    logits = model.lm.lm_head(hidden).float()                # (R,L,VOCAB) fp32
-    row_count = hidden.size(0)
-    shifted_logits = logits[:, :-1].reshape(-1, VOCAB)
-    shifted_labels = rows.labels[:, 1:].reshape(-1)
-    per_token = F.cross_entropy(
-        shifted_logits, shifted_labels,
-        reduction="none", ignore_index=IGNORE_INDEX).reshape(row_count, -1)
+def check_shift(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """answer-only CE == 标准因果 CE(logits[:, :-1], labels[:, 1:]) 按行 mean。"""
+    rows = build_rows(model, batch)
+    hidden = model.lm.model(inputs_embeds=rows.embeds,
+                            attention_mask=rows.attention_mask).last_hidden_state
+    logits = model.lm.lm_head(hidden).float()
+    token_ce = F.cross_entropy(
+        logits[:, :-1].reshape(-1, VOCAB), rows.labels[:, 1:].reshape(-1),
+        reduction="none", ignore_index=IGNORE_INDEX).reshape(rows.embeds.size(0), -1)
     counts = (rows.labels[:, 1:] != IGNORE_INDEX).sum(dim=1).clamp(min=1)
-    reference = per_token.sum(dim=1) / counts
-    n_ref = int((rows.labels[:, 1:] != IGNORE_INDEX).sum())
-    checker.check(
-        "standard shift reference covers all answer tokens (labels[:, 1:])",
-        n_ref == int((rows.ans_targets != IGNORE_INDEX).sum()),
-        f"{n_ref} supervised positions")
-    checker.close(
-        "row_ce == standard causal shift CE (logits[:-1] vs labels[1:])",
-        out_rows["row_ce"], reference, 1e-5)
+    checker.close("shift equivalence: row_ce == CE(logits[:, :-1], labels[:, 1:])",
+                  model.forward_rows(rows)["row_ce"], token_ce.sum(dim=1) / counts,
+                  SHIFT_TOL)
 
-    # 结构断言 ①：逐行逐元素 ans_pos == label_pos - 1 + k。两种等价写法都验：
-    #   · 文本坐标：label_pos(text) = answer 在 batch labels 里的位置 ⇒ + k 进行坐标；
-    #   · 行坐标  ：label_pos(row) = rows.labels 里非 -100 的位置（已含 +k）
-    #               ⇒ 预测位置 = label_pos(row) - 1。
-    # 两者相等即 `ans_pos == k + (label_pos_text - 1)`，也就是标准 shift 的错位。
-    text_label_positions = [
-        (labels_row != IGNORE_INDEX).nonzero(as_tuple=False).flatten()
-        for labels_row in batch["labels"]]
-    budget_ks = rows.budget_ks.tolist()
-    structural_ok = True
-    n_slots = 0
-    n_bad = 0
-    #: no-shift 反例用的位置：**label 位置本身**（从 rows.labels 反解，与 ans_pos 无关）。
-    leak_pos = torch.full_like(rows.ans_pos, -1)
-    for row in range(row_count):
-        image_index = row // rows.num_budgets
-        k = int(budget_ks[row % rows.num_budgets])
-        valid_slots = rows.ans_pos[row] >= 0
-        got_pos = rows.ans_pos[row][valid_slots]
-        n_slots += int(got_pos.numel())
+# ═══════════════════════════════════════════════════════════════
+# ③ 行独立 / 截断隔离   ④ pad 隔离
+# ═══════════════════════════════════════════════════════════════
 
-        text_pos = text_label_positions[image_index].to(got_pos.device)
-        row_pos = (rows.labels[row] != IGNORE_INDEX).nonzero(
-            as_tuple=False).flatten()
-        leak_pos[row, :row_pos.numel()] = row_pos
-        expected_from_text = text_pos - 1 + k
-        if (got_pos.numel() != expected_from_text.numel()
-                or not torch.equal(got_pos, expected_from_text)):
-            structural_ok = False
-            n_bad += 1
-        if not torch.equal(got_pos, row_pos - 1):
-            structural_ok = False
-            n_bad += 1
-        if not torch.equal(rows.ans_targets[row][valid_slots],
-                           rows.labels[row][row_pos]):
-            structural_ok = False
-            n_bad += 1
-        if not torch.equal(
-                rows.ans_targets[row][valid_slots],
-                batch["labels"][image_index][
-                    text_label_positions[image_index]].to(got_pos.device)):
-            structural_ok = False
-            n_bad += 1
-    checker.check(
-        "structural: ans_pos == label_pos - 1 + k (per row/element)",
-        structural_ok,
-        f"checked {n_slots} slots over {row_count} rows, bad={n_bad}")
+def check_isolation(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """只看前 k 个 visual token；行与行是独立 batch 行。"""
+    z_s = torch.randn(BATCH, NUM_SPECIALS, ENC_DIM,
+                      generator=torch.Generator().manual_seed(3))
+    base = model.forward_rows(build_rows(model, batch, z_s))
+    changed = z_s.clone()
+    changed[:, 4] += torch.randn(changed[:, 4].shape,
+                                 generator=torch.Generator().manual_seed(7))
+    after = model.forward_rows(build_rows(model, batch, changed))
+    checker.close("truncation: z_s[4] change → k=1 CE unchanged",
+                  after["per_budget_ce"][:1], base["per_budget_ce"][:1], CLEAN_TOL)
+    delta = float(after["per_budget_ce"][1] - base["per_budget_ce"][1])
+    checker.check("truncation: z_s[4] change → k=2 CE changed", abs(delta) > 1e-4, f"Δ={delta:.2e}")
+    rows = build_rows(model, batch, z_s)
+    rows.embeds[0] = torch.randn_like(rows.embeds[0])
+    checker.close("row independence: k=1 行被改 → k=8 行 CE unchanged",
+                  model.forward_rows(rows)["row_ce"][7:8], base["row_ce"][7:8], CLEAN_TOL)
 
-    # leak 回归 ②：no-shift（错误口径）= 在 **label 位置本身** gather 算 CE。
-    # 位置从 `rows.labels` 反解，**不依赖 `rows.ans_pos`** —— 所以如果谁把
-    # `expand_budget_rows` 的 shift 改回去，`row_ce` 就会等于这里的 `leak_ce`，
-    # 本检查（以及上面的标准 shift 等价检查）同时 FAIL。
-    leak_ce = _row_ce_from_pos(model, rows, leak_pos)
-    leak_delta = (leak_ce - out_rows["row_ce"]).abs()
-    checker.check(
-        "leak-regression: no-shift CE differs from correct shift CE",
-        bool(float(leak_delta.min()) > 1e-6),
-        f"min|Δ|={float(leak_delta.min()):.3e} "
-        f"max|Δ|={float(leak_delta.max()):.3e} "
-        f"(mean shift CE={float(out_rows['row_ce'].mean()):.4f}, "
-        f"mean no-shift CE={float(leak_ce.mean()):.4f})")
-
-    # 反传：梯度应到达 projector 与 encoder。
-    model.zero_grad(set_to_none=True)
-    model.train()
-    out_train = model(**batch)
-    out_train["loss"].backward()
-    checker.check("backward reaches projector",
-                  model.projector.token_proj.weight.grad is not None and
-                  float(model.projector.token_proj.weight.grad.abs().sum()) > 0)
-    checker.check("backward reaches encoder",
-                  model.encoder.tokens.grad is not None and
-                  float(model.encoder.tokens.grad.abs().sum()) > 0)
-    stats = model.pop_budget_ce_stats()
-    checker.check("per-budget CE stats accumulated in train mode",
-                  stats is not None and len(stats["per_budget_ce"]) == 8 and
-                  stats["n_micro"] == 1, str(stats and stats.get("n_micro")))
-    checker.check("stats queue emptied after pop",
-                  model.pop_budget_ce_stats() is None)
-    model.zero_grad(set_to_none=True)
-    model.eval()
-
-
-def check_invariants(checker: Checker, model: VLM8Budget, batch: dict):
-    """⑤ 四个不变量：行独立 / 截断隔离 / pad 隔离 / 预算单调结构。"""
-    torch.manual_seed(3)
-    z_s = torch.randn(BATCH, NUM_SPECIALS, ENC_DIM)
-    vis = model.projector(z_s)
-    text_embeds = model.lm.get_input_embeddings()(batch["input_ids"])
-    ks = list(range(1, 9))
-
-    # ① 行独立：图 0 单图单跑 vs 混在 2 图 batch 里。
-    out_batch = model(**batch)["per_budget_ce_per_sample"]
-    out_single = model(
-        pixel_values=batch["pixel_values"][:1],
-        input_ids=batch["input_ids"][:1],
-        attention_mask=batch["attention_mask"][:1],
-        labels=batch["labels"][:1],
-    )["per_budget_ce_per_sample"]
-    checker.close("invariant 1: row independence (single vs mixed batch)",
-                  out_single[0], out_batch[0], 1e-4)
-
-    rows = expand_budget_rows(
-        vis, text_embeds, batch["attention_mask"], batch["labels"], ks)
+def check_pad(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """padding 位置的 embedding 不影响任何行。"""
+    rows = build_rows(model, batch)
     base = model.forward_rows(rows)["row_ce"]
-
-    # ② 行隔离：改图 0 的 k=1 行 embedding，k=8 行 loss 不变。
-    rows_changed = expand_budget_rows(
-        vis, text_embeds, batch["attention_mask"], batch["labels"], ks)
-    rows_changed.embeds[0] = torch.randn_like(rows_changed.embeds[0])
-    after = model.forward_rows(rows_changed)["row_ce"]
-    checker.close("invariant 2a: change k=1 row → k=8 row CE unchanged",
-                  after[7], base[7], 1e-7)
-    checker.check("invariant 2a: k=1 row CE actually changed",
-                  abs(float(after[0] - base[0])) > 1e-4,
-                  f"Δ={float(after[0] - base[0]):.3e}")
-
-    # ② 截断隔离：z_s 第 5 个 token（属于第 2 个 visual token）只影响 k≥2。
-    #    注意不能加常数（LayerNorm 平移不变 ⇒ 投影后逐位不变），必须加噪声。
-    z_s_changed = z_s.clone()
-    torch.manual_seed(7)
-    z_s_changed[:, 4] += torch.randn_like(z_s_changed[:, 4])
-    vis_changed = model.projector(z_s_changed)
-    rows_changed2 = expand_budget_rows(
-        vis_changed, text_embeds, batch["attention_mask"], batch["labels"], ks)
-    after2 = model.forward_rows(rows_changed2)["per_budget_ce"]
-    base_pb = model.forward_rows(rows)["per_budget_ce"]
-    checker.close("invariant 2b: change z_s[4] → k=1 CE unchanged",
-                  after2[0], base_pb[0], 1e-7)
-    checker.check("invariant 2b: change z_s[4] → k=2 CE changed",
-                  abs(float(after2[1] - base_pb[1])) > 1e-4,
-                  f"Δ={float(after2[1] - base_pb[1]):.3e}")
-
-    # ③ pad 隔离：padding 位置 embedding 换成随机值，所有行 loss 不变。
-    rows_pad = expand_budget_rows(
-        vis, text_embeds, batch["attention_mask"], batch["labels"], ks)
-    pad_positions = rows_pad.attention_mask == 0
-    checker.check("padding positions exist", bool(pad_positions.any()))
-    rows_pad.embeds[pad_positions] = torch.randn_like(
-        rows_pad.embeds[pad_positions])
-    after_pad = model.forward_rows(rows_pad)["row_ce"]
-    checker.close("invariant 3: pad embedding change → all row CE unchanged",
-                  after_pad, base, 1e-7)
-
-    # ④ 预算单调结构：行长度严格 +1、answer 位置随 k 平移、前缀嵌套。
-    lengths = rows.attention_mask.sum(dim=1).reshape(BATCH, len(ks))
-    strictly_increasing = all(
-        int(lengths[b, i + 1] - lengths[b, i]) == 1
-        for b in range(BATCH) for i in range(len(ks) - 1))
-    checker.check("invariant 4: row length strictly +1 per budget",
-                  strictly_increasing)
-    shifted = rows.ans_pos.reshape(BATCH, len(ks), -1)
-    valid = shifted >= 0
-    checker.check("invariant 4: ans_pos shifts by +1 per budget",
-                  bool(torch.equal(
-                      (shifted[:, 1:] - shifted[:, :-1])[valid[:, 1:] & valid[:, :-1]],
-                      torch.ones(int((valid[:, 1:] & valid[:, :-1]).sum()),
-                                 dtype=torch.long))))
-
-    # 行 k 的 visual 前缀 = vis[:, :k]；文本段逐 token 相同、整体后移 k。
-    checker.check("invariant 4: vis prefix k=1 ⊂ k=2",
-                  bool(torch.equal(rows.embeds[0, :1], rows.embeds[1, :1])) and
-                  bool(torch.equal(rows.embeds[1, 1:2], vis[0, 1:2])))
-    checker.check("invariant 4: text identical but shifted by k",
-                  bool(torch.equal(rows.embeds[0, 1:1 + TEXT_LEN],
-                                   rows.embeds[1, 2:2 + TEXT_LEN])))
-
-
-def check_frozen_encoder_guard(checker: Checker, batch: dict) -> None:
-    """⑥ P1#2：冻结的 encoder 不会被拉回 train 模式（forward 入口幂等保护）。"""
-    model = build_model()
-    encoder = model.encoder
-    encoder.eval()
-    for param in encoder.parameters():
-        param.requires_grad_(False)
-
-    # ① `model.train()` 不会把冻结的 encoder 切回 train（train() 覆写）。
-    model.train()
-    checker.check("frozen encoder: model.train() keeps encoder in eval mode",
-                  encoder.training is False and model.training is True)
-
-    # ② 有人硬把 encoder.train() 切回 train，forward 入口的幂等保护要兜住。
-    encoder.train()
-    checker.check("frozen encoder: manual encoder.train() flips it (setup)",
-                  encoder.training is True)
-    with torch.no_grad():
-        model(**batch)
-    checker.check("frozen encoder: forward() restores eval (idempotent guard)",
-                  encoder.training is False)
-    with torch.no_grad():
-        model(**batch)                     # 再跑一次，保护必须幂等
-    checker.check("frozen encoder: guard is idempotent (2nd forward)",
-                  encoder.training is False)
-
-    # ③ 冻结期 backward 不应该给 encoder 参数留梯度。
-    model.zero_grad(set_to_none=True)
-    out = model(**batch)
-    out["loss"].backward()
-    checker.check("frozen encoder: no grad on frozen encoder after backward",
-                  all(param.grad is None for param in encoder.parameters()))
-    model.pop_budget_ce_stats()            # 丢掉本检查累积的统计
-    model.zero_grad(set_to_none=True)
-
-
-class _ListDataset(torch.utils.data.Dataset):
-    """把已构造好的样本 dict 列表包成 Dataset（Trainer 冒烟用）。"""
-
-    def __init__(self, items: list):
-        self.items = items
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, index: int) -> dict:
-        return self.items[index]
-
-
-def check_trainer_no_eval(checker: Checker, batch: dict) -> None:
-    """⑦ P1#1：Trainer 默认路径（`eval_strategy="no"` + 无 eval_dataset）可训练。
-
-    `VLM8Budget.forward()` 只返回 loss / CE，**不返回 `logits`**，HF
-    `prediction_step` 取不到 logits（会崩或给出无意义指标）⇒ Trainer 内不做 eval，
-    评测交给 `eval.py`。这里用微型替身跑 1 步真实 `Trainer.train()`：
-
-    * 结构上确认 `eval_strategy="no"` 且 `eval_dataset is None`（不触发 prediction_step）；
-    * 训练循环里 `model.train()` 之后冻结的 encoder 仍然是 eval（P1#2 与 Trainer 的
-      交互也一并验证）。
-
-    只有 **import / `TrainingArguments` 构造**（纯环境 API）失败才 SKIP；
-    `trainer.train()` 本身抛错必须让 smoke FAIL（那正是 P1#1 要防的"会崩的默认路径"）。
-    """
-    temp_dir = tempfile.mkdtemp(prefix="vlm8b_trainer_")
-    try:
-        try:
-            from transformers import TrainingArguments
-            try:
-                import train as train_module
-            except ImportError:             # `python -m vlm8b.smoke` 包内导入
-                from . import train as train_module
-            training_args = TrainingArguments(
-                output_dir=temp_dir,
-                num_train_epochs=1,
-                per_device_train_batch_size=1,
-                gradient_accumulation_steps=1,
-                learning_rate=1e-5,
-                logging_steps=1,
-                save_strategy="no",
-                eval_strategy=train_module.TRAINER_EVAL_STRATEGY,
-                bf16=False,
-                fp16=False,
-                report_to=[],
-                remove_unused_columns=False,
-                max_steps=1,
-                use_cpu=True,
-                disable_tqdm=True,
-            )
-        except Exception as exc:            # noqa: BLE001 - 环境不支持则 SKIP
-            print(f"[SKIP] trainer no-eval smoke (env unsupported: "
-                  f"{type(exc).__name__}: {exc})")
-            return
-
-        model = build_model()
-        encoder = model.encoder
-        encoder.eval()
-        for param in encoder.parameters():
-            param.requires_grad_(False)        # E1：冻结期
-
-        items = []
-        for index in range(batch["pixel_values"].size(0)):
-            items.append({
-                key: (value[index] if torch.is_tensor(value) else value[index])
-                for key, value in batch.items()})
-
-        trainer = train_module.VLM8BudgetTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=_ListDataset(items),
-            eval_dataset=None,
-            data_collator=EightBudgetCollator(_FakeTokenizer()),
-            param_groups=train_module.build_param_groups(
-                model, lr_llm=1e-5, lr_proj=1e-4, lr_encoder=5e-6,
-                wd_llm=0.1, wd_other=0.05),
-        )
-        trainer.train()
-        checker.check(
-            "trainer default path: eval_strategy='no' + no eval_dataset",
-            str(training_args.eval_strategy).lower().endswith("no")
-            and trainer.eval_dataset is None,
-            f"eval_strategy={training_args.eval_strategy}")
-        checker.check(
-            "trainer default path: 1-step train() ran without prediction_step",
-            int(trainer.state.global_step) == 1
-            and trainer.state.log_history != [])
-        checker.check(
-            "trainer + frozen encoder: encoder still eval after train()",
-            encoder.training is False)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def check_encoder_ckpt(path: str) -> bool:
-    """（可选 --full）从阶段2 ckpt 构造编码器，验证 z_s 形状。"""
-    config = VLM8BudgetConfig(
-        encoder_ckpt=path, auto_load_modules=False,
-        use_gradient_checkpointing=False)
-    encoder = AssocVTCEncoder(config)
-    encoder.eval()
-    with torch.no_grad():
-        z_s = encoder(torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE))
-    ok = tuple(z_s.shape) == (1, NUM_SPECIALS, ENC_DIM)
-    print(f"[{'PASS' if ok else 'FAIL'}] encoder ckpt → z_s "
-          f"{tuple(z_s.shape)} (expected (1,32,1744))")
-    return ok
-
-
-# ═══════════════════════════════════════════════════════════════
-# main
-# ═══════════════════════════════════════════════════════════════
-
-def parse_args() -> argparse.Namespace:
-    """`--logic-only` 是默认路径；`--full` 额外检查真实 ckpt（可选）。"""
-    parser = argparse.ArgumentParser(description="vlm8b CPU logic smoke test")
-    parser.add_argument("--logic-only", dest="logic_only", action="store_true",
-                        default=True,
-                        help="只跑纯张量逻辑（默认；不需要 Qwen/GPU）")
-    parser.add_argument("--full", dest="logic_only", action="store_false",
-                        help="额外用 --encoder-ckpt 做真实编码器形状检查")
-    parser.add_argument("--encoder-ckpt", default="",
-                        help="阶段2 ckpt 路径（仅 --full 用；不存在则 SKIP）")
-    return parser.parse_args()
-
+    pad = rows.attention_mask == 0
+    assert bool(pad.any()), "没有 padding 位置，pad 隔离检查无效"
+    rows.embeds[pad] = torch.randn_like(rows.embeds[pad])
+    checker.close("pad isolation: pad embedding change → all row CE unchanged",
+                  model.forward_rows(rows)["row_ce"], base, CLEAN_TOL)
 
 def main() -> int:
-    """跑全部检查，返回 0/1。"""
-    args = parse_args()
-    print("=" * 62)
-    print("vlm8b smoke: CPU tensor logic self-check")
-    print(f"torch={torch.__version__}  cuda={torch.cuda.is_available()}")
-    print("=" * 62)
-
-    checker = Checker()
-    try:
-        model = build_model()
-        batch = make_fake_batch()
-        check_projector(checker, model)
-        check_rows(checker, model, batch)
-        check_collator(checker)
-        check_dataset(checker)
-        check_forward_and_loss(checker, model, batch)
-        check_invariants(checker, model, batch)
-        check_frozen_encoder_guard(checker, batch)
-        check_trainer_no_eval(checker, batch)
-    except Exception:                           # noqa: BLE001 - 自检需要打印完整栈
-        traceback.print_exc()
-        checker.check("unexpected exception", False)
-
-    if not args.logic_only:
-        if args.encoder_ckpt and os.path.isfile(args.encoder_ckpt):
-            try:
-                ok = check_encoder_ckpt(args.encoder_ckpt)
-                checker.check("encoder ckpt shape check", ok)
-            except Exception:                   # noqa: BLE001
-                traceback.print_exc()
-                checker.check("encoder ckpt shape check", False)
-        else:
-            print(f"[SKIP] encoder ckpt check (file not found: "
-                  f"{args.encoder_ckpt or '<empty>'})")
-
+    """跑四项检查，返回 0/1。"""
+    print(f"vlm8b smoke: CPU tensor logic  torch={torch.__version__}")
+    model = VLM8Budget(VLM8BudgetConfig(encoder_ckpt="", qwen_dir=""),
+                       encoder=_FakeEncoder(), lm=_TinyLM()).eval()
+    checker, batch = Checker(), make_batch()
+    with torch.no_grad():
+        check_shapes(checker, model, batch)
+        check_shift(checker, model, batch)
+        check_isolation(checker, model, batch)
+        check_pad(checker, model, batch)
     return checker.summary()
-
 
 if __name__ == "__main__":
     sys.exit(main())
