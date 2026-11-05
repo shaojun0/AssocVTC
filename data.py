@@ -89,9 +89,8 @@ class SelfDistillSFTDataset(Dataset):
 
         messages = json.loads(record["messages"]) if isinstance(
             record["messages"], str) else record["messages"]
-        prompt_ids = list(self.tokenizer.apply_chat_template(
-            messages[:-1], tokenize=True, add_generation_prompt=True))
-        full_ids = list(self.tokenizer.apply_chat_template(messages, tokenize=True))
+        prompt_ids = self._chat_ids(messages[:-1], add_generation_prompt=True)
+        full_ids = self._chat_ids(messages)
         if full_ids[:len(prompt_ids)] == prompt_ids:
             answer_ids = full_ids[len(prompt_ids):]
         else:                                   # chat template 前缀不一致时兜底
@@ -109,6 +108,18 @@ class SelfDistillSFTDataset(Dataset):
                 [IGNORE_INDEX] * len(prompt_ids) + answer_ids, dtype=torch.long),
             "gt_name": record["gt"] or os.path.dirname(record["image"]),
         }
+
+    def _chat_ids(self, messages, add_generation_prompt: bool = False) -> List[int]:
+        """`apply_chat_template(tokenize=True)` → id 列表。
+
+        transformers 5.x 在 tokenize=True 时返回 BatchEncoding（4.x 返回 list[int]），
+        `list(...)` 会拿到键名字符串。这里统一取出 input_ids。
+        """
+        out = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=add_generation_prompt)
+        if hasattr(out, "keys") and "input_ids" in out:
+            out = out["input_ids"]
+        return [int(token) for token in out]
 
     def _truncate_at_eos(self, answer_ids: List[int]) -> List[int]:
         """answer 截到第一个 eos（含），丢掉模板尾部换行；没有 eos 则补一个。"""
