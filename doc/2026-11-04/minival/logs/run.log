@@ -1,0 +1,54 @@
+== device=NVIDIA GeForce RTX 4080 SUPER steps=1500 seeds=[0, 1]
+data ready train=(2000, 3, 32, 32) test=(200, 3, 32, 32)
+== packing equivalence check
+{
+ "max_abs_diff_packed_masked_vs_separate": 1.0967254638671875e-05,
+ "max_abs_diff_packed_nomask_vs_separate": 0.00034749507904052734,
+ "nomask_attn_mass_on_own_variant_block": {
+  "8": 0.14282748103141785,
+  "16": 0.28572210669517517,
+  "32": 0.5714503526687622
+ }
+}
+[A seed0 K=8] test={8: 0.13708, 16: 0.14458, 32: 0.15658} wall=53.4s peak=231MB
+[A seed0 K=16] test={8: 0.19391, 16: 0.19391, 32: 0.19391} wall=52.7s peak=244MB
+[A seed0 K=32] test={8: 0.17736, 16: 0.1775, 32: 0.17421} wall=53.2s peak=249MB
+[B seed0 1500st] test={8: 0.09774, 16: 0.09758, 32: 0.0975} wall=55.2s peak=469MB
+[C seed0 1500st] test={8: 0.2029, 16: 0.14536, 32: 0.09716} wall=53.8s peak=469MB
+[D1x seed0 1500st] test={8: 0.17362, 16: 0.17319, 32: 0.17316} wall=52.9s peak=244MB
+[D3x seed0 4500st] test={8: 0.07785, 16: 0.07678, 32: 0.07675} wall=149.7s peak=244MB
+[A seed1 K=8] test={8: 0.0981, 16: 0.09903, 32: 0.10467} wall=49.4s peak=241MB
+[A seed1 K=16] test={8: 0.14812, 16: 0.08893, 32: 0.0933} wall=49.5s peak=244MB
+[A seed1 K=32] test={8: 0.28628, 16: 0.16364, 32: 0.09554} wall=49.3s peak=249MB
+[B seed1 1500st] test={8: 0.09246, 16: 0.09162, 32: 0.09156} wall=51.4s peak=469MB
+[C seed1 1500st] test={8: 0.18979, 16: 0.14438, 32: 0.09607} wall=50.3s peak=469MB
+[D1x seed1 1500st] test={8: 0.09925, 16: 0.09721, 32: 0.09691} wall=49.7s peak=244MB
+[D3x seed1 4500st] test={8: 0.05199, 16: 0.04857, 32: 0.04819} wall=148.0s peak=244MB
+
+== AGGREGATE (mean +- std over seeds)
+arm                 K8              K16              K32
+A       0.11759+-0.02756   0.14142+-0.07423   0.13488+-0.05563
+B       0.09510+-0.00373   0.09460+-0.00421   0.09453+-0.00420
+C       0.19635+-0.00927   0.14487+-0.00070   0.09661+-0.00077
+D1x     0.13644+-0.05259   0.13520+-0.05373   0.13504+-0.05391
+D3x     0.06492+-0.01829   0.06267+-0.01995   0.06247+-0.02019
+
+alignment tax B vs A @K32 = -29.91%  (|tax|<=5% required)
+B vs A %: {'K8': -19.13, 'K16': -33.11, 'K32': -29.91}
+C vs B %: {'K8': 106.47, 'K16': 53.14, 'K32': 2.2}
+D3x vs A %: {'K8': -44.79, 'K16': -55.68, 'K32': -53.68}
+D1x vs A %: {'K8': 16.03, 'K16': -4.4, 'K32': 0.12}
+A(K32 model) truncation ratio: {'K8': 1.018, 'K16': 1.019, 'K32': 1.0}
+
+escalation (B): {"K8": 0.09773624567314983, "K16": 0.09757558804005384, "K32": 0.09750151675194502}
+  {'escalate_frac': 0.0, 'mean_l1': 0.0977, 'mean_budget': 8.0, 'coverage_of_hard_quartile': 0.0, 'precision_benefited': 0.0}
+  {'escalate_frac': 0.1, 'mean_l1': 0.0976, 'mean_budget': 9.6, 'coverage_of_hard_quartile': 0.4, 'precision_benefited': 0.8}
+  {'escalate_frac': 0.2, 'mean_l1': 0.0976, 'mean_budget': 11.2, 'coverage_of_hard_quartile': 0.8, 'precision_benefited': 0.725}
+  {'escalate_frac': 0.3, 'mean_l1': 0.0975, 'mean_budget': 12.8, 'coverage_of_hard_quartile': 1.0, 'precision_benefited': 0.7333}
+  {'escalate_frac': 0.4, 'mean_l1': 0.0975, 'mean_budget': 14.4, 'coverage_of_hard_quartile': 1.0, 'precision_benefited': 0.6875}
+  {'escalate_frac': 0.5, 'mean_l1': 0.0976, 'mean_budget': 16.0, 'coverage_of_hard_quartile': 1.0, 'precision_benefited': 0.63}
+  {'escalate_frac': 0.7, 'mean_l1': 0.0976, 'mean_budget': 19.2, 'coverage_of_hard_quartile': 1.0, 'precision_benefited': 0.5571}
+  {'escalate_frac': 1.0, 'mean_l1': 0.0975, 'mean_budget': 24.0, 'coverage_of_hard_quartile': 1.0, 'precision_benefited': 0.535}
+  min budget within 5% of K32: {'escalate_frac': 0.0, 'mean_l1': 0.09773624567314983, 'mean_budget': 8.0, 'coverage_of_hard_quartile': 0.0, 'precision_benefited': 0.0}
+
+wrote results.json

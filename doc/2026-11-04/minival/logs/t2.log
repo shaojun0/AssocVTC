@@ -1,0 +1,16 @@
+== device=cuda train=(800, 3, 112, 112) test=(100, 3, 112, 112) steps=300
+[single_K32] wall=38.6s peak=1685MB eval={8: {'l1_norm': 0.8541449308395386, 'l1_pixel01': 0.19303231686353683}, 16: {'l1_norm': 0.8545316457748413, 'l1_pixel01': 0.19311969727277756}, 32: {'l1_norm': 0.854084387421608, 'l1_pixel01': 0.193018838763237}}
+[single_K8] wall=36.7s peak=2109MB eval={8: {'l1_norm': 0.8529272228479385, 'l1_pixel01': 0.19276351854205132}, 16: None, 32: None}
+[joint] wall=37.4s peak=2378MB eval={8: {'l1_norm': 0.8565667867660522, 'l1_pixel01': 0.1935758851468563}, 16: {'l1_norm': 0.8564876914024353, 'l1_pixel01': 0.19355802237987518}, 32: {'l1_norm': 0.8564030528068542, 'l1_pixel01': 0.19353890791535378}}
+
+== summary ==
+{
+ "alignment_tax_joint_vs_single_at_K32_pct": 0.2714796593163454,
+ "joint_vs_single_at_K8_pct": 0.42671447464897916,
+ "single_K32_truncation_ratio_K8": 1.0000698279006661,
+ "single_K32_truncation_ratio_K16": 1.000522531946554
+}
+single_K32 {8: {'l1_norm': 0.8541, 'l1_pixel01': 0.193}, 16: {'l1_norm': 0.8545, 'l1_pixel01': 0.1931}, 32: {'l1_norm': 0.8541, 'l1_pixel01': 0.193}}
+single_K8 {8: {'l1_norm': 0.8529, 'l1_pixel01': 0.1928}, 16: None, 32: None}
+joint {8: {'l1_norm': 0.8566, 'l1_pixel01': 0.1936}, 16: {'l1_norm': 0.8565, 'l1_pixel01': 0.1936}, 32: {'l1_norm': 0.8564, 'l1_pixel01': 0.1935}}
+wrote results_track2.json
