@@ -63,7 +63,8 @@ class VLM8BudgetConfig(PretrainedConfig):
                  budget_ids: Optional[Sequence[int]] = None,
                  loss_weighting: str = "equal",
                  pad_token_id: Optional[int] = None,
-                 eos_token_id: Optional[int] = None, **kwargs):
+                 eos_token_id: Optional[int] = None,
+                 hidden_size: int = LM_HIDDEN, **kwargs):
         super().__init__(**kwargs)
         self.encoder_ckpt = str(encoder_ckpt)
         self.qwen_dir = str(qwen_dir)
@@ -71,6 +72,9 @@ class VLM8BudgetConfig(PretrainedConfig):
         self.loss_weighting = str(loss_weighting)
         self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
         self.eos_token_id = None if eos_token_id is None else int(eos_token_id)
+        # DeepSpeed ZeRO-3 的 `"auto"` bucket 尺寸依赖 config.hidden_size（HF 在
+        # trainer_config_finalize 里读它）；缺了会直接 ValueError。
+        self.hidden_size = int(hidden_size)
 
 
 # ═══════════════════════════════════════════════════════════════
