@@ -230,7 +230,7 @@ class VLM8Budget(PreTrainedModel):
 
     def __init__(self, config: VLM8BudgetConfig,
                  encoder: Optional[nn.Module] = None, lm: Optional[nn.Module] = None,
-                 grad_ckpt: bool = True):
+                 grad_ckpt: bool = False):
         super().__init__(config)
         self.projector = BudgetProjector()
         self.encoder = encoder if encoder is not None else AssocVTCEncoder(
@@ -238,7 +238,7 @@ class VLM8Budget(PreTrainedModel):
         self.lm = lm if lm is not None else self.load_lm(grad_ckpt)
         self.loss_weighting, self.last_budget_ce = str(config.loss_weighting), None
 
-    def load_lm(self, grad_ckpt: bool = True) -> nn.Module:
+    def load_lm(self, grad_ckpt: bool = False) -> nn.Module:
         """加载 Qwen3.5-4B（本函数内才 import Qwen），删 vision tower、开 grad ckpt。"""
         lm = _import_qwen().from_pretrained(
             os.path.expanduser(self.config.qwen_dir), dtype=torch.bfloat16,

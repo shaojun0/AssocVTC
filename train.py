@@ -82,6 +82,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss-weighting", default="equal", choices=["equal", "inv-k"])
     p.add_argument("--smoke", action="store_true", help="冒烟：2 step + 不存盘 + 每步日志")
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--grad-ckpt", action="store_true",
+                   help="开 gradient checkpointing（省显存，但 ZeRO-3 下有卡死风险）")
     return p.parse_args()
 
 
@@ -210,7 +212,8 @@ def main() -> None:
         encoder_ckpt=args.encoder_ckpt, qwen_dir=args.qwen_dir,
         budget_ids=budgets,
         loss_weighting=args.loss_weighting,
-        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id))
+        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id),
+        grad_ckpt=args.grad_ckpt)
     if args.freeze_encoder_epochs > 0:
         model.encoder.freeze()
 
