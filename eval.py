@@ -12,6 +12,7 @@ encoder_ckpt / qwen_dir 重建结构再灌权重（只允许 tied `lm_head` 缺�
 greedy 逐行生成（right-padding 下整批 generate 会把 pad 当上下文）。
 """
 import argparse
+import glob
 import json
 import os
 from typing import Dict, List
@@ -51,15 +52,25 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _safetensors_files(checkpoint: str) -> List[str]:
+    """列 checkpoint 里的 safetensors 文件：优先分片索引，否则单文件 `model.safetensors`。"""
+    index = os.path.join(checkpoint, "model.safetensors.index.json")
+    if os.path.exists(index):
+        with open(index, "r", encoding="utf-8") as handle:
+            names = sorted(set(json.load(handle)["weight_map"].values()))
+        return [os.path.join(checkpoint, name) for name in names]
+    files = sorted(glob.glob(os.path.join(checkpoint, "*.safetensors")))
+    assert files, f"checkpoint 里没有 safetensors: {checkpoint}"
+    return files
+
+
 def load_trained_model(checkpoint: str, config: VLM8BudgetConfig) -> VLM8Budget:
     """重建结构（encoder + Qwen + projector）并灌入训练后的权重（safetensors 分片）。"""
     from safetensors.torch import load_file
-    index = os.path.join(checkpoint, "model.safetensors.index.json")
-    with open(index, "r", encoding="utf-8") as handle:
-        names = set(json.load(handle)["weight_map"].values())
+    handler = _safetensors_files(checkpoint)
     state: Dict[str, torch.Tensor] = {}
-    for name in sorted(names):
-        state.update(load_file(os.path.join(checkpoint, name)))
+    for path in handler:
+        state.update(load_file(path))
     model = VLM8Budget(config, grad_ckpt=False)
     missing, unexpected = model.load_state_dict(state, strict=False)
     assert not unexpected and set(missing) <= {"lm.lm_head.weight"}, (
