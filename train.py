@@ -80,6 +80,7 @@ def parse_args() -> argparse.Namespace:
                    help="预算集合，逗号分隔，如 1,2,4,8")
     p.add_argument("--loss-weighting", default="equal", choices=["equal", "inv-k"])
     p.add_argument("--smoke", action="store_true", help="冒烟：2 step + 不存盘 + 每步日志")
+    p.add_argument("--seed", type=int, default=SEED)
     return p.parse_args()
 
 
