@@ -1,0 +1,13 @@
+# vlm8b 依赖（remote /root/venv_qwen 实测版本，2026-11-05）
+# 注意：torch 的 +cu130 本地版本号需要对应的 CUDA wheel index，例如
+#   pip install --index-url https://download.pytorch.org/whl/cu130 torch==2.12.1+cu130
+# 本机（Linux CPU / transformers 4.57）只需要 torch + transformers + torchvision
+# + Pillow 就能跑 `python3 vlm8b/smoke.py`，不需要装 deepspeed。
+torch==2.12.1+cu130
+transformers==5.22.1
+accelerate==1.15.0
+fla-core==0.6.0
+deepspeed==0.19.9          # Step-0 待装：pip install deepspeed==0.19.9
+torchvision
+Pillow
+numpy
