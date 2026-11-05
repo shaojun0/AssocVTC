@@ -13,7 +13,6 @@
     "stage3_max_live_parameters": 1000000000,
     "stage3_max_reuse_distance": 1000000000,
     "stage3_gather_16bit_weights_on_model_save": true,
-    "exclude_frozen_parameters": false,
     "sub_group_size": 1000000000,
     "offload_optimizer": {
       "device": "none"
