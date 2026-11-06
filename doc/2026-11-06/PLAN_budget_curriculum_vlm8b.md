@@ -55,3 +55,16 @@ ssh -p 23556 root@connect.nma1.seetacloud.com 'cd /root/vlm8b && nohup bash run_
   15:00 约 1,650 步），基线为 run1 终点窗口 CE≈0.511。
 - 两次都 PLATEAU → 按 §2 切换；任一非 PLATEAU → 不切换，run2 继续到 11-07 06:00。
 - 课程若前 1–2 个阶段 loss 不降或发散（如 P1 CE 明显高于 run1 同期），先汇报再决定是否调 lr/停。
+
+## 5. 周末无人值守与通知（2026-11-06 12:01 启用）
+
+- **邮件通道**：本机 msmtp（`~/.msmtprc` 的 qq 账号）→ 发给自己 `2211057934@qq.com`；
+  封装脚本 `tools/vlm8b_notify.sh`（`TAG=异常` 会加主题前缀）。
+- **看门狗**：`tools/vlm8b_watchdog.sh`（本机 `setsid nohup` 常驻，每 10 min ssh 巡检主训练机），
+  日志 `/home/linaro/dsh/vlm8b_watchdog.log`，去重状态 `/home/linaro/dsh/vlm8b_watchdog_state.txt`。
+  - 异常告警：进程消失（连续 2 次确认）/ 日志僵死 >45min / NaN 或 OOM 关键字 / 磁盘 <4G / `FAILED_P{N}`；
+  - 里程碑邮件：切换到课程、run2 完成、每阶段完成、课程全部完成；
+  - **先斩后奏**：课程模式下若进程无标记地消失，看门狗自动重启 `run_curriculum_vlm8b.sh`
+    （断点续跑，同阶段最多自动重启 2 次），随后发「已自动重启」邮件；
+  - 手动干预时 `touch /home/linaro/dsh/vlm8b_watchdog.pause` 可让看门狗静默，完事 `rm` 掉。
+- 定时巡检（每 2h）+ 13:00/15:00 判定提醒里都写了：处置完补「处置结果」邮件，且不要重复告警。
