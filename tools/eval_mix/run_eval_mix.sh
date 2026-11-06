@@ -23,7 +23,8 @@ LR_ENCODER=${LR_ENCODER:-2.5e-6}
 LR_PROJ=${LR_PROJ:-5e-5}
 WARMUP=${WARMUP:-0.02}
 DEADLINE=${DEADLINE:-2026-11-09 12:00:00}   # 训练截止（之后自动接评测链）
-SEC_PER_STEP=${SEC_PER_STEP:-9.0}           # 实测 8.94–8.96 s/step，取 9.0 留余量
+SEC_PER_STEP=${SEC_PER_STEP:-15.0}          # run3 数据序列长（T 中位 121/均值 batch-max≈313）⇒ 实测明显慢于 run2 的 8.95 s/step，取 15.0 估算
+DEL_INIT_AFTER=${DEL_INIT_AFTER:-1}         # 训练跑起来 15 分钟后删掉 INIT 权重目录（腾 10G；INIT 已在显存里）
 STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-3821}    # 122,259 行 / 全局 batch 32
 
 # epochs：优先用 EPOCHS 环境变量；否则按「现在 → DEADLINE」倒推（至少 1.0）
@@ -101,10 +102,23 @@ if [ -f train_fixed.py ]; then
 fi
 
 echo "[run3] start $(date -Is) epochs=$EPOCHS init=$INIT data=$TRAIN_JSONL"
+# run3 的 122k 混合数据序列比 run2 的 in100 自蒸馏数据长得多（batch-max T≈313，最长 920）：
+#   不开 grad-ckpt 时 micro2×accum8 在第一步就 OOM（79G 卡只剩 ~7G 给激活）。
+#   ⇒ 打开 gradient checkpointing（+~30% 计算），全局 batch 不变（2×8×2=32）。
+# 同时用 expandable_segments 降低碎片风险。
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# INIT 权重在训练启动后已进显存；15 分钟后删掉腾 10G，给 epoch 存档留出安全余量
+#（存档时要同时放「旧 checkpoint 10G + 新 checkpoint 10G」）。
+if [ "$DEL_INIT_AFTER" = "1" ] && [ -d "$INIT" ]; then
+  ( sleep 900; rm -rf "$INIT"; echo "INIT=$INIT 于 $(date -Is) 在 run3 启动 15 分钟后删除（权重已载入；腾 10G 给存档）" >> logs/disk_notes.txt ) &
+  echo "[run3] 已排定：15 分钟后删除 INIT=$INIT 腾 10G"
+fi
+
 timeout 300000 /root/venv_qwen/bin/python -u -m torch.distributed.run \
   --nproc_per_node=2 --master_port=29513 \
   train.py --freeze-encoder-epochs 0 --epochs "$EPOCHS" --init-from "$INIT" \
-  --output-dir "$OUT" --save-total-limit 1 \
+  --output-dir "$OUT" --save-total-limit 1 --grad-ckpt \
   --lr-llm "$LR_LLM" --lr-encoder "$LR_ENCODER" --lr-proj "$LR_PROJ" \
   --warmup-ratio "$WARMUP" \
   --train-jsonl "$TRAIN_JSONL" --image-root "$DATA"
