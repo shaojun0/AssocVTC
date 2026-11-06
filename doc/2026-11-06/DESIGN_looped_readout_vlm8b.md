@@ -385,8 +385,9 @@ class LoopVisualReadout(nn.Module):
 
 ---
 
-## 附录 B：后续验证入口（未开始）
+## 附录 B：后续验证入口
 
-- 代码基线：`feat/vlm8b-v1`（tip `0340f40`）——本方案落地时新建 `feat/vlm8b-loop`，不改基线分支。
+- **已落地（2026-11-06）**：分支 `feat/vlm8b-loop`（commit `a16863b`）——从 `feat/vlm8b-v1` 分叉、只含 12 个文件的同构最小工程，实现本方案 V1：`--readout loop`（默认 `linear` 与基线逐位一致，可直接 A/B）。本机 `python3 smoke.py` **23 项 PASS / 0 FAIL**（CPU，torch 2.8），覆盖前缀因果性与 BPTT/detach；**GPU / DeepSpeed 尚未跑**。
+- 代码基线：`feat/vlm8b-v1`（tip `0340f40`）；新分支不改基线，也不影响远端在跑的 run2。
 - 首跑判定：5k 图子集 1 epoch/臂（~25 min/臂），见 §9 的臂与指标；训练内信号 `per_budget_ce.jsonl`，评测信号 `eval.py` 的 per-budget CE/acc。
 - 立项前提：先确认 think 数据/更长答案下"现行线性投影"的 per-budget 曲线是否自然单调（见 §9 判定规则），再决定循环读出的定位（"让预算站起来"还是"同 token 数更强/更省"）。
