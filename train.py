@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss-weighting", default="equal", choices=["equal", "inv-k"])
     p.add_argument("--smoke", action="store_true", help="冒烟：2 step + 不存盘 + 每步日志")
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--save-total-limit", type=int, default=2,
+                   help="保留的 epoch ckpt 数（磁盘紧时设 1）")
     p.add_argument("--init-from", default="",
                    help="从已有训练产物目录（含 model.safetensors）继续训练")
     p.add_argument("--grad-ckpt", action="store_true",
@@ -259,7 +261,7 @@ def main() -> None:
         logging_steps=1 if args.smoke else LOGGING_STEPS,
         save_strategy="no" if args.smoke else "epoch",
         save_steps=SAVE_STEPS,
-        save_total_limit=2,
+        save_total_limit=args.save_total_limit,
         eval_strategy="no",                 # forward 不返回 logits ⇒ 不用 prediction_step
         bf16=True,
         dataloader_num_workers=4,
