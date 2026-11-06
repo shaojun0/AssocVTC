@@ -53,16 +53,43 @@ if [ "${DRY:-0}" = "1" ]; then
   exit 0
 fi
 
-RUN1=/root/autodl-tmp/vlm8b/output/run1/final
-if [ "${FREE:-0}" -lt 20 ] && [ -d "$RUN1" ] && [ "$(readlink -f "$INIT")" != "$(readlink -f "$RUN1")" ]; then
-  echo "[run3] 磁盘紧张：删除已被 run2 取代的 run1/final（约 10G）——评测数字已在 doc/2026-11-06/REPORT_vlm8b_1ep.md"
-  rm -rf /root/autodl-tmp/vlm8b/output/run1
+RUN1_DIR=/root/autodl-tmp/vlm8b/output/run1
+RUN2_DIR=/root/autodl-tmp/vlm8b/output/run2
+
+# 1) run2 的 epoch 存档与 run2/final 是同一份权重（save_only_model=True），纯冗余 ⇒ 先删。
+#    run3 不从中断点续训，删掉不影响任何评测/复现。
+for d in "$RUN2_DIR"/checkpoint-*; do
+  [ -d "$d" ] || continue
+  echo "[run3] 删除冗余存档 $d（与 run2/final 同权重）"
+  rm -rf "$d"
+  echo "$d 于 $(date -Is) 删除（与 run2/final 同权重；run2 评测数字已存档）" >> logs/disk_notes.txt
+done
+FREE=$(free_gb)
+echo "[run3] disk free after dup-checkpoint cleanup=${FREE}G"
+
+# 2) 仍 <24G：删已被 run2 取代的 run1/final（10G，评测数字在 doc/2026-11-06/REPORT_vlm8b_1ep.md）
+if [ "${FREE:-0}" -lt 24 ] && [ -d "$RUN1_DIR" ] && [ "$(readlink -f "$INIT")" != "$(readlink -f "$RUN1_DIR/final")" ]; then
+  echo "[run3] 磁盘紧张：删除已被 run2 取代的 run1/final（约 10G）"
+  rm -rf "$RUN1_DIR"
   echo "run1/final 于 $(date -Is) 因磁盘预算被删除（run2 已取代；数字见 doc/2026-11-06/REPORT_vlm8b_1ep.md）" >> logs/disk_notes.txt
   FREE=$(free_gb)
-  echo "[run3] disk free after cleanup=${FREE}G"
+  echo "[run3] disk free after run1 cleanup=${FREE}G"
 fi
-if [ "${FREE:-0}" -lt 18 ]; then
-  echo "[run3] FATAL 磁盘不足（${FREE}G < 18G），中止；请人工清理后再启动"
+
+# 3) 仍 <22G 且起点不是 run2/final（=评测门未过，run2 明显更差）：删 run2/final 腾 10G，
+#    评测数字已在 REPORT_vlm8b_2ep.md。
+if [ "${FREE:-0}" -lt 22 ] && [ "$(readlink -f "$INIT")" != "$(readlink -f "$RUN2_DIR/final")" ] && [ -d "$RUN2_DIR/final" ]; then
+  echo "[run3] 磁盘紧张：删除评测更差、已被 run1/final 取代的 run2/final（约 10G）"
+  rm -rf "$RUN2_DIR/final"
+  echo "run2/final 于 $(date -Is) 因磁盘预算被删除（评测门未过，数字见 REPORT_vlm8b_2ep.md）" >> logs/disk_notes.txt
+  FREE=$(free_gb)
+fi
+
+# 存档预算：稳态要同时容纳「当前 epoch 存档 10G + 正在写的新存档 10G」⇒ 启动时 ≥21G。
+# 达标后：稳态剩余 ~11G，写新存档瞬间最低 ~1G（每次 epoch 存档几分钟）；这是刻意安排，
+# 看门狗在 10 分钟采样下基本采不到瞬时低点。
+if [ "${FREE:-0}" -lt 20 ]; then
+  echo "[run3] FATAL 磁盘不足（${FREE}G < 20G），中止；请人工清理后再启动"
   exit 3
 fi
 

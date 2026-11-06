@@ -259,3 +259,22 @@ RealWorldQA 765 全用。
 **训练一定跨到周一中午**，rc=0 后自动拉起 `eval_after_run3.sh`。
 预检：全量 122,259 行 `noimg=0 empty_gt=0 over1024=0`、id 与 mix_heldout 零重叠、
 64 行 Dataset+Collator+8 预算展开 **PREFLIGHT OK**。
+
+### 9.12 磁盘预算复核与修正（11-06 22:25，发现 run3 存档会踩空）
+
+实测（22:12）：数据盘 80G，已用 69G。构成：`vlm8b` 24G（data_eval 3.6G + run1/final 10G +
+run2 checkpoint 10G）、`exp448` 19G（stage-1）、`datasets/imagenet100` 14G（run2 训练数据）、
+`exp_qwen` 3.8G、其他旧实验 ~10G；`/root` 在另一块 30G 盘（无关）。
+
+问题：run2 结束时会同时留下 `output/run2/checkpoint-7606` 与 `output/run2/final`（各 ~10G），
+剩余仅 **~2G**；原清理逻辑只删 run1/final ⇒ run3 稳态 free ~12G，但**写第二个 epoch 存档时
+需要「现有存档 10G + 新存档 10G」**，会只剩 ~1G，近乎踩空。
+
+修正（`run_eval_mix.sh`）：
+1. 启动时先删 `run2/checkpoint-*`（`save_only_model=True` ⇒ 与 `run2/final` 同权重的冗余副本）；
+2. 若仍 <24G，删已被 run2 取代的 run1/final（数字见 REPORT_vlm8b_1ep.md）；
+3. 若仍 <22G 且**起点不是 run2/final**（评测门未过、run2 明显更差），删 run2/final（数字见 2ep 报告）；
+4. <20G 中止。
+结果：启动时 free ~21G；run3 稳态 ~11G，写新存档的几分钟内最低 ~1G（10 分钟采样的看门狗基本采不到瞬时点）。
+备用（需人工确认，脚本不自动删）：`exp_qwen/in100_selfdistill` 3.4G（run2 专用 SFT 数据，run3 不用）、
+`datasets/imagenet100` 14G（仅 run2 用）。
