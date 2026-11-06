@@ -21,6 +21,7 @@ STATE=${STATE:-/home/linaro/dsh/vlm8b_watchdog_state.txt}
 PAUSE=${PAUSE:-/home/linaro/dsh/vlm8b_watchdog.pause}
 LOG=${LOG:-/home/linaro/dsh/vlm8b_watchdog.log}
 STALE_SEC=${STALE_SEC:-2700}
+FREE_MIN=${FREE_MIN:-2}   # 周末 run3 峰值只剩 ~3G（HF 先存后轮换），阈值降到 2G
 
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 sent() { grep -qxF "$1" "$STATE" 2>/dev/null; }
@@ -38,11 +39,12 @@ echo "EVAL=\$(pgrep -f 'eval.py' | head -1)"
 echo "FREE=\$(df -BG --output=avail /root/autodl-tmp | tail -1 | tr -dc '0-9')"
 echo "GPU=\$(nvidia-smi --query-gpu=memory.used --format=csv,noheader | tr '\n' ' ')"
 [ -f "\$ROOT/run2/VLM8B_DONE" ] && echo "RUN2_DONE=1"
+[ -f "\$ROOT/run3/VLM8B_DONE" ] && echo "RUN3_DONE=1"
 [ -f "\$ROOT/cur/CURRICULUM_DONE" ] && echo "CUR_DONE=1"
 for f in "\$ROOT"/cur/FAILED_P*; do [ -f "\$f" ] && echo "FAILED=\$(basename "\$f")"; done
 for d in "\$ROOT"/cur/P*/; do [ -d "\$d" ] && echo "PHASE=\$(basename "\$d")"; done
 for f in "\$ROOT"/cur/P*/VLM8B_DONE; do [ -f "\$f" ] && echo "PHASEDONE=\$(basename "\$(dirname "\$f")")"; done
-LOG=\$(ls -t /root/vlm8b/logs/cur_P*.log /root/vlm8b/logs/run2.log 2>/dev/null | head -1)
+LOG=\$(ls -t /root/vlm8b/logs/cur_P*.log /root/vlm8b/logs/run2.log /root/vlm8b/logs/run3.log 2>/dev/null | head -1)
 echo "LOG=\$LOG"
 if [ -n "\$LOG" ]; then
   echo "LOGAGE=\$(( \$(date +%s) - \$(stat -c %Y "\$LOG") ))"
@@ -61,7 +63,7 @@ REMOTE
     fi
 
     local TRAIN="" CURSH="" EVAL="" FREE="" GPU="" DATE="" RLOG="" RLOGAGE="0" RLOGTAIL="" BADNAN="0"
-    local RUN2_DONE="" CUR_DONE=""
+    local RUN2_DONE="" CUR_DONE="" RUN3_DONE=""
     local -a FAILED=() PHASE=() PHASEDONE=()
     while IFS='=' read -r k v; do
         case "$k" in
@@ -76,6 +78,7 @@ REMOTE
             LOGTAIL) RLOGTAIL=$v ;;
             BADNAN) BADNAN=$v ;;
             RUN2_DONE) RUN2_DONE=1 ;;
+            RUN3_DONE) RUN3_DONE=1 ;;
             CUR_DONE) CUR_DONE=1 ;;
             FAILED) FAILED+=("$v") ;;
             PHASE) PHASE+=("$v") ;;
@@ -102,6 +105,13 @@ GPU: $GPU  磁盘剩余: ${FREE}G
         mail 里程碑 "run2 训练完成（2 epoch）" "时间：$DATE
 产物：$REMOTE_ROOT/run2/final
 下一步：三组消融 eval（normal/null/shuffle，--limit 250 --sample-seed 42）+ 通用 bench + 报告。"
+    fi
+    if [ "$RUN3_DONE" = "1" ] && ! sent "run3_done"; then
+        mark "run3_done"
+        mail 里程碑 "run3 训练完成（评测对齐混合集 3.8 epoch）" "时间：$DATE
+产物：$REMOTE_ROOT/run3/final
+自动评测链应已启动（mix_heldout 三组 + ImageNet val + 通用 bench），标记 logs/RUN3_EVAL_DONE。
+下一步：写 run3 报告（预算消融是否在广任务上成立）并推 main。"
     fi
     local p
     for p in "${PHASEDONE[@]}"; do
@@ -135,9 +145,9 @@ quick eval 输出：$REMOTE_ROOT/cur/eval_$p/（日志 /root/vlm8b/logs/cur_eval
     # 异常：进程消失（无 DONE 标记且无脚本/eval 在跑）；连续 2 次巡检都死才动作（避免阶段切换间隙误报）
     local deadf="${STATE}.deadcount" dc
     dc=$(cat "$deadf" 2>/dev/null || echo 0)
-    if [ "$alive" = "0" ] && [ "$CUR_DONE" = "0" ] && [ "$RUN2_DONE" != "1" ]; then dc=$((dc + 1)); else dc=0; fi
+    if [ "$alive" = "0" ] && [ "$CUR_DONE" = "0" ] && [ "$RUN2_DONE" != "1" ] && [ "$RUN3_DONE" != "1" ]; then dc=$((dc + 1)); else dc=0; fi
     echo "$dc" > "$deadf"
-    if [ "$dc" -ge 2 ] && [ "$CUR_DONE" = "0" ] && [ "$RUN2_DONE" != "1" ]; then
+    if [ "$dc" -ge 2 ] && [ "$CUR_DONE" = "0" ] && [ "$RUN2_DONE" != "1" ] && [ "$RUN3_DONE" != "1" ]; then
         local bucket="dead_$(date +%Y%m%d%H)"
         if ! sent "$bucket"; then
             mark "$bucket"
@@ -178,9 +188,9 @@ marker：run2_done=${RUN2_DONE:-0} cur_done=${CUR_DONE:-0} failed=${FAILED[*]:-�
 尾部：$RLOGTAIL"
     fi
     # 异常：磁盘
-    if [ "${FREE:-999}" -lt 4 ] && ! sent "disk_$(date +%Y%m%d%H)"; then
+    if [ "${FREE:-999}" -lt "${FREE_MIN:-4}" ] && ! sent "disk_$(date +%Y%m%d%H)"; then
         mark "disk_$(date +%Y%m%d%H)"
-        mail 异常 "磁盘剩余 ${FREE}G（<4G）" "时间：$DATE
+        mail 异常 "磁盘剩余 ${FREE}G（<${FREE_MIN}G）" "时间：$DATE
 请尽快清理；看门狗不会自动删除训练产物。"
     fi
     # 异常：NaN/OOM 关键字

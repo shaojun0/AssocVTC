@@ -145,3 +145,11 @@ cd /root/vlm8b && torchrun --nproc_per_node=2 --master_port=29511 train.py \
 - 训练前把 `train_fixed.py`（sha256 `a08c2d08…`，E1 冻结修复版）覆盖 `train.py`（当前远端仍是旧版 `61166d2a…`）
 - 自动评测链：`/root/vlm8b/eval_after_run2.sh` 已在后台等待 `logs/run2.rc` → 自动跑 normal/null/shuffle 三组（n=250, seed 42）+ 通用 bench → `logs/RUN2_EVAL_DONE`、`output/eval_run2_*/eval.{json,md}`、`logs/bench_run2.json`
 - 判定门（06:00 后由 Lead 拍板）：k8 acc 明显高于 chance（≥15%）、normal−null 有明显差距（≥8 个点）、预算曲线出现非平趋势 → 启动 run3；否则不启动，发邮件等指示
+
+### 9.5 磁盘预算与周末运维（11-06 17:35 复核）
+
+- HF `Trainer._save_checkpoint` 是**先存新 ckpt、后 rotate 删旧**（已核 transformers 5.22.1 源码）⇒ 每次存档峰值要 **2×10G**。
+- 推演：run2 20:30 存 ckpt（10G）→ 05:50 存 final（峰值需 20G）→ 13G 余；run3 第一次存档（周日 ~20:00）后剩 3G；**第二次存档必然 ENOSPC**。
+- 处置：`run_eval_mix.sh` 启动前若剩余 <20G，删除**已被 run2 取代的 run1/final**（10G，评测数字见 `REPORT_vlm8b_1ep.md`），删除动作写入 `logs/disk_notes.txt`；删完仍 <18G 则中止。→ run3 期间余量 13G，存档峰值 3G。
+- 看门狗（`tools/vlm8b_watchdog.sh`，已重启）：日志候选加入 `run3.log`、磁盘阈值 `FREE_MIN=2G`、新增 `RUN3_DONE` 里程碑邮件、进程消失判定加入 run3 未完成条件（避免 run2 完成后误报）。
+- 自动链：`eval_after_run3.sh` 由 `run_eval_mix.sh` 在训练 rc=0 后自动拉起 → mix_heldout 三组（n=300 seed42）+ ImageNet val（与 run1/run2 同口径）+ 通用 bench → `logs/RUN3_EVAL_DONE`。
