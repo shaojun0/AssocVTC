@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from typing import Dict, List
 
 import torch
@@ -50,6 +51,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     return p.parse_args()
+
+
+def _norm(text: str) -> str:
+    """类名归一化：小写、下划线→空格、压空白（'chocolate_sauce' ≡ 'Chocolate Sauce'）。"""
+    return re.sub(r"\s+", " ", str(text).strip().lower().replace("_", " "))
+
+
+def extract_answer(text: str) -> str:
+    """从生成文本里取答案：去掉 'The answer is' 前缀与尾部句号。"""
+    text = re.sub(r"^(?:the answer is|answer)\s*[:：]?\s*", "",
+                  str(text).strip(), flags=re.IGNORECASE)
+    return text.strip().strip(".")
 
 
 def _safetensors_files(checkpoint: str) -> List[str]:
@@ -121,13 +134,15 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
                 eos = tokenizer.eos_token_id
                 if eos is not None and eos in ids:
                     ids = ids[:ids.index(eos)]
-                prediction = tokenizer.decode(ids, skip_special_tokens=True).strip()
+                prediction = extract_answer(
+                    tokenizer.decode(ids, skip_special_tokens=True))
+                correct = _norm(prediction) == _norm(gt_name)
                 stats[k][0] += float(per_sample[i, budget_index])
-                stats[k][1] += int(prediction == gt_name)
+                stats[k][1] += int(correct)
                 stats[k][2] += 1
                 if len(examples) < NUM_EXAMPLES:
                     examples.append({"k": k, "gt": gt_name, "pred": prediction,
-                                     "correct": prediction == gt_name})
+                                     "correct": correct})
 
     rows = [{"k": k, "ce": s[0] / max(s[2], 1), "acc": s[1] / max(s[2], 1), "n": s[2]}
             for k, s in stats.items()]

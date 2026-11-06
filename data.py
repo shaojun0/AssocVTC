@@ -13,8 +13,10 @@ vlm8b 数据管线 — SFT jsonl → (pixel_values, input_ids, labels)
 图像变换：train = RRC(448,0.35–1.0)+HFlip；val = Resize(512)+CenterCrop(448)；
 两者都 ImageNet Normalize。collator 只 right-pad B 张图；V 行展开在 model 内。
 """
+import ast
 import json
 import os
+import re
 from typing import Dict, List
 
 import torch
@@ -56,6 +58,28 @@ def build_image_transform(train: bool):
 
 
 # ═══════════════════════════════════════════════════════════════
+# gt 归一化（self-distill 的 gt 可能是 dict / dict 的 str 形式 / 纯字符串）
+# ═══════════════════════════════════════════════════════════════
+
+def gt_name(value) -> str:
+    """把 `gt` 字段归一化成类名（100 类自蒸馏数据的 gt 形如 {..., 'name': 'robin'}）。"""
+    if isinstance(value, dict):
+        for key in ("name", "label", "class_name"):
+            if value.get(key):
+                return str(value[key]).strip()
+        return ""
+    text = str(value or "").strip()
+    if text.startswith("{"):
+        try:
+            return gt_name(ast.literal_eval(text))
+        except (ValueError, SyntaxError):
+            match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", text)
+            if match:
+                return match.group(1).strip()
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════
 # Dataset
 # ═══════════════════════════════════════════════════════════════
 
@@ -75,7 +99,7 @@ class SelfDistillSFTDataset(Dataset):
                     self.records.append({
                         "image": row["image"],
                         "messages": row[MESSAGES_KEY],
-                        "gt": str(row.get("gt", "")),
+                        "gt": gt_name(row.get("gt", "")),
                     })
 
     def __len__(self) -> int:
