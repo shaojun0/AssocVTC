@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import re
 from typing import Dict, List
 
@@ -49,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--budgets", default=DEFAULT_BUDGETS, help="逗号分隔，如 1,2,4,8")
     p.add_argument("--limit", type=int, default=0, help="只评前 N 张（0=全部）")
     p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--sample-seed", type=int, default=42,
+                   help="--limit>0 时随机抽样的种子（避免按类排序的子集偏置）")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     p.add_argument("--visual-mode", default="normal",
                    choices=["normal", "null", "shuffle"],
@@ -114,7 +117,11 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     dataset = SelfDistillSFTDataset(
         args.jsonl, tokenizer, args.image_root, build_image_transform(train=False))
     if args.limit > 0:
-        dataset = Subset(dataset, list(range(min(args.limit, len(dataset)))))
+        # val jsonl 按类排序；取前 N 只会评到前几个类（chance = 1/类数）。
+        # 这里固定种子随机抽样，避免子集偏置。
+        rng = random.Random(args.sample_seed)
+        indices = rng.sample(range(len(dataset)), min(args.limit, len(dataset)))
+        dataset = Subset(dataset, indices)
     loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=NUM_WORKERS,
                         collate_fn=EightBudgetCollator(tokenizer))
     model = load_trained_model(args.checkpoint, config)
@@ -151,7 +158,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     rows = [{"k": k, "ce": s[0] / max(s[2], 1), "acc": s[1] / max(s[2], 1), "n": s[2]}
             for k, s in stats.items()]
     return {"checkpoint": args.checkpoint, "jsonl": args.jsonl,
-            "visual_mode": args.visual_mode,
+            "visual_mode": args.visual_mode, "sample_seed": args.sample_seed,
             "n_images": rows[0]["n"], "budgets": rows,
             "delta_acc": rows[-1]["acc"] - rows[0]["acc"], "examples": examples}
 
