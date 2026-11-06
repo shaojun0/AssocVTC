@@ -104,6 +104,9 @@ def parse_args() -> argparse.Namespace:
                    help="none=从零；stage2=沿用阶段2 ckpt 的 decoder.*（dim/heads/mlp 取 ckpt，depth 取 min）")
     p.add_argument("--loop-block", type=int, default=4, help="每步读的 register 数（8 步 × 4 = 32 = K）")
     p.add_argument("--loop-dropout", type=float, default=0.0)
+    p.add_argument("--loop-head", default="mlp", choices=["mlp", "transformer"],
+                   help="输出头（最后一层）：mlp=逐 token 2 层 MLP（默认）/ "
+                        "transformer=单层 Transformer（causal self-attn + FFN）")
     return p.parse_args()
 
 
@@ -312,7 +315,7 @@ def main() -> None:
         loop_dim=args.loop_dim, loop_depth=args.loop_depth,
         loop_heads=args.loop_heads, loop_mlp_ratio=args.loop_mlp_ratio,
         loop_init=args.loop_init, loop_block=args.loop_block,
-        loop_dropout=args.loop_dropout,
+        loop_dropout=args.loop_dropout, loop_head=args.loop_head,
         pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id),
         grad_ckpt=args.grad_ckpt)
     if args.init_from:
@@ -372,7 +375,7 @@ def main() -> None:
           f"lr={args.lr_llm:g}/{args.lr_proj:g}/{args.lr_encoder:g}")
     if args.readout == "loop":
         proj_params = sum(p.numel() for p in model.projector.parameters())
-        print(f"[vlm8b] readout=loop init={args.loop_init} "
+        print(f"[vlm8b] readout=loop init={args.loop_init} head={args.loop_head} "
               f"dim={args.loop_dim} depth={args.loop_depth} block={args.loop_block} "
               f"params={proj_params / 1e6:.2f}M（热启动/结构以模型实际为准）")
         if args.lr_proj > 3e-5 and args.loop_init == "stage2":

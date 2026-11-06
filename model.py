@@ -84,6 +84,7 @@ class VLM8BudgetConfig(PretrainedConfig):
                  loop_init: str = "none",
                  loop_block: int = LOOP_BLOCK,
                  loop_dropout: float = 0.0,
+                 loop_head: str = "mlp",
                  pad_token_id: Optional[int] = None,
                  eos_token_id: Optional[int] = None,
                  hidden_size: int = LM_HIDDEN, **kwargs):
@@ -94,6 +95,7 @@ class VLM8BudgetConfig(PretrainedConfig):
         self.loss_weighting = str(loss_weighting)
         assert readout in ("linear", "loop"), f"未知 readout={readout!r}"
         assert loop_init in ("none", "stage2"), f"未知 loop_init={loop_init!r}"
+        assert loop_head in ("mlp", "transformer"), f"未知 loop_head={loop_head!r}"
         self.readout = str(readout)
         self.loop_dim = int(loop_dim)
         self.loop_depth = int(loop_depth)
@@ -102,6 +104,7 @@ class VLM8BudgetConfig(PretrainedConfig):
         self.loop_init = str(loop_init)
         self.loop_block = int(loop_block)
         self.loop_dropout = float(loop_dropout)
+        self.loop_head = str(loop_head)
         self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
         self.eos_token_id = None if eos_token_id is None else int(eos_token_id)
         # DeepSpeed ZeRO-3 的 `"auto"` bucket 尺寸依赖 config.hidden_size（HF 在
@@ -236,6 +239,50 @@ def step_windows(num_specials: int, steps: Sequence[int], plan: str = "fixed",
     return out
 
 
+class MLPHead(nn.Module):
+    """逐 token 的 2 层 MLP 输出头：`Linear(dim→dim) → GELU → Linear(dim→LM_HIDDEN)`。
+
+    逐 token 独立 ⇒ 不引入跨 token 信息流，预算前缀语义不受影响。
+    """
+
+    def __init__(self, dim: int, lm_hidden: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(int(dim), int(dim)), nn.GELU(),
+            nn.Linear(int(dim), int(lm_hidden)))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """`(B,T,dim)` → `(B,T,LM_HIDDEN)`。"""
+        return self.net(x)
+
+
+class TransformerHead(nn.Module):
+    """单层 Transformer 输出头（causal self-attn + FFN）+ 线性投影到 LM hidden。
+
+    **必须是 causal**：token t 只看 token ≤ t。若改双向，token 0 会聚合 token 8 的信息，
+    进而把后段 register 的信息带进 `vis[0]`，直接破坏「预算 k 的前缀只依赖前 k*block 个
+    register」契约（smoke ⑥ 会 FAIL）。causal 下前缀因果链保持不变，同时补上
+    V1 结构里缺失的 token 间通信。
+    """
+
+    def __init__(self, dim: int, heads: int, mlp_ratio: float, dropout: float,
+                 lm_hidden: int):
+        super().__init__()
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=int(dim), nhead=int(heads),
+            dim_feedforward=int(dim * float(mlp_ratio)),
+            dropout=float(dropout), activation="gelu",
+            batch_first=True, norm_first=True)
+        self.proj = nn.Linear(int(dim), int(lm_hidden))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """`(B,T,dim)` → `(B,T,LM_HIDDEN)`；causal mask 让 token t 只看 ≤ t。"""
+        n_tokens = x.size(1)
+        causal = torch.triu(torch.ones(n_tokens, n_tokens, dtype=torch.bool,
+                                       device=x.device), diagonal=1)
+        return self.proj(self.layer(x, src_mask=causal))
+
+
 class LoopVisualReadout(nn.Module):
     """权重共享循环读出：第 t 步产出第 t 个 LM token（预算=步数）。
 
@@ -245,9 +292,11 @@ class LoopVisualReadout(nn.Module):
         Y_0 = 0
         for t, (lo, hi) in enumerate(windows):                      # 步 t 只读本步窗口
             Y_t = Stack(q_bank[t] + Y_{t-1}, A[:, lo:hi+1])         # 栈权重跨步共享
-            V_t = out_proj(norm_out(Y_t))                           # (B, 1, LM_HIDDEN)
-            Y_{t} 作为下一步 carry（**BPTT：不 detach**）
-        return cat(V_1..V_T)                                        # (B, T, LM_HIDDEN)
+            Y_t 作为下一步 carry（**BPTT：不 detach**）
+        h = norm_out(cat(Y_1..Y_T))                                 # (B, T, dim)
+        return Head(h)                                              # (B, T, LM_HIDDEN)
+    `Head` 可选（`--loop-head`）：**MLP**（默认，逐 token 2 层）或**单层 Transformer**
+    （causal self-attn + FFN；causal 是硬约束，见 `TransformerHead` 注释）。
 
     设计要点（全来自主线实测教训，见设计文档 §4/§6）:
       · **BPTT 不 detach**：detach 会让 carry 变成纯前向接力，早步收不到末步梯度；
@@ -259,7 +308,8 @@ class LoopVisualReadout(nn.Module):
     def __init__(self, enc_dim: int = ENC_DIM, dim: int = 1024, depth: int = 2,
                  heads: int = 8, mlp_ratio: float = 4.0, n_tokens: int = VISUAL_TOKENS,
                  n_specials: int = NUM_SPECIALS, lm_hidden: int = LM_HIDDEN,
-                 block: int = LOOP_BLOCK, dropout: float = 0.0):
+                 block: int = LOOP_BLOCK, dropout: float = 0.0,
+                 head: str = "mlp"):
         super().__init__()
         assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
         self.enc_dim, self.dim, self.depth = int(enc_dim), int(dim), int(depth)
@@ -277,7 +327,13 @@ class LoopVisualReadout(nn.Module):
                 batch_first=True, norm_first=True),
             num_layers=self.depth)
         self.norm_out = nn.LayerNorm(self.dim)
-        self.out_proj = nn.Linear(self.dim, int(lm_hidden))
+        assert head in ("mlp", "transformer"), f"未知 head={head!r}（合法：mlp/transformer）"
+        self.head_kind = str(head)
+        if self.head_kind == "mlp":
+            self.head: nn.Module = MLPHead(self.dim, int(lm_hidden))
+        else:
+            self.head = TransformerHead(self.dim, heads, mlp_ratio, dropout,
+                                        int(lm_hidden))
         self.steps = list(range(1, self.n_tokens + 1))
         self.windows = step_windows(self.n_specials, self.steps,
                                     plan="fixed", block=int(block))
@@ -296,15 +352,16 @@ class LoopVisualReadout(nn.Module):
             f"{tuple(z_cls.shape)} / {tuple(z_s.shape)}")
         mem = torch.cat([z_cls, z_s], dim=1)                    # (B,1+K,enc_dim)
         mem = self.mem_norm(self.mem_proj(mem)) + self.mem_pos  # (B,1+K,dim)
-        outs: List[Tensor] = []
+        steps: List[Tensor] = []
         carry: Optional[Tensor] = None
         for t, (lo, hi) in enumerate(self.windows):
             q = self.q_bank[t].view(1, 1, -1).expand(mem.size(0), -1, -1)
             q_in = q if carry is None else q + carry            # carry：BPTT，不 detach
             y = self.stack(q_in, mem[:, lo:hi + 1])             # (B,1,dim)
-            outs.append(self.out_proj(self.norm_out(y)))        # (B,1,LM_HIDDEN)
+            steps.append(y)
             carry = y.detach() if detach_carry else y
-        return torch.cat(outs, dim=1)                           # (B,T,LM_HIDDEN)
+        h = self.norm_out(torch.cat(steps, dim=1))              # (B,T,dim)
+        return self.head(h)                                     # (B,T,LM_HIDDEN)
 
 
 def load_stage2_decoder(readout: "LoopVisualReadout",
@@ -448,7 +505,8 @@ class VLM8Budget(PreTrainedModel):
             depth = min(depth, int(cfg["dec_depth"]))
             readout = LoopVisualReadout(
                 enc_dim=ENC_DIM, dim=dim, depth=depth, heads=heads, mlp_ratio=mlp,
-                block=self.config.loop_block, dropout=self.config.loop_dropout)
+                block=self.config.loop_block, dropout=self.config.loop_dropout,
+                head=self.config.loop_head)
             stats = load_stage2_decoder(readout, blob)
             del blob
             print(f"[vlm8b] loop readout warm start from {self.config.encoder_ckpt}: "
@@ -457,7 +515,8 @@ class VLM8Budget(PreTrainedModel):
             return readout
         return LoopVisualReadout(
             enc_dim=ENC_DIM, dim=dim, depth=depth, heads=heads, mlp_ratio=mlp,
-            block=self.config.loop_block, dropout=self.config.loop_dropout)
+            block=self.config.loop_block, dropout=self.config.loop_dropout,
+            head=self.config.loop_head)
 
     def visual_tokens(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
         """(z_cls, z_s) → vis (B,8,LM_HIDDEN)；linear 只用 z_s（与基线逐位一致）。"""

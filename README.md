@@ -1,7 +1,8 @@
 # vlm8b — AssocVTC 448²/p32 阶段2编码器 → 视觉读出（linear / loop）→ Qwen3.5-4B 全参微调
 
 > **状态（2026-11-06）：仅本机 CPU 逻辑自检通过** —— `python3 smoke.py` 在 torch 2.8 CPU 上
-> **23 项 PASS / 0 FAIL**（linear 基线 4 项 + loop 读出 9 组 + 阶段2 热启动加载器 3 项）。
+> **38 项 PASS / 0 FAIL**（linear 基线 4 项 + loop 读出 5 组 × 2 种输出头 `mlp`/`transformer`
+> + 阶段2 热启动加载器 3 项）。
 > **loop 读出尚未在 GPU / Qwen3.5-4B / DeepSpeed 上跑过**（本机无 transformers 5.22、无 4B
 > 权重）⇒ 首次真机请先 `--smoke`。
 >
@@ -41,9 +42,15 @@ z_s (B,32,1744) ┴▶ mem = LN(Linear([z_cls; z_s])) + mem_pos  (B,33,dim)
 - 于是 **预算 k = 循环步数 k = 前 4k 个 register = 前 k 个 LM token**，三种截断对齐；
 - 每步都有直接监督：token t 出现在第 t..8 行里 ⇒ 现有「8 行预算 CE」免费提供逐步监督；
 - 每步的 identity 只由 `q_bank` 的独立一行提供，**不再加 step embedding**（两套会互相干扰）；
+- **输出头（最后一层）可选**（`--loop-head`）：
+  - `mlp`（**默认**，按设计稿的 MLP 投影）：逐 token `Linear(dim→dim) → GELU →
+    Linear(dim→LM_HIDDEN)`，token 间独立；
+  - `transformer`：**单层 Transformer（causal self-attn + FFN）+ 线性投影**。必须 causal：
+    token t 只看 token ≤ t，否则 token 0 会看到后段 register，破坏「预算=前缀」契约
+    （smoke ⑥ 会 FAIL）；causal 下补上了 V1 里缺失的 token 间通信。
 - `--loop-init stage2` 可用阶段2 ckpt 的 `decoder.*` 热启动：复用 `mem_proj/mem_norm/
   mem_pos/stack.layers.{0..depth-1}/norm_out`，丢弃 `query_base/query_pos/pixel_head`
-  （像素 3072 → LM 2560，形状不匹配），`q_bank/out_proj` 新初始化。
+  （像素 3072 → LM 2560，形状不匹配），`q_bank` 与输出头新初始化。
 
 ### 1.3 张量形状
 
@@ -71,6 +78,10 @@ z_s (B,32,1744) ┴▶ mem = LN(Linear([z_cls; z_s])) + mem_pos  (B,33,dim)
 **loop 的前缀因果（新增契约）**：token t 只依赖前 `t*block` 个 register ⇒ 行 k 的视觉前缀
 `vis[:k]` 的依赖范围恰好是 `z_s[:k*block]`。`smoke.py` ⑥ 用 `z_s[4]`（→ 影响 vis[1:]）与
 `z_s[20]`（→ 影响 vis[5:]）两处探针锁死；截断不会"偷看"后面的 register。
+
+**输出头的因果约束（新增）**：`--loop-head transformer` 的 self-attn 必须是 causal——
+若改成双向，`z_s[20]` 会经 token 8 反传到 token 0，`smoke.py` ⑥ 的
+「`z_s[20] → vis[:5] unchanged`」立刻 FAIL，预算前缀语义失效。
 
 **shift 公式一行**：取 hidden 的位置 = `k + (label_pos − 1)`，targets = `labels[label_pos]`，
 `label_pos = answer 起始 + j`（`start >= 1` 断言）；**绝不能**用 label 自身位置取 hidden
@@ -124,6 +135,12 @@ torchrun --nproc_per_node=2 train.py --readout loop --loop-init stage2 --loop-de
     --output-dir /root/autodl-tmp/vlm8b/output/loop_warm \
     --train-jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/train_nothink_all.jsonl
 
+# loop（热启动 + 单层 Transformer 输出头；与上面 MLP 版做 A/B）
+torchrun --nproc_per_node=2 train.py --readout loop --loop-init stage2 --loop-depth 2 \
+    --loop-head transformer --lr-proj 2e-5 \
+    --output-dir /root/autodl-tmp/vlm8b/output/loop_warm_tf \
+    --train-jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/train_nothink_all.jsonl
+
 # 评测：per-budget CE + greedy exact-match（输出 eval.json / eval.md）
 python3 eval.py --checkpoint /root/autodl-tmp/vlm8b/output/loop_warm/final \
     --jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/val_nothink_all.jsonl \
@@ -145,6 +162,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `--loop-init` | `none` | `none` 从零 / `stage2` 载入 ckpt `decoder.*` 浅层 |
 | `--loop-block` | 4 | 每步读的 register 数（8×4=32=K） |
 | `--loop-dropout` | 0.0 | 循环栈 dropout（阶段2 ckpt 训练时 dec dropout=0） |
+| `--loop-head` | `mlp` | 输出头（最后一层）：`mlp`=逐 token 2 层 MLP / `transformer`=单层 Transformer（causal） |
 
 ## 5. 文件 / 实现映射
 
@@ -160,10 +178,18 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 
 实现要点：
 
-- **参数量**：`--loop-init none --loop-dim 1024 --loop-depth 2` ≈ **38M**（含 1024→2560 输出头）；
-  `--loop-init stage2 --loop-depth 2`（dim=2048，实测 143M）≈ **143M**（复用 ckpt 前 2 层）；全量 7 层 ≈ **479M**。
-  算力（dim=2048×2 层，8 步 × 1 query，实测口径）≈ 1.07 GMACs/图，相对 8 行 LLM 前向（≈3.84 TMACs/图）**<0.1%**。
-- **显存（ZeRO-2 口径，估算）**：+0.4 GB/卡（38M）/ +1.4 GB/卡（143M）/ +4.8 GB/卡（479M）。
+- **参数量（实测，含输出头）**：
+
+  | 配置 | `--loop-head mlp` | `--loop-head transformer` |
+  |---|---|---|
+  | `--loop-init none --loop-dim 1024 --loop-depth 2` | **39.1M** | **50.7M** |
+  | `--loop-init stage2 --loop-depth 2`（dim=2048） | **147.4M** | **193.6M** |
+  | `--loop-init stage2 --loop-depth 7`（全量热启动） | **483.1M** | **529.3M** |
+
+  算力（dim=2048×2 层，8 步 × 1 query）：MLP 头 ≈1.07 GMACs/图；Transformer 头再加一层
+  ~0.4 GMACs/图。相对 8 行 LLM 前向（≈3.84 TMACs/图）均 **<0.1%**。
+- **显存（ZeRO-2 口径，估算，≈1 GB / 100M）**：+0.4 GB/卡（39M）/ +1.5 GB/卡（147M）/
+  +1.9 GB/卡（194M）/ +4.8 GB/卡（483M）/ +5.3 GB/卡（529M）。
   当前实测 72.7 GB/卡 ⇒ **全量热启动偏紧，首跑用 `--loop-depth 2` 或从零小栈**。
 - **二次读 ckpt**：`--loop-init stage2` 会在建 encoder 之外再 `torch.load` 一次阶段2 ckpt
   （≈3.8 GB，瞬时）。若带宽紧张可先 `--loop-init none` 跑通链路。
@@ -184,5 +210,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
   上游若改类名 / 子模块名，阶段2 ckpt 的 `strict=True` 加载会失败，需同步本文件。
 - **loop 读出的未验证项**：GPU 上的 DeepSpeed 组合、bf16 下 8 步 carry 数值、以及
   「循环是否真让 per-budget 曲线站起来」——**全部待真机实验**（判定标准见设计文档 §9）。
+- **输出头**：默认 `mlp`；`transformer` 头内部 **必须 causal**（改成双向会破坏预算前缀语义，
+  `smoke.py` ⑥ 直接 FAIL）。两种头对同一配置的参数量差见 §5 表。
 - **评测权重**：`eval.py` 只读 safetensors 分片索引（Trainer 默认 `save_safetensors=True`）。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。

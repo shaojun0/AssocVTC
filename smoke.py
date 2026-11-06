@@ -7,10 +7,14 @@ vlm8b 本机自检（CPU，不加载 Qwen）
   ③ 行独立/截断隔离  ④ pad 隔离
 
 **loop（本分支新增，⑤–⑧）**：
-  ⑤ 循环读出形状 (B,8,2560)
+  ⑤ 循环读出形状 (B,8,2560)（`--loop-head mlp` 与 `transformer` 都测）
   ⑥ 前缀因果性：`z_s[j]` 只影响 `vis[j//block ..]`（行 k 的依赖范围 = 前 k*block 个 register）
   ⑦ BPTT 信用分配：末 token loss 对 `q_bank[0]` / 共享栈有梯度；detach 版为 0
   ⑧ 循环读出端到端 forward（per-budget CE 有限），并复用 ② 的 shift 等价
+  ⑨ 阶段2 ckpt 的 `decoder.*` 热启动加载器（不载入 head）
+
+  注：⑤–⑦ 对两种输出头各跑一遍 —— `head=transformer` 内部是 causal self-attn，
+  若改成双向，⑥ 会立刻 FAIL（token 0 会看到后段 register，破坏预算前缀语义）。
 
 用法：`python3 smoke.py`（0=全 PASS，1=有 FAIL）；模型用极小替身（不加载 Qwen）。
 """
@@ -211,28 +215,30 @@ def check_pad(checker: Checker, model: VLM8Budget, batch: dict) -> None:
 # ⑤ 循环读出形状   ⑥ 前缀因果性   ⑦ BPTT   ⑧ 端到端 forward
 # ═══════════════════════════════════════════════════════════════
 
-def make_loop_model() -> VLM8Budget:
+def make_loop_model(head: str = "mlp") -> VLM8Budget:
     """CPU 用的小循环读出（dim=64, depth=2, block=4；不读 ckpt）。"""
     return VLM8Budget(
         VLM8BudgetConfig(encoder_ckpt="", qwen_dir="", readout="loop",
                          loop_dim=LOOP_DIM, loop_depth=LOOP_DEPTH, loop_heads=HEADS,
-                         loop_init="none", loop_block=LOOP_BLOCK),
+                         loop_init="none", loop_block=LOOP_BLOCK, loop_head=head),
         encoder=_FakeEncoder(), lm=_TinyLM()).eval()
 
 
-def check_loop_shapes(checker: Checker, model: VLM8Budget) -> None:
+def check_loop_shapes(checker: Checker, model: VLM8Budget, tag: str = "") -> None:
     """(z_cls, z_s) → (B,8,2560)；读窗口覆盖全部 32 个 register。"""
     z_cls, z_s = fixed_z()
     vis = model.visual_tokens(z_cls, z_s)
-    checker.check("loop readout: (B,1,·)+(B,32,·) → vis (2,8,2560)",
+    checker.check(f"loop readout{tag}: (B,1,·)+(B,32,·) → vis (2,8,2560)",
                   tuple(vis.shape) == (BATCH, 8, LM_HIDDEN))
+    checker.check(f"loop head{tag}: kind == {model.projector.head_kind!r}",
+                  model.projector.head_kind in ("mlp", "transformer"))
     windows = model.projector.windows
-    checker.check("loop windows: 8 步覆盖 32 register（末窗口 hi=32）",
+    checker.check(f"loop windows{tag}: 8 步覆盖 32 register（末窗口 hi=32）",
                   windows[-1][1] == NUM_SPECIALS and len(windows) == 8,
                   str(windows))
 
 
-def check_loop_causality(checker: Checker, model: VLM8Budget) -> None:
+def check_loop_causality(checker: Checker, model: VLM8Budget, tag: str = "") -> None:
     """前缀因果性：z_s[j] 只影响 vis[j//block ..]（行 k 依赖前 k*block 个 register）。"""
     z_cls, z_s = fixed_z()
     base = model.visual_tokens(z_cls, z_s)
@@ -243,40 +249,53 @@ def check_loop_causality(checker: Checker, model: VLM8Budget) -> None:
         deltas = [float((after[:, t] - base[:, t]).abs().max()) for t in range(8)]
         head = max(deltas[:first_affected])
         tail = min(deltas[first_affected:])
-        checker.check(f"loop causality: z_s[{reg_index}] → vis[:{first_affected}] unchanged",
+        checker.check(f"loop causality{tag}: z_s[{reg_index}] → vis[:{first_affected}] unchanged",
                       head < CLEAN_TOL, f"max|Δ|={head:.2e}")
-        checker.check(f"loop causality: z_s[{reg_index}] → vis[{first_affected}:] changed",
+        checker.check(f"loop causality{tag}: z_s[{reg_index}] → vis[{first_affected}:] changed",
                       tail > 1e-4, f"min|Δ|={tail:.2e}")
 
 
-def check_loop_grad(checker: Checker, model: VLM8Budget) -> None:
-    """末 token loss 对 step-1 的 query / 共享栈有梯度（BPTT）；detach 版必须为 0。"""
+def check_loop_grad(checker: Checker, model: VLM8Budget, tag: str = "") -> None:
+    """末 token loss 对 step-1 的 query / 共享栈有梯度（BPTT）；detach 版必须为 0。
+
+    探针用 **pre-head 状态**（临时把 head 换成 Identity）：`head=transformer` 的
+    causal self-attn 会让 token 8 直接读到 token 0，掩盖"carry 是否被 detach"，
+    故测信用分配时必须绕过 head，只看循环 carry 这条路径。
+    """
     z_cls, z_s = fixed_z()
-    model.train()
-    model.zero_grad()
-    model.visual_tokens(z_cls, z_s)[:, -1].pow(2).mean().backward()
-    g_q = float(model.projector.q_bank.grad[0].norm())
-    g_stack = float(model.projector.stack.layers[0].self_attn.in_proj_weight.grad.norm())
-    checker.check("loop BPTT: 末 token loss → grad q_bank[0] > 0", g_q > 0, f"{g_q:.3e}")
-    checker.check("loop BPTT: 末 token loss → grad 共享栈 layer0 > 0", g_stack > 0,
-                  f"{g_stack:.3e}")
-    model.zero_grad()
-    model.projector(z_cls, z_s, detach_carry=True)[:, -1].pow(2).mean().backward()
-    g_detach = float(model.projector.q_bank.grad[0].norm())
-    checker.check("loop detach: carry detach → grad q_bank[0] == 0", g_detach == 0.0,
-                  f"{g_detach:.3e}")
+    head_backup = model.projector.head
+    model.projector.head = nn.Identity()
+    try:
+        model.train()
+        model.zero_grad()
+        # 注意：不能用 .sum()（pre-head 状态最后一层是 LayerNorm，特征维求和恒为 0）
+        model.visual_tokens(z_cls, z_s)[:, -1].pow(2).mean().backward()
+        g_q = float(model.projector.q_bank.grad[0].norm())
+        g_stack = float(model.projector.stack.layers[0].self_attn.in_proj_weight.grad.norm())
+        checker.check(f"loop BPTT{tag}: 末 token loss → grad q_bank[0] > 0", g_q > 0,
+                      f"{g_q:.3e}")
+        checker.check(f"loop BPTT{tag}: 末 token loss → grad 共享栈 layer0 > 0",
+                      g_stack > 0, f"{g_stack:.3e}")
+        model.zero_grad()
+        model.projector(z_cls, z_s, detach_carry=True)[:, -1].pow(2).mean().backward()
+        g_detach = float(model.projector.q_bank.grad[0].norm())
+        checker.check(f"loop detach{tag}: carry detach → grad q_bank[0] == 0",
+                      g_detach == 0.0, f"{g_detach:.3e}")
+    finally:
+        model.projector.head = head_backup
     model.eval()
 
 
-def check_loop_forward(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+def check_loop_forward(checker: Checker, model: VLM8Budget, batch: dict,
+                       tag: str = "") -> None:
     """端到端：循环读出 → 8 行展开 → LM → per-budget CE。"""
     out = model(**batch)
     per_budget = out["per_budget_ce"]
-    checker.check("loop forward: per_budget_ce shape == (8,)",
+    checker.check(f"loop forward{tag}: per_budget_ce shape == (8,)",
                   tuple(per_budget.shape) == (8,), str(tuple(per_budget.shape)))
-    checker.check("loop forward: loss finite",
+    checker.check(f"loop forward{tag}: loss finite",
                   bool(torch.isfinite(out["loss"])), f"loss={float(out['loss']):.4f}")
-    checker.check("loop forward: row_ce shape == (16,)",
+    checker.check(f"loop forward{tag}: row_ce shape == (16,)",
                   tuple(out["row_ce"].shape) == (BATCH * 8,))
 
 
@@ -316,18 +335,21 @@ def main() -> int:
     torch.manual_seed(0)
     linear = VLM8Budget(VLM8BudgetConfig(encoder_ckpt="", qwen_dir=""),
                         encoder=_FakeEncoder(), lm=_TinyLM()).eval()
-    loop = make_loop_model()
     checker, batch = Checker(), make_batch()
     with torch.no_grad():
         check_shapes(checker, linear, batch)
         check_shift(checker, linear, batch)
         check_isolation(checker, linear, batch)
         check_pad(checker, linear, batch)
-        check_loop_shapes(checker, loop)
-        check_loop_causality(checker, loop)
-        check_loop_forward(checker, loop, batch)
-        check_shift(checker, loop, batch, tag=" (loop readout)")
-    check_loop_grad(checker, loop)
+        for head in ("mlp", "transformer"):
+            loop = make_loop_model(head)
+            tag = f" [{head}]"
+            check_loop_shapes(checker, loop, tag)
+            check_loop_causality(checker, loop, tag)
+            check_loop_forward(checker, loop, batch, tag)
+            check_shift(checker, loop, batch, tag=f" (loop/{head})")
+    for head in ("mlp", "transformer"):
+        check_loop_grad(checker, make_loop_model(head), f" [{head}]")
     check_loop_warmstart(checker)
     return checker.summary()
 
