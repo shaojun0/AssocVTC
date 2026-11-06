@@ -153,3 +153,16 @@ cd /root/vlm8b && torchrun --nproc_per_node=2 --master_port=29511 train.py \
 - 处置：`run_eval_mix.sh` 启动前若剩余 <20G，删除**已被 run2 取代的 run1/final**（10G，评测数字见 `REPORT_vlm8b_1ep.md`），删除动作写入 `logs/disk_notes.txt`；删完仍 <18G 则中止。→ run3 期间余量 13G，存档峰值 3G。
 - 看门狗（`tools/vlm8b_watchdog.sh`，已重启）：日志候选加入 `run3.log`、磁盘阈值 `FREE_MIN=2G`、新增 `RUN3_DONE` 里程碑邮件、进程消失判定加入 run3 未完成条件（避免 run2 完成后误报）。
 - 自动链：`eval_after_run3.sh` 由 `run_eval_mix.sh` 在训练 rc=0 后自动拉起 → mix_heldout 三组（n=300 seed42）+ ImageNet val（与 run1/run2 同口径）+ 通用 bench → `logs/RUN3_EVAL_DONE`。
+
+### 9.6 run2 训练中期观察：loss 触底回升（11-06 17:45）
+
+- loss min **4.07 @ step≈1900（epoch 0.50）** → step 2680 时 **6.04**；窗口 2280–2680 均值 5.50 vs 前一窗口 4.66（**+18.0%**）
+- per-budget CE 窗口 0.292→0.389（+33%），但 k=8 单批最低 0.024（部分样本已近零误差）⇒ 不是整体崩，是"部分样本变差 + 部分变极好"的再分配
+- grad_norm 间或 105（早段 77），Trainer 默认 clip=1.0 生效；`monitor_loss.py` 判 **DIVERGING**
+- 判断：更可能是续训 LR 偏高（run1 结束时余弦≈0，run2 重新 warmup 到 1e-5 把模型推出原极小点），而非数据/实现问题
+- 处置：**不干预**（遵循"不中途改超参重启"），跑完 2 epoch（05:50，余弦归零）；已发邮件知会
+- 对 run3 的连动：**以 06:00 评测定起点** —— normal acc ≥ run1(12.4%) 且 CE 不高于 run1 → init=run2/final（原计划）；若明显更差 → init=**run1/final**，混合集与流程不变
+
+### 9.7 交付物入库
+
+`tools/eval_mix/`（`1b3e48e`）：`build_img_eval_mix.py`、`prepare_mix.py`、`preflight_mix.py`、`run_eval_mix.sh`、`eval_after_run2.sh`、`eval_after_run3.sh`、`eval_mix_breakdown.py`、`make_report.py` + README。其中 `make_report.py` 已用 run1 产物自测通过（预算表/三组消融/bench 表格逐项对上）。
