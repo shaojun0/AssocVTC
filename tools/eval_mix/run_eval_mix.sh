@@ -1,26 +1,56 @@
 #!/usr/bin/env bash
-# run3：run2/final → 评测对齐混合数据（text 82k + img 31.8k + ImageNet-100 66k = 179,845 行）
-#   epochs 3.8 × 5,621 步 ≈ 21,360 步 ≈ 53 h（周六 06:00 起 → 周一 11:00–12:00 止）
+# run3：run2/final →「评测对齐 + 按任务等量」混合数据
+#   文本 82,000 + 图像 20,396（每个图像任务 ≤2,000，ImageNet-100 锚点 66,000→2,000）
+#   = 102,396 行 ≈ 3,200 步/epoch ≈ 7.95 h/epoch；epochs 由「到周一截止时间」自动算，
+#   默认目标 2026-11-09 09:00 训完，给 run3 评测链留 ~2h。
 # 前置：run2 已结束；/root/vlm8b/train_fixed.py 就位（E1 冻结修复版）
 # 磁盘策略：HF Trainer 是「先存新 checkpoint、再删旧的」⇒ 峰值要 2×10G。
 #   故启动前若剩余 <20G，删除已被 run2 取代的 run1/final（10G，评测数字已在 doc 里）；
 #   删完仍 <18G 则中止并留日志等人工。
+# 学习率：run2 的教训（续训 1e-5 重启余弦、loss 中段回升 +45%）⇒ run3 峰值减半：
+#   LLM 5e-6 / encoder 2.5e-6 / projector 5e-5，warmup 2%（环境变量可覆盖）。
 set -uo pipefail
 cd /root/vlm8b
 mkdir -p logs
-EPOCHS=${EPOCHS:-3.8}
 OUT=${OUT:-/root/autodl-tmp/vlm8b/output/run3}
 INIT=${INIT:-/root/autodl-tmp/vlm8b/output/run2/final}
 DATA=${DATA:-/root/autodl-tmp/vlm8b/data_eval}
-TRAIN_JSONL=${TRAIN_JSONL:-$DATA/mix_train.jsonl}
+TRAIN_JSONL=${TRAIN_JSONL:-$DATA/mix_train_bal.jsonl}
+LR_LLM=${LR_LLM:-5e-6}
+LR_ENCODER=${LR_ENCODER:-2.5e-6}
+LR_PROJ=${LR_PROJ:-5e-5}
+WARMUP=${WARMUP:-0.02}
+DEADLINE=${DEADLINE:-2026-11-09 09:00:00}   # 训练截止（之后自动接评测链）
+SEC_PER_STEP=${SEC_PER_STEP:-9.0}           # 实测 8.94–8.96 s/step，取 9.0 留余量
+STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-3200}    # 102,396 行 / 全局 batch 32
 
-for f in "$INIT" "$TRAIN_JSONL" "$DATA/img"; do
-  [ -e "$f" ] || { echo "[run3] FATAL missing $f"; exit 2; }
-done
+# epochs：优先用 EPOCHS 环境变量；否则按「现在 → DEADLINE」倒推（至少 1.0）
+if [ -z "${EPOCHS:-}" ]; then
+  TARGET_TS=$(date -d "$DEADLINE" +%s) || { echo "[run3] FATAL 无法解析 DEADLINE=$DEADLINE"; exit 4; }
+  NOW_TS=$(date +%s)
+  AVAIL_STEPS=$(( (TARGET_TS - NOW_TS) / ${SEC_PER_STEP%.*} ))
+  if [ "$AVAIL_STEPS" -lt 1000 ]; then
+    echo "[run3] FATAL 距 DEADLINE=$DEADLINE 太近（约 ${AVAIL_STEPS} 步），拒绝启动"
+    exit 4
+  fi
+  EPOCHS=$(awk -v s="$AVAIL_STEPS" -v p="$STEPS_PER_EPOCH" 'BEGIN{printf "%.2f", s/p}')
+fi
+
+if [ "${DRY:-0}" != "1" ]; then
+  for f in "$INIT" "$TRAIN_JSONL" "$DATA/img"; do
+    [ -e "$f" ] || { echo "[run3] FATAL missing $f"; exit 2; }
+  done
+fi
 
 free_gb() { df -BG --output=avail /root/autodl-tmp | tail -1 | tr -dc '0-9'; }
 FREE=$(free_gb)
-echo "[run3] disk free=${FREE}G"
+echo "[run3] config: init=$INIT data=$TRAIN_JSONL epochs=$EPOCHS lr=$LR_LLM/$LR_PROJ/$LR_ENCODER warmup=$WARMUP"
+echo "[run3] deadline=$DEADLINE disk free=${FREE}G"
+if [ "${DRY:-0}" = "1" ]; then
+  echo "[run3] DRY=1：只打印配置，不动磁盘/不启动训练"
+  exit 0
+fi
+
 RUN1=/root/autodl-tmp/vlm8b/output/run1/final
 if [ "${FREE:-0}" -lt 20 ] && [ -d "$RUN1" ] && [ "$(readlink -f "$INIT")" != "$(readlink -f "$RUN1")" ]; then
   echo "[run3] 磁盘紧张：删除已被 run2 取代的 run1/final（约 10G）——评测数字已在 doc/2026-11-06/REPORT_vlm8b_1ep.md"
@@ -42,10 +72,12 @@ if [ -f train_fixed.py ]; then
 fi
 
 echo "[run3] start $(date -Is) epochs=$EPOCHS init=$INIT data=$TRAIN_JSONL"
-timeout 260000 /root/venv_qwen/bin/python -u -m torch.distributed.run \
+timeout 300000 /root/venv_qwen/bin/python -u -m torch.distributed.run \
   --nproc_per_node=2 --master_port=29513 \
   train.py --freeze-encoder-epochs 0 --epochs "$EPOCHS" --init-from "$INIT" \
   --output-dir "$OUT" --save-total-limit 1 \
+  --lr-llm "$LR_LLM" --lr-encoder "$LR_ENCODER" --lr-proj "$LR_PROJ" \
+  --warmup-ratio "$WARMUP" \
   --train-jsonl "$TRAIN_JSONL" --image-root "$DATA"
 rc=$?
 echo "[run3] rc=$rc $(date -Is)" | tee logs/run3.rc

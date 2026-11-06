@@ -177,3 +177,48 @@ cd /root/vlm8b && torchrun --nproc_per_node=2 --master_port=29511 train.py \
 
 已加脚本保护：`run_eval_mix.sh` 的磁盘清理**永不删除 INIT 目录**（INIT=run1/final 时不会删 run1）。
 用户若在周末回信要求改为预算课程或换方案，随时可 `pkill -f train.py` 停掉 run3（run3 从初始化状态开始，停掉无损失）。
+
+### 9.9 数据重平衡（11-06 18:10，按用户反馈：图像任务等量、ImageNet 降权）
+
+**反馈**：「ImageNet-100 的数据降低点；图像里面不同任务数据量尽可能相等，不要头重脚轻。」
+原 `mix_train.jsonl` 图像行 97,845 = ImageNet 锚定 66,000（67%）+ 各评测任务 300–6,000，确实头重脚轻。
+
+**做法**：`tools/eval_mix/rebalance_mix.py`（新增，`1e6b7c0` 起入库）从既有 `mix_train.jsonl`
+**按 source 抽样**生成 `mix_train_bal.jsonl`——不重新生成 prompt、不重新下载图片（行内容原样拷贝，
+含 `messages_short`）。配额：每个图像任务 ≤2,000；textvqa 与 textvqa_train 同一任务合并 2,000（2:1 拆）；
+**ImageNet-100 锚定 66,000 → 2,000**（与单个任务同量级，占比 2.0%）；文本源 82,000 行全保留
+（文本任务量按原规格与知识覆盖需求保留，如要等量另议）。
+
+| source | 原量 | 保留 | 占全量 |
+|---|---:|---:|---:|
+| imagenet100 | 66,000 | **2,000** | 2.0% |
+| scienceqa / slake / docvqa | 6,000 / 5,000 / 4,451 | 各 2,000 | 各 2.0% |
+| textvqa + textvqa_train | 3,997 + 2,000 | 1,333 + 667 | 2.0% |
+| ai2d / mathvision | 2,000 / 2,000 | 各 2,000 | 各 2.0% |
+| chartqa / we_math | 1,500 / 1,200 | 1,500 / 1,200 | 1.5% / 1.2% |
+| mmstar / mathvista / mmmu / ocrbench / realworldqa / countbench | 999 / 698 / 600 / 600 / 500 / 300 | 全保留 | 1.0%–0.3% |
+| 文本 7 源 | 82,000 | 82,000 | 80.1% |
+
+- **新训练集 102,396 行**（文本 82,000 + 图像 20,396），逐行校验：图片缺失 0、assistant 前缀违规 0、
+  `gt` 空 0、重复 id 0；抽 300 行 token：p50 148 / p99 689 / max 745，**0 条超 1024**；
+  64 行真实走 `Dataset+Collator+expand_budget_rows` → **PREFLIGHT OK**
+  （batch (64,829)、512×837×2560、valid target 2904 = expected 2904）
+- 小任务的量无法再拉平（数据集本身只有 300–999 条可用），**差异只由可得数据量导致**，不是抽样偏置。
+
+**run3 配置随之更新（`run_eval_mix.sh`）**：训练集换 `mix_train_bal.jsonl`；3,200 步/epoch ≈ 7.95 h；
+epochs 不再写死，由「现在 → `DEADLINE`（默认 2026-11-09 09:00 训完，给评测链留 ~2h）」按 9.0 s/步倒推
+（预计启动时 ~6.2 epoch ≈ 19,800 步）；`EPOCHS=` 仍可覆盖；新增 `DRY=1` 只打印配置不动磁盘。
+旧 `mix_train.jsonl` 保留不删（可回退/对比）。
+
+### 9.10 续训 LR 取舍（与 9.6 连动，11-06 18:10）
+
+- 复核 9.6 的 loss 回升（用与 eval 同口径的 `per_budget_ce.jsonl`）：run2 四分段 CE =
+  0.471 → 0.406 → **0.233** → 0.339（step 1400–2080 最低，之后 +45%）；Trainer 日志 `loss` 与之同比
+  （loss/CE ≈ 27.5 恒定）⇒ **两个独立指标同向，回升是真的，不是单点噪声**。
+- 分预算看：k=1 CE 0.373→0.437（+17%），**k=8 CE 0.210→0.318（+51%）** ⇒ 视觉通路（多 token 预算）退化
+  比单 token 更明显；grad_norm 稳定在 70–105（clip=1.0），数据/实现已排除 ⇒ 最可能是**续训把峰值 LR
+  重新抬到 1e-5，把 run1 已收敛的视觉通路推松**。run2 末尾余弦归零，最终 CE 大概率回落，
+  最终 checkpoint 仍有竞争力（评测见 9.8 的门）。
+- **run3 对策**：峰值 LR 减半——LLM 5e-6 / encoder 2.5e-6 / projector 5e-5，warmup 2%
+  （run2 是 1e-5 / 5e-6 / 1e-4、3%）。数据与 LR 同时变，属整包实验；若周一结果不理想，回退顺序：
+  先只回 LR（数据保留），再考虑数据。
