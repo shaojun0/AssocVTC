@@ -166,3 +166,14 @@ cd /root/vlm8b && torchrun --nproc_per_node=2 --master_port=29511 train.py \
 ### 9.7 交付物入库
 
 `tools/eval_mix/`（`1b3e48e`）：`build_img_eval_mix.py`、`prepare_mix.py`、`preflight_mix.py`、`run_eval_mix.sh`、`eval_after_run2.sh`、`eval_after_run3.sh`、`eval_mix_breakdown.py`、`make_report.py` + README。其中 `make_report.py` 已用 run1 产物自测通过（预算表/三组消融/bench 表格逐项对上）。
+
+### 9.8 run3 起点策略（11-06 17:40 定稿）
+
+| run2 评测（06:00 出数） | run3 起点 | 理由 |
+|---|---|---|
+| k8 acc ≥15%、normal−null(k8) ≥8pp、预算曲线非平 | `run2/final` | 预算机制有效，接着续训到更广数据 |
+| 不达门（含 k8 acc 10–15%） | **`run1/final`** | 混合集实验与门无关；1 epoch 模型未经历后期 loss 回升；闲置 54h GPU 更浪费 |
+| run2/final 缺失 / eval 链异常 | 不启动，邮件等指示 | 无可用产物 |
+
+已加脚本保护：`run_eval_mix.sh` 的磁盘清理**永不删除 INIT 目录**（INIT=run1/final 时不会删 run1）。
+用户若在周末回信要求改为预算课程或换方案，随时可 `pkill -f train.py` 停掉 run3（run3 从初始化状态开始，停掉无损失）。
