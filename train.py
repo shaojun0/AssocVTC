@@ -93,6 +93,17 @@ def parse_args() -> argparse.Namespace:
                    help="从已有训练产物目录（含 model.safetensors）继续训练")
     p.add_argument("--grad-ckpt", action="store_true",
                    help="开 gradient checkpointing（省显存，但 ZeRO-3 下有卡死风险）")
+    # ── 视觉读出（本分支新增；默认 linear = 原基线逐位不变）──
+    p.add_argument("--readout", default="linear", choices=["linear", "loop"],
+                   help="线性重分组（基线）/ 权重共享循环读出（预算=循环步数）")
+    p.add_argument("--loop-dim", type=int, default=1024, help="循环读出宽度（loop_init=stage2 时由 ckpt 覆盖）")
+    p.add_argument("--loop-depth", type=int, default=2, help="共享栈层数（loop_init=stage2 时取 min(该值, ckpt dec_depth)）")
+    p.add_argument("--loop-heads", type=int, default=8)
+    p.add_argument("--loop-mlp-ratio", type=float, default=4.0)
+    p.add_argument("--loop-init", default="none", choices=["none", "stage2"],
+                   help="none=从零；stage2=沿用阶段2 ckpt 的 decoder.*（dim/heads/mlp 取 ckpt，depth 取 min）")
+    p.add_argument("--loop-block", type=int, default=4, help="每步读的 register 数（8 步 × 4 = 32 = K）")
+    p.add_argument("--loop-dropout", type=float, default=0.0)
     return p.parse_args()
 
 
@@ -297,6 +308,11 @@ def main() -> None:
         encoder_ckpt=args.encoder_ckpt, qwen_dir=args.qwen_dir,
         budget_ids=budgets,
         loss_weighting=args.loss_weighting,
+        readout=args.readout,
+        loop_dim=args.loop_dim, loop_depth=args.loop_depth,
+        loop_heads=args.loop_heads, loop_mlp_ratio=args.loop_mlp_ratio,
+        loop_init=args.loop_init, loop_block=args.loop_block,
+        loop_dropout=args.loop_dropout,
         pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id),
         grad_ckpt=args.grad_ckpt)
     if args.init_from:
@@ -354,6 +370,14 @@ def main() -> None:
           f"epochs={args.epochs} freeze={args.freeze_encoder_epochs} "
           f"micro={args.micro_batch_size}×{args.grad_accum} "
           f"lr={args.lr_llm:g}/{args.lr_proj:g}/{args.lr_encoder:g}")
+    if args.readout == "loop":
+        proj_params = sum(p.numel() for p in model.projector.parameters())
+        print(f"[vlm8b] readout=loop init={args.loop_init} "
+              f"dim={args.loop_dim} depth={args.loop_depth} block={args.loop_block} "
+              f"params={proj_params / 1e6:.2f}M（热启动/结构以模型实际为准）")
+        if args.lr_proj > 3e-5 and args.loop_init == "stage2":
+            print("[vlm8b] ⚠️ warm start + lr_proj>3e-5 可能冲掉阶段2 读出权重，"
+                  "建议 --lr-proj 1e-5~3e-5")
 
     trainer.train()
     final_dir = os.path.join(args.output_dir, "final")

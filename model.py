@@ -1,17 +1,27 @@
 """
-vlm8b — AssocVTC 448²/p32 阶段2 编码器 → 8 预算并行 → Qwen3.5-4B 全参微调
-========================================================================
+vlm8b — AssocVTC 448²/p32 阶段2 编码器 → 视觉读出（linear / loop）→ Qwen3.5-4B
+================================================================================
 
-数据流::
+两条视觉读出（`--readout`）：
+
+  · linear（默认，基线）：z_s (B,32,1744) → 逐 token LN+Linear(1744→640)
+    → reshape(B,8,4*640=2560) → LN(2560) = vis (B,8,2560)；8 个 token 互不通信。
+
+  · loop（本分支新增）：A=[z_cls; z_s] (B,33,1744) → mem 投影 → 权重共享循环栈
+    被施加 8 次，第 t 步只读第 t 块 4 个 register、carry 走 BPTT，第 t 步产出
+    第 t 个 token：vis = cat(V_1..V_8) (B,8,2560)。于是
+        **预算 k = 循环步数 k = 前 4k 个 register = 前 k 个 LM token**（三种截断对齐）。
+    可选 `--loop-init stage2` 用阶段2 ckpt 的 `decoder.*` 浅层热启动（见 README §5）。
+    设计文档：main 仓库 `doc/2026-11-06/DESIGN_looped_readout_vlm8b.md`。
+
+数据流（loop 时只多一次 z_cls 读取，其余与 linear 完全相同）::
 
     image (B,3,448,448)
-      → AssocVTCEncoder（从阶段2 ckpt 恢复 StandardAttentionEncoder，只读 encoder.*）
-      → z_s (B,32,1744)
-      → BudgetProjector: LayerNorm(1744) → Linear(1744,640)          [逐 token]
-      → reshape (B,8,4*640=2560) → LayerNorm(2560) → vis (B,8,2560)
-      → 每图 V 行（默认 k=1..8）：行 k = [vis[:, :k]; text]           [截断]
-      → Qwen3.5-4B 文本主干（只喂 inputs_embeds，不喂 pixel_values，vision tower 已删）
-      → hidden → 只 gather answer 的**预测位置** → lm_head → CE（fp32 分块）
+      → AssocVTCEncoder（阶段2 ckpt，只读 encoder.*）→ (z_cls (B,1,1744), z_s (B,32,1744))
+      → 读出（linear / loop）→ vis (B,8,2560)
+      → 每图 V 行（默认 k=1..8）：行 k = [vis[:, :k]; text]（截断）
+      → Qwen3.5-4B 文本主干（只喂 inputs_embeds）
+      → hidden → 只 gather answer 的预测位置 → lm_head → CE
 
 关键裁决（`doc/2026-11-05/DESIGN_8budget_vlm_finetune.md` §4）:
 
@@ -21,12 +31,15 @@ vlm8b — AssocVTC 448²/p32 阶段2 编码器 → 8 预算并行 → Qwen3.5-4B
   · **标准因果 shift**：position p 的 hidden 只能预测 `label[p+1]`，故
     `ans_pos = k + (label_pos − 1)`、targets = `labels[label_pos]`，且 `label_pos ≥ 1`。
     用 label 自身位置取 hidden 会目标泄露（hidden 已看见该 token 的 embedding）。
+  · **loop 读出的前缀因果**：token t 只依赖前 t*block 个 register ⇒ 行 k 的视觉
+    前缀 `vis[:k]` 的依赖范围恰好是 `z_s[:k*block]`（smoke 自检 ⑥ 锁死）。
 
-Qwen 相关 import 全部在函数内部（本机 transformers 4.57 没有 `Qwen3_5*`），所以
+Qwen 相关 import 全部在函数内部（本机 transformers 4.x 没有 `Qwen3_5*`），所以
 `import model` 不会加载 Qwen。
 """
+import math
 import os
-from typing import Dict, List, NamedTuple, Optional, Sequence
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,6 +61,7 @@ LM_HIDDEN = 2560                # Qwen3.5-4B text hidden
 IGNORE_INDEX = -100
 CE_CHUNK = 64                   # 分块 gather/lm_head 的位置数
 DEFAULT_BUDGETS = tuple(range(1, VISUAL_TOKENS + 1))
+LOOP_BLOCK = 4                   # 每步读的 register 数（8 步 × 4 = 32 = K）
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -62,6 +76,14 @@ class VLM8BudgetConfig(PretrainedConfig):
     def __init__(self, encoder_ckpt: str = "", qwen_dir: str = "",
                  budget_ids: Optional[Sequence[int]] = None,
                  loss_weighting: str = "equal",
+                 readout: str = "linear",
+                 loop_dim: int = 1024,
+                 loop_depth: int = 2,
+                 loop_heads: int = 8,
+                 loop_mlp_ratio: float = 4.0,
+                 loop_init: str = "none",
+                 loop_block: int = LOOP_BLOCK,
+                 loop_dropout: float = 0.0,
                  pad_token_id: Optional[int] = None,
                  eos_token_id: Optional[int] = None,
                  hidden_size: int = LM_HIDDEN, **kwargs):
@@ -70,6 +92,16 @@ class VLM8BudgetConfig(PretrainedConfig):
         self.qwen_dir = str(qwen_dir)
         self.budget_ids = [int(k) for k in (budget_ids or DEFAULT_BUDGETS)]
         self.loss_weighting = str(loss_weighting)
+        assert readout in ("linear", "loop"), f"未知 readout={readout!r}"
+        assert loop_init in ("none", "stage2"), f"未知 loop_init={loop_init!r}"
+        self.readout = str(readout)
+        self.loop_dim = int(loop_dim)
+        self.loop_depth = int(loop_depth)
+        self.loop_heads = int(loop_heads)
+        self.loop_mlp_ratio = float(loop_mlp_ratio)
+        self.loop_init = str(loop_init)
+        self.loop_block = int(loop_block)
+        self.loop_dropout = float(loop_dropout)
         self.pad_token_id = None if pad_token_id is None else int(pad_token_id)
         self.eos_token_id = None if eos_token_id is None else int(eos_token_id)
         # DeepSpeed ZeRO-3 的 `"auto"` bucket 尺寸依赖 config.hidden_size（HF 在
@@ -167,6 +199,149 @@ class BudgetProjector(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 循环读出（loop）：预算 k = 循环步 k = 前 k*block 个 register = k 个 LM token
+# ═══════════════════════════════════════════════════════════════
+
+def step_windows(num_specials: int, steps: Sequence[int], plan: str = "fixed",
+                 block: int = 0) -> List[Tuple[int, int]]:
+    """每步在 `A=[z_cls; z_s]`（列 0=z_cls，列 1..K=z_s）上的读窗口 `(lo, hi)`（闭区间）。
+
+    与 main 分支 `model_v2_linattn.step_windows` 同式：
+      · `plan="fixed"`（默认，阶段2 ckpt 的成功操作点）：第 k 步读第 k 块，块宽
+        `block`；首步窗口额外含 z_cls（lo=0）。
+      · `plan="square"`：k=isqrt(t)，窗口 [max(k²,1), min((k+1)²−1, K)]；首步 lo=0。
+      · `plan="cumulative"`：`steps` 直接是每步累计读入的 z_s 数 C_1<…<C_T（首步 lo=0）。
+    """
+    assert plan in ("fixed", "square", "cumulative"), f"未知 plan={plan!r}"
+    if plan == "fixed":
+        assert block >= 1, f"plan=fixed 须 block≥1, got {block}"
+    out: List[Tuple[int, int]] = []
+    for i, t in enumerate(steps):
+        if plan == "cumulative":
+            cum = [int(x) for x in steps]
+            assert all(cum[j] < cum[j + 1] for j in range(len(cum) - 1)), cum
+            assert cum[0] >= 1 and cum[-1] <= num_specials, cum
+            out = [(0 if j == 0 else cum[j - 1] + 1, c) for j, c in enumerate(cum)]
+            return out
+        if plan == "fixed":
+            k = int(t)
+            hi = min(k * block, num_specials)
+            lo = 0 if i == 0 else (k - 1) * block + 1
+        else:
+            k = int(math.isqrt(int(t)))
+            hi = min((k + 1) ** 2 - 1, num_specials)
+            lo = 0 if i == 0 else max(k * k, 1)
+        assert lo <= hi, f"步 {t} 的读窗口 [{lo},{hi}] 为空 (K={num_specials})"
+        out.append((lo, hi))
+    return out
+
+
+class LoopVisualReadout(nn.Module):
+    """权重共享循环读出：第 t 步产出第 t 个 LM token（预算=步数）。
+
+    机制（与主线 `RecurrentOutputQueryDecoder` 同构，输出头从像素换成 LM hidden）::
+
+        A = mem_norm(mem_proj([z_cls; z_s])) + mem_pos              (B, 1+K, dim)
+        Y_0 = 0
+        for t, (lo, hi) in enumerate(windows):                      # 步 t 只读本步窗口
+            Y_t = Stack(q_bank[t] + Y_{t-1}, A[:, lo:hi+1])         # 栈权重跨步共享
+            V_t = out_proj(norm_out(Y_t))                           # (B, 1, LM_HIDDEN)
+            Y_{t} 作为下一步 carry（**BPTT：不 detach**）
+        return cat(V_1..V_T)                                        # (B, T, LM_HIDDEN)
+
+    设计要点（全来自主线实测教训，见设计文档 §4/§6）:
+      · **BPTT 不 detach**：detach 会让 carry 变成纯前向接力，早步收不到末步梯度；
+      · **每步都有直接监督**：由"8 行预算 CE"免费提供（token t 出现在第 t..8 行）；
+      · **恰好一个 step identity**：`q_bank` 每行一个 token 身份，故**不再另加**
+        step embedding（两套 identity 会互相干扰，主线 arm-4a 实测更差）。
+    """
+
+    def __init__(self, enc_dim: int = ENC_DIM, dim: int = 1024, depth: int = 2,
+                 heads: int = 8, mlp_ratio: float = 4.0, n_tokens: int = VISUAL_TOKENS,
+                 n_specials: int = NUM_SPECIALS, lm_hidden: int = LM_HIDDEN,
+                 block: int = LOOP_BLOCK, dropout: float = 0.0):
+        super().__init__()
+        assert dim % heads == 0, f"dim={dim} 须被 heads={heads} 整除"
+        self.enc_dim, self.dim, self.depth = int(enc_dim), int(dim), int(depth)
+        self.n_tokens, self.n_specials = int(n_tokens), int(n_specials)
+        self.mem_proj = (nn.Identity() if self.enc_dim == self.dim
+                         else nn.Linear(self.enc_dim, self.dim))
+        self.mem_norm = nn.LayerNorm(self.dim)
+        self.mem_pos = nn.Parameter(torch.zeros(1, 1 + self.n_specials, self.dim))
+        self.q_bank = nn.Parameter(torch.randn(self.n_tokens, self.dim) * 0.02)
+        self.stack = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=self.dim, nhead=heads,
+                dim_feedforward=int(self.dim * float(mlp_ratio)),
+                dropout=float(dropout), activation="gelu",
+                batch_first=True, norm_first=True),
+            num_layers=self.depth)
+        self.norm_out = nn.LayerNorm(self.dim)
+        self.out_proj = nn.Linear(self.dim, int(lm_hidden))
+        self.steps = list(range(1, self.n_tokens + 1))
+        self.windows = step_windows(self.n_specials, self.steps,
+                                    plan="fixed", block=int(block))
+        assert self.windows[-1][1] == self.n_specials, (
+            f"读窗口未覆盖全部 {self.n_specials} 个 register: {self.windows}")
+
+    def forward(self, z_cls: Tensor, z_s: Tensor,
+                detach_carry: bool = False) -> Tensor:
+        """`z_cls (B,1,enc_dim)` + `z_s (B,K,enc_dim)` → `vis (B,T,LM_HIDDEN)`。
+
+        `detach_carry=True` 只用于自检（复现主线 detach 口径），训练永远走 BPTT。
+        """
+        assert z_cls.dim() == 3 and z_s.dim() == 3, "z_cls/z_s 须为 (B,·,D)"
+        assert z_cls.shape[1] == 1 and z_s.shape[1] == self.n_specials, (
+            f"z_cls 应 1 列 / z_s 应 {self.n_specials} 列, got "
+            f"{tuple(z_cls.shape)} / {tuple(z_s.shape)}")
+        mem = torch.cat([z_cls, z_s], dim=1)                    # (B,1+K,enc_dim)
+        mem = self.mem_norm(self.mem_proj(mem)) + self.mem_pos  # (B,1+K,dim)
+        outs: List[Tensor] = []
+        carry: Optional[Tensor] = None
+        for t, (lo, hi) in enumerate(self.windows):
+            q = self.q_bank[t].view(1, 1, -1).expand(mem.size(0), -1, -1)
+            q_in = q if carry is None else q + carry            # carry：BPTT，不 detach
+            y = self.stack(q_in, mem[:, lo:hi + 1])             # (B,1,dim)
+            outs.append(self.out_proj(self.norm_out(y)))        # (B,1,LM_HIDDEN)
+            carry = y.detach() if detach_carry else y
+        return torch.cat(outs, dim=1)                           # (B,T,LM_HIDDEN)
+
+
+def load_stage2_decoder(readout: "LoopVisualReadout",
+                        blob: Dict[str, object]) -> Dict[str, int]:
+    """把阶段2 ckpt 的 `decoder.*` 灌进循环读出（浅/全量热启动）。
+
+    复用：`mem_proj` / `mem_norm` / `mem_pos` / `stack.layers.{0..depth-1}` /
+    `norm_out`；**丢弃**与输出目标绑定的 `query_base` / `query_pos` / `pixel_head`
+    （像素 3072 维 → LM 2560 维，形状不再匹配）。返回载入/跳过的 key 数。
+    """
+    own = readout.state_dict()
+    state: Dict[str, Tensor] = {}
+    skipped = 0
+    for key, value in blob["model"].items():
+        name = str(key)
+        for prefix in ("module.", "_orig_mod."):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        if not name.startswith("decoder."):
+            continue
+        sub = name[len("decoder."):]
+        if sub.startswith(("query_base", "query_pos", "pixel_head")):
+            skipped += 1
+            continue
+        if sub.startswith("stack.layers."):                 # 只载入前 depth 层
+            if int(sub.split(".")[2]) >= readout.depth:
+                skipped += 1
+                continue
+        if sub not in own or tuple(own[sub].shape) != tuple(value.shape):
+            skipped += 1
+            continue
+        state[sub] = value
+    readout.load_state_dict(state, strict=False)
+    return {"loaded": len(state), "skipped": skipped}
+
+
+# ═══════════════════════════════════════════════════════════════
 # AssocVTCEncoder — 阶段2 编码器（E1 冻结 / E2+ 解冻）
 # ═══════════════════════════════════════════════════════════════
 
@@ -201,9 +376,9 @@ class AssocVTCEncoder(nn.Module):
         assert state, "ckpt 里没有 encoder.* 权重"
         self.net.load_state_dict(state, strict=True)
 
-    def forward(self, pixel_values: Tensor) -> Tensor:
-        """pixel_values (B,3,448,448) → z_s (B,32,1744)。"""
-        return self.net(pixel_values)[1]
+    def forward(self, pixel_values: Tensor) -> Tuple[Tensor, Tensor]:
+        """pixel_values (B,3,448,448) → (z_cls (B,1,1744), z_s (B,32,1744))。"""
+        return self.net(pixel_values)
 
     def freeze(self) -> None:
         """E1：requires_grad=False + eval()。"""
@@ -250,11 +425,46 @@ class VLM8Budget(PreTrainedModel):
                  encoder: Optional[nn.Module] = None, lm: Optional[nn.Module] = None,
                  grad_ckpt: bool = False):
         super().__init__(config)
-        self.projector = BudgetProjector()
+        self.readout = str(config.readout)
+        self.projector = self._build_projector()
         self.encoder = encoder if encoder is not None else AssocVTCEncoder(
             config.encoder_ckpt)
         self.lm = lm if lm is not None else self.load_lm(grad_ckpt)
         self.loss_weighting, self.last_budget_ce = str(config.loss_weighting), None
+
+    def _build_projector(self) -> nn.Module:
+        """按 `config.readout` 建读出：linear=基线线性重分组；loop=权重共享循环。"""
+        if self.config.readout == "linear":
+            return BudgetProjector()
+        dim, depth = int(self.config.loop_dim), int(self.config.loop_depth)
+        heads, mlp = int(self.config.loop_heads), float(self.config.loop_mlp_ratio)
+        if self.config.loop_init == "stage2":
+            blob = torch.load(os.path.expanduser(self.config.encoder_ckpt),
+                              map_location="cpu", weights_only=False)
+            cfg = blob["cfg"]
+            dim = int(cfg["dec_dim"])
+            heads = int(cfg["dec_heads"])
+            mlp = float(cfg.get("dec_mlp_ratio", 4.0))
+            depth = min(depth, int(cfg["dec_depth"]))
+            readout = LoopVisualReadout(
+                enc_dim=ENC_DIM, dim=dim, depth=depth, heads=heads, mlp_ratio=mlp,
+                block=self.config.loop_block, dropout=self.config.loop_dropout)
+            stats = load_stage2_decoder(readout, blob)
+            del blob
+            print(f"[vlm8b] loop readout warm start from {self.config.encoder_ckpt}: "
+                  f"dim={dim} depth={depth} heads={heads} "
+                  f"loaded={stats['loaded']} skipped={stats['skipped']}")
+            return readout
+        return LoopVisualReadout(
+            enc_dim=ENC_DIM, dim=dim, depth=depth, heads=heads, mlp_ratio=mlp,
+            block=self.config.loop_block, dropout=self.config.loop_dropout)
+
+    def visual_tokens(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
+        """(z_cls, z_s) → vis (B,8,LM_HIDDEN)；linear 只用 z_s（与基线逐位一致）。"""
+        if self.readout == "loop":
+            dtype = next(self.projector.parameters()).dtype
+            return self.projector(z_cls.to(dtype), z_s.to(dtype))
+        return self.projector(z_s)
 
     def load_lm(self, grad_ckpt: bool = False) -> nn.Module:
         """加载 Qwen3.5-4B（本函数内才 import Qwen），删 vision tower、开 grad ckpt。"""
@@ -292,10 +502,8 @@ class VLM8Budget(PreTrainedModel):
         """训练 / teacher-forcing 前向（生成见 `generate_budget`）。"""
         self._keep_encoder_eval()
         encoder_dtype = next(self.encoder.parameters()).dtype
-        z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))         # (B,32,1744)
-        vis = apply_visual_mode(
-            self.projector(z_s.to(self.projector.token_proj.weight.dtype)),
-            visual_mode)
+        z_cls, z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))  # (B,1,·)/(B,32,·)
+        vis = apply_visual_mode(self.visual_tokens(z_cls, z_s), visual_mode)
         text_embeds = self.lm.get_input_embeddings()(input_ids)          # (B,T,2560)
         rows = expand_budget_rows(
             vis, text_embeds.to(vis.dtype), attention_mask, labels,
@@ -354,9 +562,8 @@ class VLM8Budget(PreTrainedModel):
         """每图 × 每预算 greedy 生成（right-pad 下逐行），返回 `{k: [[ids...], ...]}`。"""
         self._keep_encoder_eval()
         encoder_dtype = next(self.encoder.parameters()).dtype
-        vis = apply_visual_mode(self.projector(self.encoder(
-            pixel_values.to(dtype=encoder_dtype)).to(
-                self.projector.token_proj.weight.dtype)), visual_mode)
+        z_cls, z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))
+        vis = apply_visual_mode(self.visual_tokens(z_cls, z_s), visual_mode)
         text_embeds = self.lm.get_input_embeddings()(input_ids).to(vis.dtype)
         results: Dict[int, List[List[int]]] = {}
         for k in self._budgets(budget_ids):
