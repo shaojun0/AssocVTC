@@ -21,7 +21,8 @@ done
 free_gb() { df -BG --output=avail /root/autodl-tmp | tail -1 | tr -dc '0-9'; }
 FREE=$(free_gb)
 echo "[run3] disk free=${FREE}G"
-if [ "${FREE:-0}" -lt 20 ] && [ -d /root/autodl-tmp/vlm8b/output/run1/final ]; then
+RUN1=/root/autodl-tmp/vlm8b/output/run1/final
+if [ "${FREE:-0}" -lt 20 ] && [ -d "$RUN1" ] && [ "$(readlink -f "$INIT")" != "$(readlink -f "$RUN1")" ]; then
   echo "[run3] 磁盘紧张：删除已被 run2 取代的 run1/final（约 10G）——评测数字已在 doc/2026-11-06/REPORT_vlm8b_1ep.md"
   rm -rf /root/autodl-tmp/vlm8b/output/run1
   echo "run1/final 于 $(date -Is) 因磁盘预算被删除（run2 已取代；数字见 doc/2026-11-06/REPORT_vlm8b_1ep.md）" >> logs/disk_notes.txt
