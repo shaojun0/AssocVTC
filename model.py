@@ -218,6 +218,21 @@ class AssocVTCEncoder(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 视觉消融（评测用，不训练）
+# ═══════════════════════════════════════════════════════════════
+
+def apply_visual_mode(vis: Tensor, mode: str) -> Tensor:
+    """`normal` / `null`（全零 ⇒ 等价没有图）/ `shuffle`（batch 内错位 ⇒ 看错图）。"""
+    if mode == "normal":
+        return vis
+    if mode == "null":
+        return vis * 0
+    if mode == "shuffle":
+        return vis * 0 if vis.size(0) <= 1 else torch.roll(vis, shifts=1, dims=0)
+    raise ValueError(f"未知 visual_mode: {mode}")
+
+
+# ═══════════════════════════════════════════════════════════════
 # VLM8Budget — 编码器 + 投影头 + Qwen 文本主干
 # ═══════════════════════════════════════════════════════════════
 
@@ -272,12 +287,15 @@ class VLM8Budget(PreTrainedModel):
                 labels: Optional[Tensor] = None,
                 budget_ids: Optional[Sequence[int]] = None,
                 budget_weights: Optional[Tensor] = None,
+                visual_mode: str = "normal",
                 **kwargs) -> Dict[str, object]:
         """训练 / teacher-forcing 前向（生成见 `generate_budget`）。"""
         self._keep_encoder_eval()
         encoder_dtype = next(self.encoder.parameters()).dtype
         z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))         # (B,32,1744)
-        vis = self.projector(z_s.to(self.projector.token_proj.weight.dtype))
+        vis = apply_visual_mode(
+            self.projector(z_s.to(self.projector.token_proj.weight.dtype)),
+            visual_mode)
         text_embeds = self.lm.get_input_embeddings()(input_ids)          # (B,T,2560)
         rows = expand_budget_rows(
             vis, text_embeds.to(vis.dtype), attention_mask, labels,
@@ -331,13 +349,14 @@ class VLM8Budget(PreTrainedModel):
     def generate_budget(self, pixel_values: Tensor, input_ids: Tensor,
                         attention_mask: Tensor,
                         budget_ids: Optional[Sequence[int]] = None,
-                        max_new_tokens: int = 16) -> Dict[int, List[List[int]]]:
+                        max_new_tokens: int = 16,
+                        visual_mode: str = "normal") -> Dict[int, List[List[int]]]:
         """每图 × 每预算 greedy 生成（right-pad 下逐行），返回 `{k: [[ids...], ...]}`。"""
         self._keep_encoder_eval()
         encoder_dtype = next(self.encoder.parameters()).dtype
-        vis = self.projector(self.encoder(
+        vis = apply_visual_mode(self.projector(self.encoder(
             pixel_values.to(dtype=encoder_dtype)).to(
-                self.projector.token_proj.weight.dtype))
+                self.projector.token_proj.weight.dtype)), visual_mode)
         text_embeds = self.lm.get_input_embeddings()(input_ids).to(vis.dtype)
         results: Dict[int, List[List[int]]] = {}
         for k in self._budgets(budget_ids):

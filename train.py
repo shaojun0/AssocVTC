@@ -16,6 +16,7 @@ E2–E3 全解冻（encoder 5e-6 / LLM 1e-5 / proj 1e-4），cosine + warmup 3%�
         --train-jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/train_nothink_all.jsonl
 """
 import argparse
+import glob
 import json
 import math
 import os
@@ -85,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss-weighting", default="equal", choices=["equal", "inv-k"])
     p.add_argument("--smoke", action="store_true", help="冒烟：2 step + 不存盘 + 每步日志")
     p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--init-from", default="",
+                   help="从已有训练产物目录（含 model.safetensors）继续训练")
     p.add_argument("--grad-ckpt", action="store_true",
                    help="开 gradient checkpointing（省显存，但 ZeRO-3 下有卡死风险）")
     return p.parse_args()
@@ -98,6 +101,27 @@ def parse_budget_set(raw: str) -> list:
 # ═══════════════════════════════════════════════════════════════
 # 构建：param groups
 # ═══════════════════════════════════════════════════════════════
+
+def load_init_weights(model: VLM8Budget, checkpoint: str) -> None:
+    """从已有产物目录灌入权重（用于续训；safetensors 单文件或分片均可）。"""
+    from safetensors.torch import load_file
+    index = os.path.join(checkpoint, "model.safetensors.index.json")
+    if os.path.exists(index):
+        with open(index, "r", encoding="utf-8") as handle:
+            names = sorted(set(json.load(handle)["weight_map"].values()))
+        paths = [os.path.join(checkpoint, name) for name in names]
+    else:
+        paths = sorted(glob.glob(os.path.join(checkpoint, "*.safetensors")))
+    assert paths, f"--init-from 目录里没有 safetensors: {checkpoint}"
+    state = {}
+    for path in paths:
+        state.update(load_file(path))
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    assert not unexpected and set(missing) <= {"lm.lm_head.weight"}, (
+        f"续训权重不匹配: missing={list(missing)[:5]} unexpected={list(unexpected)[:5]}")
+    print(f"[vlm8b] 续训权重已载入 {checkpoint}（{len(paths)} 文件，"
+          f"missing={list(missing)}）")
+
 
 def build_param_groups(model: VLM8Budget, lr_llm: float, lr_proj: float,
                        lr_encoder: float, wd_llm: float, wd_other: float) -> list:
@@ -217,6 +241,8 @@ def main() -> None:
         loss_weighting=args.loss_weighting,
         pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id),
         grad_ckpt=args.grad_ckpt)
+    if args.init_from:
+        load_init_weights(model, args.init_from)
     if args.freeze_encoder_epochs > 0:
         model.encoder.freeze()
 

@@ -50,6 +50,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=0, help="只评前 N 张（0=全部）")
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    p.add_argument("--visual-mode", default="normal",
+                   choices=["normal", "null", "shuffle"],
+                   help="视觉消融：null=vis 置零（等价没有图）/ shuffle=batch 内错位（看错图）")
     return p.parse_args()
 
 
@@ -122,10 +125,11 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     for batch in loader:
         inputs = {key: batch[key].to(device) for key in
                   ("pixel_values", "input_ids", "attention_mask", "labels")}
-        outputs = model(budget_ids=budgets, **inputs)
+        outputs = model(budget_ids=budgets, visual_mode=args.visual_mode, **inputs)
         generated = model.generate_budget(
             inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
-            budget_ids=budgets, max_new_tokens=MAX_NEW_TOKENS)
+            budget_ids=budgets, max_new_tokens=MAX_NEW_TOKENS,
+            visual_mode=args.visual_mode)
         per_sample = outputs["per_budget_ce_per_sample"].float().cpu()
         for i in range(inputs["pixel_values"].size(0)):
             gt_name = str(batch["gt_name"][i]).strip()
@@ -147,6 +151,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     rows = [{"k": k, "ce": s[0] / max(s[2], 1), "acc": s[1] / max(s[2], 1), "n": s[2]}
             for k, s in stats.items()]
     return {"checkpoint": args.checkpoint, "jsonl": args.jsonl,
+            "visual_mode": args.visual_mode,
             "n_images": rows[0]["n"], "budgets": rows,
             "delta_acc": rows[-1]["acc"] - rows[0]["acc"], "examples": examples}
 
