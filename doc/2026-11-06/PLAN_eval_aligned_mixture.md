@@ -183,7 +183,7 @@ cd /root/vlm8b && torchrun --nproc_per_node=2 --master_port=29511 train.py \
 **反馈**：「ImageNet-100 的数据降低点；图像里面不同任务数据量尽可能相等，不要头重脚轻。」
 原 `mix_train.jsonl` 图像行 97,845 = ImageNet 锚定 66,000（67%）+ 各评测任务 300–6,000，确实头重脚轻。
 
-**做法**：`tools/eval_mix/rebalance_mix.py`（新增，`1e6b7c0` 起入库）从既有 `mix_train.jsonl`
+**做法**：`tools/eval_mix/rebalance_mix.py`（新增，`a079530` 入库）从既有 `mix_train.jsonl`
 **按 source 抽样**生成 `mix_train_bal.jsonl`——不重新生成 prompt、不重新下载图片（行内容原样拷贝，
 含 `messages_short`）。配额：每个图像任务 ≤2,000；textvqa 与 textvqa_train 同一任务合并 2,000（2:1 拆）；
 **ImageNet-100 锚定 66,000 → 2,000**（与单个任务同量级，占比 2.0%）；文本源 82,000 行全保留
