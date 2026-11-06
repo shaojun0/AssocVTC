@@ -222,3 +222,40 @@ epochs 不再写死，由「现在 → `DEADLINE`（默认 2026-11-09 09:00 训�
 - **run3 对策**：峰值 LR 减半——LLM 5e-6 / encoder 2.5e-6 / projector 5e-5，warmup 2%
   （run2 是 1e-5 / 5e-6 / 1e-4、3%）。数据与 LR 同时变，属整包实验；若周一结果不理想，回退顺序：
   先只回 LR（数据保留），再考虑数据。
+
+### 9.11 第二版重平衡（11-06 18:15，用户反馈：不要单减，其他任务加数据、ImageNet 减数据、训到周一 12:00）
+
+反馈：「其他任务加数据，image-net 减数据，不是单减，要保证能训练到周一 12 点。」
+9.9 的做法是「每任务砍到 2,000」——错在只减不加。第二版改为：**其他任务能加就加/回到数据上限，
+大任务封顶 6,000，ImageNet 只留 3,000，总量按「自动 epoch 数训到周一 12:00」保证**。
+
+**新加的数据（不是重采样，是新增来源）**：
+| 新增 | 行数 | 来源 | 说明 |
+|---|---:|---|---|
+| `expand_docvqa_train.jsonl` | 49 | lmms-lab/DocVQA validation 续扫 | 旧构建停在 5,239 条，validation 可用上限 5,288 ⇒ docvqa 4,451→4,500 |
+| `expand_docvqa_train_split.jsonl` | 865 | `nielsr/docvqa_1200_examples`（DocVQA train split） | 与 validation（heldout 所在）不同 split；1,200 行经答案/去重过滤剩 865 |
+| `expand_chartqa_train.jsonl` | 4,500 | `ahmed-masry/ChartQA` train split（18,000 行） | lmms-lab 只有 test；新增后 chartqa 任务 1,500→6,000，与旧 heldout 同题 0 条 |
+
+**第二版配额（`mix_train_bal2.jsonl`，122,259 行）**：
+
+| 任务 | 行数 | 说明 |
+|---|---:|---|
+| scienceqa / chartqa(1,500+4,500) / textvqa(3,997+2,000) | 各 6,000 / 6,000 / 5,997 | 大任务封顶 6,000，输出侧单任务占比 ≤5% |
+| docvqa(4,500+865) / slake | 5,365 / 5,000 | 数据上限 |
+| **imagenet100 锚定** | **3,000** | 原 66,000（−95%），占全量 2.5% |
+| mathvision / ai2d / chartqa(test 部分) | 2,000 / 2,000 / 1,500 | k |
+| we_math / mmstar / mathvista / mmmu / ocrbench(986 可用) / realworldqa(765) / countbench(498) | 1,200 / 999 / 698 / 600 / 600 / 500 / 300 | 已到该数据集可用上限 |
+| 文本 7 源 | 82,000 | 不再压缩（用户未要求动文本） |
+
+**为什么小任务不能再拉平（数据天花板，非抽样偏置）**：MMStar 官方只有 val 1,500（已用 1,499）；
+MathVista 只有 testmini 1,000（已用 998）；MMMU 公开只有 validation 900（已用 900，dev 150 未动）；
+MathVision test 3,040（已用 3,000）；ChartQA test 2,500（已用 2,500）；SLAKE 642 张图生成 14,033 QA
+（train/test 问答重复率 8.5%，干净增量只有 ~300 条，未强加）；AI2D HF 仓库只有 test（3,088，已用 2,000+1,000 heldout）；
+We-Math 只有 testmini 1,743（已用 1,700）；OCRBench 986 可用（已用 900）；CountBench 498 可用（已用 498）；
+RealWorldQA 765 全用。
+
+**训练时长保障**：`run_eval_mix.sh` 的 `DEADLINE=2026-11-09 12:00:00`，epochs 由「现在→deadline」
+按 9.0 s/步自动倒推（3,821 步/epoch ≈ 9.50 h/epoch；若周六 07:00 启动 ≈ 5.5 epoch ≈ 21,000 步），
+**训练一定跨到周一中午**，rc=0 后自动拉起 `eval_after_run3.sh`。
+预检：全量 122,259 行 `noimg=0 empty_gt=0 over1024=0`、id 与 mix_heldout 零重叠、
+64 行 Dataset+Collator+8 预算展开 **PREFLIGHT OK**。

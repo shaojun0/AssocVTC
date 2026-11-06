@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# run3：run2/final →「评测对齐 + 按任务等量」混合数据
-#   文本 82,000 + 图像 20,396（每个图像任务 ≤2,000，ImageNet-100 锚点 66,000→2,000）
-#   = 102,396 行 ≈ 3,200 步/epoch ≈ 7.95 h/epoch；epochs 由「到周一截止时间」自动算，
-#   默认目标 2026-11-09 09:00 训完，给 run3 评测链留 ~2h。
+# run3：run2/final →「评测对齐 + 按任务等量 + 能加就加」混合数据（v2，用户 18:10 反馈）
+#   文本 82,000 + 图像 40,259（大任务封顶 6,000：scienceqa 6,000 / chartqa 6,000 /
+#   textvqa 6,000 / docvqa 5,365 / slake 5,000；中小任务用到数据上限；
+#   ImageNet-100 锚点 66,000→3,000）
+#   = 122,259 行 ≈ 3,821 步/epoch ≈ 9.50 h/epoch；epochs 由「到周一截止时间」自动算，
+#   默认目标 2026-11-09 12:00 训完（用户要求训到周一 12 点），之后自动接评测链。
 # 前置：run2 已结束；/root/vlm8b/train_fixed.py 就位（E1 冻结修复版）
 # 磁盘策略：HF Trainer 是「先存新 checkpoint、再删旧的」⇒ 峰值要 2×10G。
 #   故启动前若剩余 <20G，删除已被 run2 取代的 run1/final（10G，评测数字已在 doc 里）；
@@ -15,14 +17,14 @@ mkdir -p logs
 OUT=${OUT:-/root/autodl-tmp/vlm8b/output/run3}
 INIT=${INIT:-/root/autodl-tmp/vlm8b/output/run2/final}
 DATA=${DATA:-/root/autodl-tmp/vlm8b/data_eval}
-TRAIN_JSONL=${TRAIN_JSONL:-$DATA/mix_train_bal.jsonl}
+TRAIN_JSONL=${TRAIN_JSONL:-$DATA/mix_train_bal2.jsonl}
 LR_LLM=${LR_LLM:-5e-6}
 LR_ENCODER=${LR_ENCODER:-2.5e-6}
 LR_PROJ=${LR_PROJ:-5e-5}
 WARMUP=${WARMUP:-0.02}
-DEADLINE=${DEADLINE:-2026-11-09 09:00:00}   # 训练截止（之后自动接评测链）
+DEADLINE=${DEADLINE:-2026-11-09 12:00:00}   # 训练截止（之后自动接评测链）
 SEC_PER_STEP=${SEC_PER_STEP:-9.0}           # 实测 8.94–8.96 s/step，取 9.0 留余量
-STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-3200}    # 102,396 行 / 全局 batch 32
+STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-3821}    # 122,259 行 / 全局 batch 32
 
 # epochs：优先用 EPOCHS 环境变量；否则按「现在 → DEADLINE」倒推（至少 1.0）
 if [ -z "${EPOCHS:-}" ]; then
