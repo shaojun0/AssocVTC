@@ -146,14 +146,17 @@ memory  A = [z_cls; z_s] (B, 33, 1744) → mem_proj(1744→d) → mem_norm → +
 步     t = 1..8, 窗口 fixed block=4：
          W_t = A[:, lo_t : hi_t+1]        # 步1: [z_cls + reg1..4]；步t: reg[4t-3..4t]
          Y_t = Stack( Q[t] + Y_{t-1}, W_t )          # Stack = L 层，权重跨步共享
-         V_t = OutProj( norm_out(Y_t) )  → (B, 1, 2560)
          Y_0 = 0
-vis   = cat(V_1..V_8) → (B, 8, 2560) → budget_norm(2560) → 接现有 8 行预算流程
+h     = norm_out( cat(Y_1..Y_8) ) → (B, 8, d)
+vis   = Head(h) → (B, 8, 2560) → budget_norm(2560) → 接现有 8 行预算流程
 ```
 
 - `Stack`：2 层（pp_zh 原式）或 7 层（沿用阶段 2 ckpt 的 dec 配置）；每步只有 **1 个 query token**，所以自注意力退化为恒等，实际是"交叉注意力 + FFN"被重复施加 8 次，等效深度 2×8=16 或 7×8=56。
 - carry **不 detach**（BPTT）。8 步 × 1 query 的 BPTT 代价可以忽略（见 §7）。
 - **不要再加 step embedding**：8 个 query 行本身就是 8 个 step identity，再加一套就是 pp_zh arm-4a 的"两套 identity 互相干扰"（0.39763 vs 最佳 0.37442）。
+- **输出头（最后一层）可选**（`--loop-head`）：
+  - `mlp`（**默认**，对应设计稿里"最后一层是 MLP 投影"的写法）：逐 token `Linear(d→d) → GELU → Linear(d→2560)`，token 间独立；
+  - `transformer`：**单层 Transformer（causal self-attn + FFN）+ 线性投影**。必须 causal：token t 只看 token ≤ t；若用双向，token 0 会经 token 8 反传到后段 register，行 k 的前缀依赖范围被破坏（`smoke.py` ⑥ 直接 FAIL）。causal 下补上了 V1 缺失的 token 间通信，参数比 MLP 头多约 `4d² + 8d²`（d=1024 时 +13M，d=2048 时 +55M）。
 
 ### 4.3 伪代码（落到 `model.py` 的最小形态）
 
@@ -387,7 +390,7 @@ class LoopVisualReadout(nn.Module):
 
 ## 附录 B：后续验证入口
 
-- **已落地（2026-11-06）**：分支 `feat/vlm8b-loop`（commit `a16863b`）——从 `feat/vlm8b-v1` 分叉、只含 12 个文件的同构最小工程，实现本方案 V1：`--readout loop`（默认 `linear` 与基线逐位一致，可直接 A/B）。本机 `python3 smoke.py` **23 项 PASS / 0 FAIL**（CPU，torch 2.8），覆盖前缀因果性与 BPTT/detach；**GPU / DeepSpeed 尚未跑**。
+- **已落地（2026-11-06）**：分支 `feat/vlm8b-loop`（commit `616fb6e`）——从 `feat/vlm8b-v1` 分叉、只含 12 个文件的同构最小工程，实现本方案 V1：`--readout loop`（默认 `linear` 与基线逐位一致，可直接 A/B），输出头 `--loop-head {mlp,transformer}`（默认 MLP；Transformer 头为 causal self-attn）。本机 `python3 smoke.py` **38 项 PASS / 0 FAIL**（CPU，torch 2.8），覆盖两种头的前缀因果性与 BPTT/detach；**GPU / DeepSpeed 尚未跑**。
 - 代码基线：`feat/vlm8b-v1`（tip `0340f40`）；新分支不改基线，也不影响远端在跑的 run2。
 - 首跑判定：5k 图子集 1 epoch/臂（~25 min/臂），见 §9 的臂与指标；训练内信号 `per_budget_ce.jsonl`，评测信号 `eval.py` 的 per-budget CE/acc。
 - 立项前提：先确认 think 数据/更长答案下"现行线性投影"的 per-budget 曲线是否自然单调（见 §9 判定规则），再决定循环读出的定位（"让预算站起来"还是"同 token 数更强/更省"）。
