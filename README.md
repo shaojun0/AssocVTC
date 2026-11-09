@@ -101,6 +101,10 @@ torchrun --nproc_per_node=2 train.py \
 python3 eval.py --checkpoint /root/autodl-tmp/vlm8b/output/run1/final \
     --jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/val_nothink_all.jsonl \
     --limit 1000
+
+# 标准 HF 加载（在仓库根目录运行；ckpt 里只拷了 model.py，encoder 从本仓 import）
+python3 -c "from transformers import AutoModel; \
+    AutoModel.from_pretrained('/root/autodl-tmp/vlm8b/output/run1/final', trust_remote_code=True)"
 ```
 
 默认路径（可用 CLI 覆盖）：阶段2 ckpt `/root/autodl-tmp/exp448/B/ckpt_best.pt`、
@@ -116,7 +120,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `data_8budget.py` | `data.py` | `SelfDistillSFTDataset` / `EightBudgetCollator` / `build_image_transform` |
 | `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `BudgetCELogCallback` |
 | `ds_zero3.json` | `ds_zero3.json` | ZeRO-3 + bf16 + gather-on-save |
-| `smoke_mask.py` | `smoke.py` | 16 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / prompt_lens / 静态防回退） |
+| `smoke_mask.py` | `smoke.py` | 19 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
@@ -136,6 +140,12 @@ remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2
   取 hidden、`del lm.model.visual`、逐行 `generate(inputs_embeds=...)`、ZeRO-3 + 4B 显存
   —— 全部依赖 remote（transformers 5.22.1）；本机只保证 import / CLI / 张量逻辑。
 - **评测权重**：`eval.py` 只读 safetensors 分片索引（Trainer 默认 `save_safetensors=True`）。
+- **标准 HF 加载**：`AutoModel.from_pretrained(ckpt, trust_remote_code=True)` 可用——config 带
+  `auto_map`，`save_pretrained` 会把 `model.py` 拷进 ckpt；v5 在 meta 设备上初始化模型，故
+  `__init__` 只搭 Qwen 结构（权重由 ckpt 灌入），训练路径仍走 `load_lm` 读预训练权重。
+  限制：需在仓库根目录运行（`encoder` 从本仓 import）、config 里 `encoder_ckpt`/`qwen_dir`
+  指向的路径在本机有效（ckpt 不自包含这两个子模型）；加载按 `config.dtype=float32` 上浮。
+  已在 transformers 5.22.2 + 微型 Qwen3.5/encoder 资产上端到端验证 loss/CE 与手工加载完全一致。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。
 
 ## 7. run1–run3 实测记录（2026-11-09）

@@ -75,6 +75,12 @@ class VLM8BudgetConfig(PretrainedConfig):
         # DeepSpeed ZeRO-3 的 `"auto"` bucket 尺寸依赖 config.hidden_size（HF 在
         # trainer_config_finalize 里读它）；缺了会直接 ValueError。
         self.hidden_size = int(hidden_size)
+        # 必须是实例属性（类属性不会被 to_dict 序列化）：保存时自定义代码随 ckpt 拷贝，
+        # `AutoModel.from_pretrained(ckpt, trust_remote_code=True)` 靠它找到建模类。
+        # 加载时 `encoder` 须在 sys.path 上（即从本仓根目录运行），`encoder_ckpt` /
+        # `qwen_dir` 须指向有效路径——ckpt 本身不自包含这两个子模型。
+        self.auto_map = {"AutoConfig": "model.VLM8BudgetConfig",
+                         "AutoModel": "model.VLM8Budget"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -214,7 +220,10 @@ class AssocVTCEncoder(nn.Module):
             if name.startswith("encoder."):
                 state[name[len("encoder."):]] = value
         assert state, "ckpt 里没有 encoder.* 权重"
-        self.net.load_state_dict(state, strict=True)
+        # v5 的 from_pretrained 在 meta 设备上建模型：此时 copy 到 meta 参数是 no-op
+        # （还会 warning），权重由外层 checkpoint 统一灌入，跳过即可。
+        if torch.empty(0).device.type != "meta":
+            self.net.load_state_dict(state, strict=True)
 
     def forward(self, pixel_values: Tensor) -> Tensor:
         """pixel_values (B,3,448,448) → z_s (B,32,1744)。"""
@@ -245,6 +254,9 @@ class VLM8Budget(PreTrainedModel):
 
     config_class = VLM8BudgetConfig
     base_model_prefix = "vlm8b"
+    # 非空 ⇒ save_pretrained 调用 custom_object_save，把 model.py 拷进 ckpt；
+    # `AutoModel.from_pretrained(ckpt, trust_remote_code=True)` 正是读这份代码。
+    _auto_class = "AutoModel"
     # transformers 5.x: `_tied_weights_keys` 是 dict{key: 源 key}，且会递归遍历子模块；
     # `lm`（Qwen3_5ForConditionalGeneration）自己声明了 {'lm_head.weight': ...}，
     # 这里留空 dict 让递归生效即可（写成 list 会让 save_pretrained 直接 AttributeError）。
@@ -257,14 +269,36 @@ class VLM8Budget(PreTrainedModel):
         self.projector = BudgetProjector()
         self.encoder = encoder if encoder is not None else AssocVTCEncoder(
             config.encoder_ckpt)
-        self.lm = lm if lm is not None else self.load_lm(grad_ckpt)
+        if lm is not None:                                       # smoke / 调试用替身
+            self.lm = lm
+        elif torch.empty(0).device.type == "meta":               # transformers 5.x 的
+            self.lm = self.build_lm()                            # from_pretrained 在
+        else:                                                    # meta 设备上实例化模型
+            self.lm = self.load_lm(grad_ckpt)
         self.loss_weighting, self.last_budget_ce = str(config.loss_weighting), None
+        # transformers 5.x：`from_pretrained` 读 `all_tied_weights_keys`（由 post_init 登记），
+        # 不调用会 AttributeError（5.22.2 实测）。4.x 的 post_init 会 init_weights 把
+        # 已加载的 lm/encoder 重新初始化，所以只在 v5（有该方法）时调用。
+        if hasattr(self, "get_expanded_tied_weights_keys"):
+            self.post_init()
 
     def load_lm(self, grad_ckpt: bool = False) -> nn.Module:
-        """加载 Qwen3.5-4B（本函数内才 import Qwen），删 vision tower、开 grad ckpt。"""
+        """训练/手工加载：从 `qwen_dir` 读预训练权重（本函数内才 import Qwen）。"""
         lm = _import_qwen().from_pretrained(
             os.path.expanduser(self.config.qwen_dir), dtype=torch.bfloat16,
             attn_implementation="sdpa", trust_remote_code=True, local_files_only=True)
+        return self._finish_lm(lm, grad_ckpt)
+
+    def build_lm(self) -> nn.Module:
+        """只搭结构、不读权重：v5 在 meta 设备上初始化模型，嵌套 `from_pretrained`
+        会 RuntimeError（5.22.2 实测），故权重留给外层 checkpoint 灌入。"""
+        lm_cls = _import_qwen()
+        lm = lm_cls(lm_cls.config_class.from_pretrained(
+            os.path.expanduser(self.config.qwen_dir), local_files_only=True))
+        return self._finish_lm(lm, grad_ckpt=False)
+
+    def _finish_lm(self, lm: nn.Module, grad_ckpt: bool) -> nn.Module:
+        """删 vision tower、按需开 grad ckpt、关 cache（两条构造路径共用）。"""
         if hasattr(lm.model, "visual"):
             del lm.model.visual                                  # 不喂 pixel_values
         if grad_ckpt:

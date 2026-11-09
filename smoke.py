@@ -223,6 +223,18 @@ def check_static(checker: Checker) -> None:
     source = pathlib.Path(__file__).with_name("eval.py").read_text(encoding="utf-8")
     checker.check("eval.py 无 --gen-protocol", "--gen-protocol" not in source)
     checker.check("eval.py 产物写 gen_protocol", '"gen_protocol"' in source)
+    cfg = VLM8BudgetConfig(encoder_ckpt="", qwen_dir="")
+    checker.check("HF 加载契约: config.auto_map + _auto_class=AutoModel",
+                  cfg.auto_map.get("AutoModel") == "model.VLM8Budget"
+                  and VLM8Budget._auto_class == "AutoModel")
+    checker.check("requirements.txt 声明 jinja2（apply_chat_template 依赖）",
+                  "jinja2" in pathlib.Path(__file__).with_name(
+                      "requirements.txt").read_text(encoding="utf-8"))
+    data_source = pathlib.Path(__file__).with_name("data.py").read_text(encoding="utf-8")
+    checker.check("data.py 走 apply_chat_template（不手搓 ChatML）",
+                  "apply_chat_template" in data_source
+                  and "<|im_start|>" not in data_source
+                  and "<|im_end|>" not in data_source)
 
 
 def main() -> int:
