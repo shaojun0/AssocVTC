@@ -1,0 +1,180 @@
+{
+  "checkpoint": "/root/autodl-tmp/vlm8b/output/run3/final",
+  "jsonl": "/root/autodl-tmp/vlm8b/data_eval/mix_heldout.jsonl",
+  "visual_mode": "normal",
+  "sample_seed": 42,
+  "n_images": 300,
+  "budgets": [
+    {
+      "k": 1,
+      "ce": 0.5839142417811611,
+      "acc": 0.4866666666666667,
+      "n": 300
+    },
+    {
+      "k": 2,
+      "ce": 0.5810430982529866,
+      "acc": 0.49333333333333335,
+      "n": 300
+    },
+    {
+      "k": 3,
+      "ce": 0.5815583879068837,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 4,
+      "ce": 0.5819194141465974,
+      "acc": 0.49333333333333335,
+      "n": 300
+    },
+    {
+      "k": 5,
+      "ce": 0.5830993143645249,
+      "acc": 0.5033333333333333,
+      "n": 300
+    },
+    {
+      "k": 6,
+      "ce": 0.5829165840876643,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 7,
+      "ce": 0.5833641930858471,
+      "acc": 0.49666666666666665,
+      "n": 300
+    },
+    {
+      "k": 8,
+      "ce": 0.5847319109188607,
+      "acc": 0.49333333333333335,
+      "n": 300
+    }
+  ],
+  "delta_acc": 0.006666666666666654,
+  "examples": [
+    {
+      "k": 1,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 5,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 6,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 7,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 8,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 1,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 2,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 3,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 4,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 5,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 6,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 7,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 8,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 1,
+      "gt": "121",
+      "pred": "106.9",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "121",
+      "pred": "106.9",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "121",
+      "pred": "106.9",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "121",
+      "pred": "106.9",
+      "correct": false
+    }
+  ]
+}

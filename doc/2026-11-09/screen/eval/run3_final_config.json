@@ -1,0 +1,25 @@
+{
+  "architectures": [
+    "VLM8Budget"
+  ],
+  "budget_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "dtype": "bfloat16",
+  "encoder_ckpt": "/root/autodl-tmp/exp448/B/ckpt_best.pt",
+  "eos_token_id": 248046,
+  "hidden_size": 2560,
+  "loss_weighting": "equal",
+  "model_type": "vlm8_budget",
+  "pad_token_id": 248044,
+  "qwen_dir": "/root/qwen_models/Qwen3.5-4B",
+  "transformers_version": "5.22.1",
+  "use_cache": false
+}

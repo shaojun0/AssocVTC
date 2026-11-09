@@ -3,6 +3,13 @@
 生成：2026-11-09 12:20（Asia/Shanghai）
 产物：`/root/autodl-tmp/vlm8b/output/run3/checkpoint-11463`（`final` 软链到此），训练 3.0 epoch / 11,463 步。
 
+> ⚠️ **2026-11-09 13:45 修正（重要）**：本报告 §0.2、§2 的 acc 数字与「视觉 token 有害」结论来自
+> **有 bug 的 greedy 协议**（`eval.py` 原实现把含答案的整段文本喂给 `generate`，大量输出空串、acc 被严重低估）。
+> 修正为「只喂 prompt」后，同样 300 行：normal 48.7%→49.3%、null 48.3%、shuffle 48.7%，CE normal 0.585 < null 0.604
+> ⇒ **视觉是略有益的，不是有害的**；真正的问题是「预算 k 曲线全平」。
+> 逐样本筛查与机制分析见 `doc/2026-11-09/REPORT_budget_screen.md`（结论：预算=条件性有效 + 编码器侧容量封顶）。
+> §4 的 in100 绝对 acc 也应按新协议重报（run3：29.2%→32.4%，250 行）。
+
 ## 0. 结论（TL;DR）
 
 1. **视觉 token 预算机制仍不成立**：mix_heldout 上 normal 模式 acc 从 k1 24.0% → k8 ~22%（分任务表 27.1%→24.3%），

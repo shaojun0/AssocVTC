@@ -1,0 +1,180 @@
+{
+  "checkpoint": "/root/autodl-tmp/vlm8b/output/run3/final",
+  "jsonl": "/root/autodl-tmp/vlm8b/data_eval/mix_heldout.jsonl",
+  "visual_mode": "shuffle",
+  "sample_seed": 42,
+  "n_images": 300,
+  "budgets": [
+    {
+      "k": 1,
+      "ce": 0.6145139439178835,
+      "acc": 0.4866666666666667,
+      "n": 300
+    },
+    {
+      "k": 2,
+      "ce": 0.6171382110010215,
+      "acc": 0.49,
+      "n": 300
+    },
+    {
+      "k": 3,
+      "ce": 0.6171750740441795,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 4,
+      "ce": 0.6190752359114526,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 5,
+      "ce": 0.6197344757020559,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 6,
+      "ce": 0.6188619117225699,
+      "acc": 0.5,
+      "n": 300
+    },
+    {
+      "k": 7,
+      "ce": 0.6193397600909255,
+      "acc": 0.49333333333333335,
+      "n": 300
+    },
+    {
+      "k": 8,
+      "ce": 0.61922741750507,
+      "acc": 0.4866666666666667,
+      "n": 300
+    }
+  ],
+  "delta_acc": 0.0,
+  "examples": [
+    {
+      "k": 1,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 5,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 6,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 7,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 8,
+      "gt": "J",
+      "pred": "I",
+      "correct": false
+    },
+    {
+      "k": 1,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 2,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 3,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 4,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 5,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 6,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 7,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 8,
+      "gt": "F",
+      "pred": "F",
+      "correct": true
+    },
+    {
+      "k": 1,
+      "gt": "121",
+      "pred": "106.9",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "121",
+      "pred": "102.5",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "121",
+      "pred": "10,200",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "121",
+      "pred": "102.5",
+      "correct": false
+    }
+  ]
+}

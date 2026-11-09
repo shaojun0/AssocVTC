@@ -1,0 +1,180 @@
+{
+  "checkpoint": "/root/autodl-tmp/vlm8b/output/run3/final",
+  "jsonl": "/root/autodl-tmp/exp_qwen/in100_selfdistill/sft/val_nothink_all.jsonl",
+  "visual_mode": "normal",
+  "sample_seed": 42,
+  "n_images": 250,
+  "budgets": [
+    {
+      "k": 1,
+      "ce": 0.47396110566468996,
+      "acc": 0.292,
+      "n": 250
+    },
+    {
+      "k": 2,
+      "ce": 0.47397217307011125,
+      "acc": 0.316,
+      "n": 250
+    },
+    {
+      "k": 3,
+      "ce": 0.4814441294796907,
+      "acc": 0.312,
+      "n": 250
+    },
+    {
+      "k": 4,
+      "ce": 0.4790903254069572,
+      "acc": 0.324,
+      "n": 250
+    },
+    {
+      "k": 5,
+      "ce": 0.47704407777809776,
+      "acc": 0.316,
+      "n": 250
+    },
+    {
+      "k": 6,
+      "ce": 0.4757210374206743,
+      "acc": 0.316,
+      "n": 250
+    },
+    {
+      "k": 7,
+      "ce": 0.47539683074593087,
+      "acc": 0.324,
+      "n": 250
+    },
+    {
+      "k": 8,
+      "ce": 0.47488727353201104,
+      "acc": 0.324,
+      "n": 250
+    }
+  ],
+  "delta_acc": 0.03200000000000003,
+  "examples": [
+    {
+      "k": 1,
+      "gt": "English_foxhound",
+      "pred": "Walker_hound",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 5,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 6,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 7,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 8,
+      "gt": "English_foxhound",
+      "pred": "gyromitra",
+      "correct": false
+    },
+    {
+      "k": 1,
+      "gt": "green_mamba",
+      "pred": "leafhopper",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 5,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 6,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 7,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 8,
+      "gt": "green_mamba",
+      "pred": "walking_stick",
+      "correct": false
+    },
+    {
+      "k": 1,
+      "gt": "bannister",
+      "pred": "tripod",
+      "correct": false
+    },
+    {
+      "k": 2,
+      "gt": "bannister",
+      "pred": "tripod",
+      "correct": false
+    },
+    {
+      "k": 3,
+      "gt": "bannister",
+      "pred": "tripod",
+      "correct": false
+    },
+    {
+      "k": 4,
+      "gt": "bannister",
+      "pred": "tripod",
+      "correct": false
+    }
+  ]
+}
