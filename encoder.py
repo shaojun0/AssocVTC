@@ -63,9 +63,29 @@ class StandardAttention(nn.Module):
         if self.q_norm is not None:
             q = self.q_norm(q)
             k = self.k_norm(k)
-        out = F.scaled_dot_product_attention(q, k, v)        # softmax(QKᵀ/√d)V
+        out = _sdpa(q, k, v)                                 # softmax(QKᵀ/√d)V
         out = out.transpose(1, 2).reshape(B, N, D)
         return self.proj(out)
+
+
+def _sdpa(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    """`F.scaled_dot_product_attention`，对「非 8 倍数 head_dim」显式走 math。
+
+    阶段2 编码器是 dim=1744 / heads=16 ⇒ **head_dim=109（奇数）**。CUDA 上 PyTorch
+    自己会从 flash 回退到 math；但国产 MUSA 的 MuDNN 内核不回退，直接抛
+    `RuntimeError: MuDNNFlashSDPAFwd ... Flash Attention 2 Not Support HeadDim Odd`
+    （2×MTT S4000 + torch_musa 2.11 实测，见 MUSA_FREEZE.md）。这里按 head_dim 选
+    内核：flash 系列内核要求 head_dim 为 8 的倍数，其余情况用 math——数值等价，
+    只是少了内核加速（229 token 的短序列本来也不吃 flash 的收益）。
+    """
+    if q.shape[-1] % 8 == 0:
+        return F.scaled_dot_product_attention(q, k, v)
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        with sdpa_kernel(SDPBackend.MATH):
+            return F.scaled_dot_product_attention(q, k, v)
+    except Exception:                       # 老版本 torch 没有 sdpa_kernel
+        return F.scaled_dot_product_attention(q, k, v)
 
 
 class StandardAttentionBlock(nn.Module):

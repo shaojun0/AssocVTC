@@ -1,8 +1,14 @@
-# vlm8b 依赖（remote /root/venv_qwen 实测版本，2026-11-05）
+﻿# vlm8b 依赖（remote /root/venv_qwen 实测版本，2026-11-05）
 # 注意：torch 的 +cu130 本地版本号需要对应的 CUDA wheel index，例如
 #   pip install --index-url https://download.pytorch.org/whl/cu130 torch==2.12.1+cu130
 # 本机（Linux CPU / transformers 4.57）只需要 torch + transformers + torchvision
 # + Pillow 就能跑 `python3 smoke.py`，不需要装 deepspeed。
+#
+# 国产 MUSA（摩尔线程 MTT S4000，torch_musa 2.11 + python 3.10）：
+#   - torch/torch_musa 用镜像自带版本（2.11.0.post1），不要按上面的 cu130 装；
+#   - deepspeed 的 sdist 在 setup 阶段要 nvcc（MUSA 的 CUDA_HOME 里没有），装法和
+#     dist-info 补丁见 MUSA_FREEZE.md §3.6；ZeRO 用 ds_zero2.json，ZeRO-3 不可用；
+#   - transformers 版本差异（5.13 vs 5.22.1）会改变 post_init 行为，代码已兜住。
 torch==2.12.1+cu130
 transformers==5.22.1
 jinja2>=3.1.0             # chat_template 渲染（transformers 的 [chat-template] extra，默认不装）

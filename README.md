@@ -75,7 +75,7 @@ loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
 | wd | LLM 0.1 / 其余 0.05；bias+LayerNorm 不衰减 | `build_param_groups` |
 | 调度 | cosine，warmup 3%，grad clip 1.0 | `TrainingArguments` |
 | 批次 | micro 2 img/GPU（16 行）× accum 8 × 2 GPU | `--micro-batch-size/--grad-accum` |
-| 精度 / ckpt | bf16 + grad ckpt（`use_reentrant=False`） | `ds_zero3.json` / `load_lm` |
+| 精度 / ckpt | bf16 + grad ckpt（`use_reentrant=False`） | `ds_zero2.json`（ZeRO-3 见 §6.1：与本 encoder 不兼容） / `load_lm` |
 | 日志 | 每 20 步 per-budget CE → `per_budget_ce.jsonl` | `BudgetCELogCallback` |
 | eval | **Trainer 内不做**（`eval_strategy="no"`，不传 eval_dataset） | 评测走 `eval.py` |
 
@@ -124,16 +124,18 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
-最小可跑集合是 root 下的 9 个文件（`model.py` / `encoder.py` / `data.py` / `train.py` /
-`eval.py` / `smoke.py` / `ds_zero3.json` / `requirements.txt` / `README.md`）；复制这些即可在
-remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2），单独复制即可单独跑。
+最小可跑集合是 root 下的 11 个文件（`model.py` / `encoder.py` / `data.py` / `train.py` /
+`eval.py` / `smoke.py` / `freeze.py` / `musa.py` / `ds_zero2.json` / `requirements.txt` /
+`README.md`）；复制这些即可在 remote 跑训练。`MUSA_FREEZE.md` / `test_freeze.py` /
+`musa_e2e.py` 是冻结机制与国产适配的说明与自检（非训练必需）。`tools/` 是后来补的
+**非训练必需**脚本（见 §7.2），单独复制即可单独跑。
 
 ### 6. review 要点 / 已知限制
 
 - **P0 shift**：`expand_budget_rows()` 里 `ans_pos = k + label_pos − 1`；改动此处必跑
   `smoke.py`（shift 等价 + 槽位覆盖双锁）。临时改回 no-shift 会让 shift 检查 FAIL。
-- **encoder 不冻结**：E1–E3 全量微调；原 `freeze_encoder_epochs` / `EncoderFreezeCallback` /
-  `_keep_encoder_eval()` 已删除，DeepSpeed param-group 生命周期问题随之消失。
+- **encoder 冻结**：见 §6.1；原来的 `EncoderFreezeCallback` / `_keep_encoder_eval()` 已被
+  `freeze.py` 里的通用实现取代（`--freeze-encoder` / `--freeze-encoder-epochs`）。
 - **`encoder.py` 是 vendored 副本**：主线 `model_v2_linattn.py`（commit `1fc4920`）逐字抽取；
   上游若改类名 / 子模块名，阶段2 ckpt 的 `strict=True` 加载会失败，需同步本文件。
 - **未验证项**：`Qwen3_5ForConditionalGeneration.from_pretrained(dtype=bf16)`、`lm.model`
@@ -147,6 +149,37 @@ remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2
   指向的路径在本机有效（ckpt 不自包含这两个子模型）；加载按 `config.dtype=float32` 上浮。
   已在 transformers 5.22.2 + 微型 Qwen3.5/encoder 资产上端到端验证 loss/CE 与手工加载完全一致。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。
+
+### 6.1 encoder 冻结 × 国产适配（MUSA）
+
+完整机制与实测数据见 [`MUSA_FREEZE.md`](MUSA_FREEZE.md)，这里只放操作口径：
+
+| 目的 | 参数 | 语义 |
+|---|---|---|
+| 全程冻死 encoder | `--freeze-encoder all` | 冻结在 Trainer 之前生效；可训练参数才进 optimizer，**与 ckpt 逐位一致（Δ=0.0）** |
+| 只训后段 | `--freeze-encoder last=2` | 冻 stem + blocks[0:-2]，只训最后 2 个 block + norm |
+| 只训 blocks | `--freeze-encoder stem` | 冻 patch_embed/cls/special/pos |
+| 冻前 N 层 | `--freeze-encoder blocks=0-8` | 含端点；逗号组合 `blocks=0-8,norm` |
+| E1 冻、E2 起解冻 | `--freeze-encoder all --freeze-encoder-epochs 1` | **仅 DeepSpeed**；切换在 engine 建好后，解冻前有 ≤ lr/步 的动量残留 |
+
+硬约束（都是实测，不是推测）：
+
+- **ZeRO-3 不能用**：encoder 的 `cls_token`/`special_tokens`/`pos_embed` 是裸 Parameter，
+  ZeRO-3 不为其 all-gather，**不冻结也会崩**；`train.py` 对 `stage>=3` fail-fast。
+  用默认 `ds_zero2.json`。
+- **按 epoch 冻结别提前冻**：初始化前整组冻结 → ZeRO-2 `IndexError`、ZeRO-3 则
+  「解冻后静默不更新」；guard 会拦住。
+- 切换冻结状态后要清梯度（callback 已做），否则 ZeRO 用上一轮 stale grad 再推一步。
+
+国产适配收敛在 `musa.py`（`train.py:main()` 首行 `musa.bootstrap()`）：MCCL 通信后端、
+fp64 范数探测降级、奇数 head_dim 的 SDPA 走 math、deepspeed 的 dist-info。自检：
+
+```bash
+python3 smoke.py            # 原 19 项张量逻辑
+python3 test_freeze.py      # 冻结语义 27 项（CPU）
+torchrun --nproc_per_node=2 musa_e2e.py --stage 2   # 真实 Trainer+DS 7 项
+torchrun --nproc_per_node=2 musa_e2e.py --stage 3   # ZeRO-3 fail-fast 2 项
+```
 
 ## 7. run1–run3 实测记录（2026-11-09）
 

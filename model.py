@@ -192,7 +192,20 @@ class BudgetProjector(nn.Module):
 # ═══════════════════════════════════════════════════════════════
 
 class AssocVTCEncoder(nn.Module):
-    """从阶段2 ckpt 恢复 `StandardAttentionEncoder`，输出 `z_s (B,32,1744)`。"""
+    """从阶段2 ckpt 恢复 `StandardAttentionEncoder`，输出 `z_s (B,32,1744)`。
+
+    **冻结语义**（详见 `freeze.py` / `MUSA_FREEZE.md`）：
+    - `freeze_encoder("all")` 后本模块 `_trainable=False`，`forward` 走 `no_grad`
+      并 `detach` 输出——整段冻结时不再为 encoder 建图，backward 直接跳过它。
+    - 部分冻结（只冻 stem / 前 N 个 block）时 `_trainable=True`：图必须穿过未冻层，
+      冻结层由 `requires_grad=False` 自然截断梯度，不需要额外分支。
+
+    **ZeRO-3 不适用**：本 encoder 的 `cls_token` / `special_tokens` / `pos_embed` 是
+    挂在自己身上的**裸 Parameter**（不是子模块参数）。ZeRO-3 只在模块边界 all-gather，
+    裸参数拿不到分区内容 ⇒ 前向报 `size of tensor a (0) ... b (1744)`。`GatheredParameters`
+    手动 gather 也无效（DS 的 pre/post hook 会在子模块前后重新分区）。所以
+    `train.py` 在「zeRO-3 + 冻结 encoder」时直接 fail-fast，请用 `ds_zero2.json`。
+    """
 
     def __init__(self, ckpt_path: str):
         super().__init__()
@@ -224,10 +237,30 @@ class AssocVTCEncoder(nn.Module):
         # （还会 warning），权重由外层 checkpoint 统一灌入，跳过即可。
         if torch.empty(0).device.type != "meta":
             self.net.load_state_dict(state, strict=True)
+        self._trainable = True
+
+    def refresh_trainable(self) -> int:
+        """按当前 requires_grad 重算 `_trainable`（`freeze.py` 改完冻结状态后调用）。"""
+        numel = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
+        self._trainable = numel > 0
+        return numel
 
     def forward(self, pixel_values: Tensor) -> Tensor:
-        """pixel_values (B,3,448,448) → z_s (B,32,1744)。"""
-        return self.net(pixel_values)[1]
+        """pixel_values (B,3,448,448) → z_s (B,32,1744)。
+
+        整段冻结时的省图策略（两条路径都实测过，见 MUSA_FREEZE.md §2.4）：
+
+        - **ZeRO-1/2 / 单卡**：`no_grad` + `detach`，encoder 不建 backward 图。
+        - **ZeRO-3**：**不能** `no_grad`。ZeRO-3 在 module forward 前用 autograd
+          Function 把分区参数 all-gather 回来，`no_grad` 下钩子失效 ⇒ 参数仍是空分区，
+          前向直接 `size of tensor a (0) must match b (1744)`。此时照常建图
+          （冻结参数 `requires_grad=False`，不会有梯度），只在输出上 `detach`。
+        """
+        if self._trainable:
+            return self.net(pixel_values)[1]
+        with torch.no_grad():
+            z_s = self.net(pixel_values)[1]
+        return z_s.detach()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -277,10 +310,31 @@ class VLM8Budget(PreTrainedModel):
             self.lm = self.load_lm(grad_ckpt)
         self.loss_weighting, self.last_budget_ce = str(config.loss_weighting), None
         # transformers 5.x：`from_pretrained` 读 `all_tied_weights_keys`（由 post_init 登记），
-        # 不调用会 AttributeError（5.22.2 实测）。4.x 的 post_init 会 init_weights 把
-        # 已加载的 lm/encoder 重新初始化，所以只在 v5（有该方法）时调用。
+        # 不调用会 AttributeError（5.22.2 实测）。但 **5.13 的 post_init 会调
+        # init_weights() 把刚加载的 encoder/LM 权重全部重新随机初始化**（实测
+        # 权重 Δ=0.12，等于白训），所以训练路径（权重已在子模块构造时加载）要屏蔽
+        # 这次初始化；只有 meta 设备上的 from_pretrained 才让它照常跑。
         if hasattr(self, "get_expanded_tied_weights_keys"):
+            if torch.empty(0).device.type == "meta":
+                self.post_init()
+            else:
+                self._post_init_keep_weights()
+
+    def _post_init_keep_weights(self) -> None:
+        """跑 `post_init()` 但保住已加载的权重（transformers 5.13 会重初始化）。
+
+        本项目权重在 `__init__` 里（encoder ckpt / Qwen `from_pretrained`）就已加载，
+        `post_init()` 只需登记 `all_tied_weights_keys` 等元信息。把 `init_weights`
+        临时置空即可——缺 key 的补齐由 `from_pretrained` / `load_state_dict` 负责。
+        """
+        def _noop(*args, **kwargs):
+            return None
+
+        self.init_weights = _noop
+        try:
             self.post_init()
+        finally:
+            self.__dict__.pop("init_weights", None)     # 恢复类方法
 
     def load_lm(self, grad_ckpt: bool = False) -> nn.Module:
         """训练/手工加载：从 `qwen_dir` 读预训练权重（本函数内才 import Qwen）。"""
@@ -313,6 +367,32 @@ class VLM8Budget(PreTrainedModel):
                                       else budget_ids)})
         assert ks and 0 <= ks[0] and ks[-1] <= VISUAL_TOKENS, f"预算越界: {ks}"
         return ks
+
+    # ═══════════════════════════════════════════════════════════
+    # encoder 冻结（策略/参数组在 freeze.py，机制说明在 MUSA_FREEZE.md）
+    # ═══════════════════════════════════════════════════════════
+
+    def freeze_encoder(self, spec: str = "none"):
+        """按规格冻结 encoder（`all`/`stem`/`blocks=0-8`/`last=2`…），返回 FreezeReport。
+
+        只改 `requires_grad` 与 `_trainable`；**不改 optimizer**。param group 必须在
+        `freeze.build_param_groups()` 里按 `requires_grad` 现算，顺序不能反：
+        先冻结 → 再建组（组里就没有冻结参数，DeepSpeed 不会因整组被剔空而崩）。
+        """
+        from freeze import freeze_encoder as _freeze
+        return _freeze(self.encoder, spec)
+
+    def train(self, mode: bool = True) -> "VLM8Budget":
+        """`Trainer` 每 epoch 调 `model.train()`；冻结段必须保持 eval。
+
+        nn.Module.train() 会把所有子模块（含冻结块里的 dropout）切回 train，
+        而冻结对比实验要求「同一份权重、同一前向」，所以这里补一刀。
+        """
+        super().train(mode)
+        if mode:
+            from freeze import keep_frozen_eval
+            keep_frozen_eval(self.encoder)
+        return self
 
     def forward(self, pixel_values: Tensor, input_ids: Tensor,
                 attention_mask: Optional[Tensor] = None,
