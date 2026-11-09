@@ -15,7 +15,7 @@ mkdir -p logs
 echo "[run3] start $(date -Is) epochs=$EPOCHS init=$INIT out=$OUT lr=$LR_LLM/$LR_PROJ/$LR_ENC"
 timeout 100000 /root/venv_qwen/bin/python -u -m torch.distributed.run \
   --nproc_per_node=2 --master_port "$PORT" \
-  train.py --freeze-encoder-epochs 0 --epochs "$EPOCHS" --init-from "$INIT" \
+  train.py --epochs "$EPOCHS" --init-from "$INIT" \
   --output-dir "$OUT" --save-total-limit "$SAVE" \
   --lr-llm "$LR_LLM" --lr-proj "$LR_PROJ" --lr-encoder "$LR_ENC" \
   --train-jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/train_nothink_all.jsonl \

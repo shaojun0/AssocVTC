@@ -38,6 +38,11 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 # 变换
 # ═══════════════════════════════════════════════════════════════
 
+def is_text_only(image_path: str) -> bool:
+    """文本任务用 img/_blank/blank.jpg 占位（PLAN_eval_aligned_mixture §3）⇒ 无图。"""
+    return "/_blank/" in "/" + str(image_path).replace("\\", "/")
+
+
 def build_image_transform(train: bool):
     """训练 RRC(448, 0.35–1.0)+HFlip；验证 Resize(512)+CenterCrop(448)；均 Normalize。"""
     if train:
@@ -100,6 +105,7 @@ class SelfDistillSFTDataset(Dataset):
                         "image": row["image"],
                         "messages": row[MESSAGES_KEY],
                         "gt": gt_name(row.get("gt", "")),
+                        "has_image": not is_text_only(row["image"]),
                     })
 
     def __len__(self) -> int:
@@ -107,9 +113,12 @@ class SelfDistillSFTDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, object]:
         record = self.records[index]
-        with Image.open(os.path.join(
-                self.image_root, record["image"])) as image:
-            pixel_values = self.transform(image.convert("RGB"))
+        if record["has_image"]:
+            with Image.open(os.path.join(
+                    self.image_root, record["image"])) as image:
+                pixel_values = self.transform(image.convert("RGB"))
+        else:
+            pixel_values = torch.zeros((3, IMAGE_SIZE, IMAGE_SIZE))
 
         messages = json.loads(record["messages"]) if isinstance(
             record["messages"], str) else record["messages"]
@@ -131,6 +140,7 @@ class SelfDistillSFTDataset(Dataset):
             "labels": torch.tensor(
                 [IGNORE_INDEX] * len(prompt_ids) + answer_ids, dtype=torch.long),
             "gt_name": record["gt"] or os.path.dirname(record["image"]),
+            "has_image": bool(record["has_image"]),
         }
 
     def _chat_ids(self, messages, add_generation_prompt: bool = False) -> List[int]:
@@ -181,4 +191,6 @@ class EightBudgetCollator:
         batch["pixel_values"] = torch.stack(
             [feature["pixel_values"] for feature in features], dim=0)
         batch["gt_name"] = [str(feature.get("gt_name", "")) for feature in features]
+        batch["has_image"] = torch.tensor(
+            [bool(feature["has_image"]) for feature in features], dtype=torch.bool)
         return batch

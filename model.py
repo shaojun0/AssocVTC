@@ -100,24 +100,39 @@ def expand_budget_rows(
     text_mask: Tensor,
     labels: Tensor,
     budget_ks: Sequence[int],
+    has_image: Optional[Tensor] = None,
 ) -> BudgetRows:
-    """`vis (B,8,H)` + `text (B,T,H)` → 每图 V 行 `[vis[:, :k]; text]`（right-pad）。"""
+    """`vis (B,8,H)` + `text (B,T,H)` → 每图 V 行 `[vis[:, :n]; text]`（right-pad）。
+
+    `has_image[b]=False` ⇒ 该样本所有预算行都取 0 个视觉 token（文本任务零视觉前缀）。
+    """
     B, T, H = text_embeds.shape
     ks = [int(k) for k in budget_ks]
-    assert ks and min(ks) >= 1 and max(ks) <= vis_embeds.size(1), f"预算越界: {ks}"
+    assert ks and min(ks) >= 0 and max(ks) <= vis_embeds.size(1), f"预算越界: {ks}"
     V, L = len(ks), max(ks) + T
+
+    # 每行实际视觉 token 数 kb[b][vi]：文本样本（has_image=False）恒为 0。
+    kb = torch.tensor(ks, device=text_embeds.device, dtype=torch.long).view(1, V).expand(B, V).clone()
+    if has_image is not None:
+        kb = kb * has_image.to(device=text_embeds.device, dtype=torch.long).view(B, 1)
 
     embeds = text_embeds.new_zeros((B, V, L, H))
     masks = text_mask.new_zeros((B, V, L))
     row_labels = labels.new_full((B, V, L), IGNORE_INDEX)
-    for vi, k in enumerate(ks):                 # 视觉前缀只取前 k 个 = 截断
-        embeds[:, vi, :k] = vis_embeds[:, :k]
-        embeds[:, vi, k:k + T] = text_embeds
-        masks[:, vi, :k] = 1
-        masks[:, vi, k:k + T] = text_mask
-        row_labels[:, vi, k:k + T] = labels
+    kb_list = kb.tolist()                       # 只同步一次；B*V ≤ 32
+    for vi in range(V):
+        for b in range(B):
+            n = kb_list[b][vi]                  # 文本样本 n=0 ⇒ 零视觉 token
+            if n:
+                embeds[b, vi, :n] = vis_embeds[b, :n]
+                masks[b, vi, :n] = 1
+            embeds[b, vi, n:n + T] = text_embeds[b]
+            masks[b, vi, n:n + T] = text_mask[b]
+            row_labels[b, vi, n:n + T] = labels[b]
 
     valid = labels != IGNORE_INDEX
+    runs = (valid[:, 1:] & ~valid[:, :-1]).sum(dim=1) + valid[:, 0].long()
+    assert int(runs.max()) <= 1, "answer 标签不是连续单段（多段会让 label_pos 跨过非答案 token）"
     starts = valid.long().argmax(dim=1)         # 每行 answer 起始（连续段）
     assert int(starts.min()) >= 1, "answer 从文本第 0 位开始，没有 prompt 末 token 可预测"
     counts = valid.sum(dim=1)
@@ -128,9 +143,9 @@ def expand_budget_rows(
     targets = labels.gather(
         1, label_pos.clamp(max=T - 1)).masked_fill(~ans_valid, IGNORE_INDEX)
 
-    # 标准因果 shift：预测位置 = label 位置 − 1；再用 +k 换成行内绝对下标。
+    # 标准因果 shift：预测位置 = label 位置 − 1；再用 +kb 换成行内绝对下标。
     # ⚠️ 不能写成 label 位置本身（hidden 已看见该 token ⇒ 目标泄露）。
-    pos = (label_pos - 1).unsqueeze(1) + torch.tensor(ks, device=labels.device).view(1, V, 1)
+    pos = (label_pos - 1).unsqueeze(1) + kb.unsqueeze(-1)
     pos = pos.masked_fill(~ans_valid.unsqueeze(1), -1)
 
     return BudgetRows(
@@ -167,7 +182,7 @@ class BudgetProjector(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════
-# AssocVTCEncoder — 阶段2 编码器（E1 冻结 / E2+ 解冻）
+# AssocVTCEncoder — 阶段2 编码器（全量微调，不冻结）
 # ═══════════════════════════════════════════════════════════════
 
 class AssocVTCEncoder(nn.Module):
@@ -205,24 +220,13 @@ class AssocVTCEncoder(nn.Module):
         """pixel_values (B,3,448,448) → z_s (B,32,1744)。"""
         return self.net(pixel_values)[1]
 
-    def freeze(self) -> None:
-        """E1：requires_grad=False + eval()。"""
-        self.eval()
-        for param in self.parameters():
-            param.requires_grad_(False)
-
-    def unfreeze(self) -> None:
-        """E2–E3：全部 requires_grad=True。"""
-        for param in self.parameters():
-            param.requires_grad_(True)
-
 
 # ═══════════════════════════════════════════════════════════════
 # 视觉消融（评测用，不训练）
 # ═══════════════════════════════════════════════════════════════
 
 def apply_visual_mode(vis: Tensor, mode: str) -> Tensor:
-    """`normal` / `null`（全零 ⇒ 等价没有图）/ `shuffle`（batch 内错位 ⇒ 看错图）。"""
+    """`normal` / `null`（8 个 emb 置零；token 数不变、不等于没有图）/ `shuffle`（batch 内错位 ⇒ 看错图）。"""
     if mode == "normal":
         return vis
     if mode == "null":
@@ -273,14 +277,8 @@ class VLM8Budget(PreTrainedModel):
         """None ⇒ config.budget_ids；结果升序去重并检查越界。"""
         ks = sorted({int(k) for k in (self.config.budget_ids if budget_ids is None
                                       else budget_ids)})
-        assert ks and 1 <= ks[0] and ks[-1] <= VISUAL_TOKENS, f"预算越界: {ks}"
+        assert ks and 0 <= ks[0] and ks[-1] <= VISUAL_TOKENS, f"预算越界: {ks}"
         return ks
-
-    def _keep_encoder_eval(self) -> None:
-        """幂等保护：已冻结的 encoder 不能被 `model.train()` 拉回 train（dropout 必须关）。"""
-        encoder = self.encoder
-        if encoder.training and not any(p.requires_grad for p in encoder.parameters()):
-            encoder.eval()
 
     def forward(self, pixel_values: Tensor, input_ids: Tensor,
                 attention_mask: Optional[Tensor] = None,
@@ -288,9 +286,12 @@ class VLM8Budget(PreTrainedModel):
                 budget_ids: Optional[Sequence[int]] = None,
                 budget_weights: Optional[Tensor] = None,
                 visual_mode: str = "normal",
+                has_image: Optional[Tensor] = None,
                 **kwargs) -> Dict[str, object]:
-        """训练 / teacher-forcing 前向（生成见 `generate_budget`）。"""
-        self._keep_encoder_eval()
+        """训练 / teacher-forcing 前向（生成在 `eval.py`）。
+
+        `has_image[b]=False` ⇒ 该样本的预算行取 0 个视觉 token（文本任务）。
+        """
         encoder_dtype = next(self.encoder.parameters()).dtype
         z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))         # (B,32,1744)
         vis = apply_visual_mode(
@@ -299,13 +300,12 @@ class VLM8Budget(PreTrainedModel):
         text_embeds = self.lm.get_input_embeddings()(input_ids)          # (B,T,2560)
         rows = expand_budget_rows(
             vis, text_embeds.to(vis.dtype), attention_mask, labels,
-            self._budgets(budget_ids))
+            self._budgets(budget_ids), has_image=has_image)
         return self.forward_rows(rows, budget_weights)
 
     def forward_rows(self, rows: BudgetRows,
                      budget_weights: Optional[Tensor] = None) -> Dict[str, object]:
         """对已展开的 `BudgetRows` 跑 LM + answer-only CE（smoke 也走这条路径）。"""
-        self._keep_encoder_eval()
         hidden = self.lm.model(
             inputs_embeds=rows.embeds, attention_mask=rows.attention_mask,
             use_cache=False).last_hidden_state                     # (R,L,H)
@@ -344,35 +344,6 @@ class VLM8Budget(PreTrainedModel):
             "row_ce": row_ce.detach(),
             "budget_ks": rows.budget_ks,
         }
-
-    @torch.no_grad()
-    def generate_budget(self, pixel_values: Tensor, input_ids: Tensor,
-                        attention_mask: Tensor,
-                        budget_ids: Optional[Sequence[int]] = None,
-                        max_new_tokens: int = 16,
-                        visual_mode: str = "normal") -> Dict[int, List[List[int]]]:
-        """每图 × 每预算 greedy 生成（right-pad 下逐行），返回 `{k: [[ids...], ...]}`。"""
-        self._keep_encoder_eval()
-        encoder_dtype = next(self.encoder.parameters()).dtype
-        vis = apply_visual_mode(self.projector(self.encoder(
-            pixel_values.to(dtype=encoder_dtype)).to(
-                self.projector.token_proj.weight.dtype)), visual_mode)
-        text_embeds = self.lm.get_input_embeddings()(input_ids).to(vis.dtype)
-        results: Dict[int, List[List[int]]] = {}
-        for k in self._budgets(budget_ids):
-            results[k] = []
-            for b in range(pixel_values.size(0)):
-                n = int(attention_mask[b].sum())                 # 去掉文本 right-pad
-                embeds = torch.cat([vis[b, :k], text_embeds[b, :n]], dim=0).unsqueeze(0)
-                mask = torch.ones(embeds.shape[:2], dtype=torch.long,
-                                  device=embeds.device)
-                generated = self.lm.generate(
-                    inputs_embeds=embeds, attention_mask=mask,
-                    max_new_tokens=int(max_new_tokens), do_sample=False,
-                    pad_token_id=self.config.pad_token_id,
-                    eos_token_id=self.config.eos_token_id)
-                results[k].append(generated[0].tolist())
-        return results
 
 
 # ═══════════════════════════════════════════════════════════════

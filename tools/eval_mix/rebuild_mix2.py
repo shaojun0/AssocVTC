@@ -17,6 +17,7 @@
 """
 import argparse
 import collections
+import hashlib
 import json
 import os
 import random
@@ -35,7 +36,7 @@ QUOTA = {
 MAIN = ["img_train.jsonl"]
 EXTRA = ["img_extra_train.jsonl"]
 EXPAND = ["expand_docvqa_train.jsonl", "expand_docvqa_train_split.jsonl",
-          "expand_chartqa_train.jsonl"]
+          "expand_chartqa_train.jsonl", "expand_slake_train.jsonl"]
 ANCHOR_FROM_MIX = "mix_train.jsonl"
 
 
@@ -49,6 +50,15 @@ def read_lines(path):
 
 def log(msg):
     print(msg, flush=True)
+
+
+def file_md5(path: str) -> str:
+    """1MB 分块求 md5（图像级去重，防同图/不同 id 的 train-heldout 泄漏）。"""
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -115,9 +125,24 @@ def main() -> int:
         if not str(record.get("gt", "")).strip():
             bad_gt += 1
     overlap = ids & heldout_ids
-    if missing or bad_prefix or bad_gt or overlap:
+
+    def _has_image_path(record):
+        return "_blank" not in str(record["image"]).replace("\\", "/")
+
+    def _image_md5(record):
+        path = os.path.join(DATA, record["image"])
+        return file_md5(path) if os.path.exists(path) else None
+
+    held_md5 = {md5 for md5 in (_image_md5(json.loads(line))
+                                for line in read_lines("mix_heldout.jsonl")
+                                if _has_image_path(json.loads(line))) if md5}
+    hits = sum(1 for line in out_lines
+               if _has_image_path(json.loads(line))
+               and _image_md5(json.loads(line)) in held_md5)
+    if missing or bad_prefix or bad_gt or overlap or hits:
         log(f"[mix2] FATAL missing_img={missing} bad_prefix={bad_prefix} "
-            f"bad_gt={bad_gt} heldout_overlap={len(overlap)}")
+            f"bad_gt={bad_gt} heldout_overlap={len(overlap)} "
+            f"heldout_image_md5={hits}")
         return 1
 
     random.Random(args.seed).shuffle(out_lines)

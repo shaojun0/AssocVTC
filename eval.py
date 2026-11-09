@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from data import EightBudgetCollator, SelfDistillSFTDataset, build_image_transform
-from model import VLM8Budget, VLM8BudgetConfig
+from model import IGNORE_INDEX, VLM8Budget, VLM8BudgetConfig
 
 # ═══════════════════════════════════════════════════════════════
 # 默认值 / CLI
@@ -53,12 +53,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-seed", type=int, default=42,
                    help="--limit>0 时随机抽样的种子（避免按类排序的子集偏置）")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    p.add_argument("--gen-protocol", default="prompt", choices=["prompt", "full"],
-                   help="greedy 生成喂什么：prompt=只喂到 answer 之前（正确）；"
-                        "full=连 answer 一起喂（历史协议，会大量出空串、acc 被低估）")
     p.add_argument("--visual-mode", default="normal",
                    choices=["normal", "null", "shuffle"],
-                   help="视觉消融：null=vis 置零（等价没有图）/ shuffle=batch 内错位（看错图）")
+                   help="视觉消融：null=vis 置零（token 数不变，不等于无图）/ shuffle=batch 内错位（看错图）")
     return p.parse_args()
 
 
@@ -101,12 +98,21 @@ def load_trained_model(checkpoint: str, config: VLM8BudgetConfig) -> VLM8Budget:
     return model.to(device=device, dtype=torch.bfloat16).eval()
 
 
+def prompt_lens(labels):
+    """answer 首 token 位置 = prompt 长度；只喂 [.., prompt) 给 generate。"""
+    valid = labels != IGNORE_INDEX
+    assert bool(valid.any(dim=1).all()), "有样本没有 answer 标签，生成边界不可确定"
+    lens = valid.to(torch.int8).argmax(dim=1)
+    assert int(lens.min()) >= 1, "存在 prompt 为空的样本（answer 从第 0 位开始）"
+    return lens
+
 
 @torch.no_grad()
-def generate_prompt_only(model, pixel_values, input_ids, prompt_lens, budgets,
-                         visual_mode: str):
+def generate_prompt_only(model, pixel_values, input_ids, labels, budgets,
+                         visual_mode: str, has_image=None):
     """只喂 prompt 的 greedy 生成（正确协议）：`[vis[:k]; prompt]`，逐行解码。"""
     from model import apply_visual_mode
+    prompt_lens_ = prompt_lens(labels)
     encoder_dtype = next(model.encoder.parameters()).dtype
     vis = apply_visual_mode(model.projector(model.encoder(
         pixel_values.to(dtype=encoder_dtype)).to(
@@ -116,8 +122,9 @@ def generate_prompt_only(model, pixel_values, input_ids, prompt_lens, budgets,
     for k in budgets:
         results[k] = []
         for b in range(pixel_values.size(0)):
-            n = int(prompt_lens[b])
-            embeds = torch.cat([vis[b, :k], text_embeds[b, :n]], dim=0).unsqueeze(0)
+            n = int(prompt_lens_[b])
+            k_eff = k if has_image is None or bool(has_image[b]) else 0
+            embeds = torch.cat([vis[b, :k_eff], text_embeds[b, :n]], dim=0).unsqueeze(0)
             mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=embeds.device)
             generated = model.lm.generate(
                 inputs_embeds=embeds, attention_mask=mask,
@@ -159,21 +166,16 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
 
     stats = {k: [0.0, 0, 0] for k in budgets}          # [ce_sum, correct, n]
     examples: List[Dict[str, object]] = []
+    n_no_image = 0
     for batch in loader:
         inputs = {key: batch[key].to(device) for key in
-                  ("pixel_values", "input_ids", "attention_mask", "labels")}
+                  ("pixel_values", "input_ids", "attention_mask", "labels",
+                   "has_image")}
         outputs = model(budget_ids=budgets, visual_mode=args.visual_mode, **inputs)
-        if args.gen_protocol == "prompt":
-            prompt_lens = inputs["attention_mask"].sum(dim=1) - (
-                inputs["labels"] != -100).sum(dim=1)
-            generated = generate_prompt_only(
-                model, inputs["pixel_values"], inputs["input_ids"], prompt_lens,
-                budgets, args.visual_mode)
-        else:
-            generated = model.generate_budget(
-                inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
-                budget_ids=budgets, max_new_tokens=MAX_NEW_TOKENS,
-                visual_mode=args.visual_mode)
+        n_no_image += int((~inputs["has_image"]).sum())
+        generated = generate_prompt_only(
+            model, inputs["pixel_values"], inputs["input_ids"], inputs["labels"],
+            budgets, args.visual_mode, has_image=inputs["has_image"])
         per_sample = outputs["per_budget_ce_per_sample"].float().cpu()
         for i in range(inputs["pixel_values"].size(0)):
             gt_name = str(batch["gt_name"][i]).strip()
@@ -197,7 +199,9 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     return {"checkpoint": args.checkpoint, "jsonl": args.jsonl,
             "visual_mode": args.visual_mode, "sample_seed": args.sample_seed,
             "n_images": rows[0]["n"], "budgets": rows,
-            "delta_acc": rows[-1]["acc"] - rows[0]["acc"], "examples": examples}
+            "delta_acc": rows[-1]["acc"] - rows[0]["acc"], "examples": examples,
+            "gen_protocol": "prompt_only", "max_new_tokens": MAX_NEW_TOKENS,
+            "limit": args.limit, "n_no_image": n_no_image}
 
 
 def write_outputs(result: Dict[str, object], output_dir: str) -> None:

@@ -8,7 +8,7 @@
 
 把 AssocVTC 阶段2 的 `z_s (32×1744)` 投成 **8 个 2560 维 visual token**；同一张图一次
 前向展开 **8 行**（行 k 只用前 k 个 token）去预测同一段文本，8 行 CE 取（加权）平均。
-3 epoch：E1 冻结编码器，E2–E3 全解冻；DeepSpeed ZeRO-3。
+3 epoch：全量微调（encoder 不冻结）；DeepSpeed ZeRO-3。
 
 设计文档：[`doc/2026-11-05/DESIGN_8budget_vlm_finetune.md`](https://github.com/shaojun0/AssocVTC/blob/main/doc/2026-11-05/DESIGN_8budget_vlm_finetune.md)
 （§3 架构 / §4 8 行批 / §5 协议 / §9 评测；本分支只放代码，文档在主线仓库）。
@@ -81,15 +81,14 @@ loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
 
 | epoch | encoder | 说明 |
 |---|---|---|
-| E1 | ❄️ `requires_grad=False` + `eval()` | 只训 LLM + projector；`forward` 入口幂等兜底 eval |
-| E2–E3 | 🔥 全解冻 | encoder lr 5e-6，防表示崩塌 |
+| E1–E3 | 🔥 全量微调 | encoder 不冻结，lr 5e-6；投影头 1e-4 / LLM 1e-5 |
 
 ### 4. 跑法
 
 ```bash
 # 本机（CPU）：只需 torch + transformers + torchvision + Pillow
 python3 -m py_compile *.py
-python3 smoke.py                        # 退出码 0 = PASS（7 项）
+python3 smoke.py                        # 退出码 0 = PASS
 
 # remote（2×A800，venv /root/venv_qwen）：先冒烟再长跑
 torchrun --nproc_per_node=2 train.py --smoke \
@@ -115,9 +114,9 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `model_wrap.py` | `model.py` | `AssocVTCEncoder` / `BudgetProjector` / `VLM8Budget` |
 | `model_v2_linattn.py`（主线） | `encoder.py` | `StandardAttentionEncoder`（逐字 vendored，main@`1fc4920`） |
 | `data_8budget.py` | `data.py` | `SelfDistillSFTDataset` / `EightBudgetCollator` / `build_image_transform` |
-| `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `EncoderFreezeCallback` / `BudgetCELogCallback` |
+| `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `BudgetCELogCallback` |
 | `ds_zero3.json` | `ds_zero3.json` | ZeRO-3 + bf16 + gather-on-save |
-| `smoke_mask.py` | `smoke.py` | 7 项自检（投影形状 / ans_pos 槽位 / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离） |
+| `smoke_mask.py` | `smoke.py` | 16 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / prompt_lens / 静态防回退） |
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
@@ -129,10 +128,8 @@ remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2
 
 - **P0 shift**：`expand_budget_rows()` 里 `ans_pos = k + label_pos − 1`；改动此处必跑
   `smoke.py`（shift 等价 + 槽位覆盖双锁）。临时改回 no-shift 会让 shift 检查 FAIL。
-- **冻结保护**：`VLM8Budget._keep_encoder_eval()` 在每个 forward 入口把已冻结 encoder 拉回
-  `eval()`（Trainer 会 `model.train()`）；E2 起 `requires_grad=True` 后自动失效。
-- **ZeRO-3 与 param groups**：E1 冻结期 encoder 组仍留在 optimizer（无梯度、不更新），
-  否则 engine 初始化后无法把解冻参数加进去。
+- **encoder 不冻结**：E1–E3 全量微调；原 `freeze_encoder_epochs` / `EncoderFreezeCallback` /
+  `_keep_encoder_eval()` 已删除，DeepSpeed param-group 生命周期问题随之消失。
 - **`encoder.py` 是 vendored 副本**：主线 `model_v2_linattn.py`（commit `1fc4920`）逐字抽取；
   上游若改类名 / 子模块名，阶段2 ckpt 的 `strict=True` 加载会失败，需同步本文件。
 - **未验证项**：`Qwen3_5ForConditionalGeneration.from_pretrained(dtype=bf16)`、`lm.model`
@@ -172,11 +169,18 @@ remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2
 
 **旧实现（bug）**：`generate_budget()` 把 `input_ids`（含 answer）整段拼进 `inputs_embeds` 后调用
 `generate`，模型看到答案后继续生成 ⇒ 大量空串，exact-match acc 被严重低估（300 行：22.3% vs 修正后 49.3%）。
-**修正**：只喂到 answer 之前（`prompt_len = attention_mask.sum() − (labels != -100).sum()`），
-新增 `--gen-protocol {prompt,full}`，**默认 `prompt`**；`full` 仅用于复现旧数字。
+**修正**：只喂到 answer 之前（`prompt_lens(labels)` = answer 首 token 位置 = prompt 长度）；
+`--gen-protocol`/`full` 分支与 `model.generate_budget()` 已删除，全仓只剩 prompt-only 一条生成路径。
 CE（teacher forcing）不受影响。
 
-### 7.4 预算机制筛查结论（代码侧要点）
+### 7.4 事故 A 修复（文本任务零视觉 token）
+
+`data.py:is_text_only()` 用 `img/_blank/` 占位路径判定无图样本 ⇒ `has_image=False`；
+`expand_budget_rows(..., has_image=)` 对无图样本的**所有预算行**都取 0 个视觉 token，
+`eval.py`/`eval_dump_per_sample.py`/`eval_mix_breakdown.py` 的生成路径同样按 `has_image` 取 `k=0`。
+注意 `--visual-mode null` 只是把 8 个 emb 置零、**token 数不变，不等于没有图**。
+
+### 7.5 预算机制筛查结论（代码侧要点）
 
 - `tools/eval_mix/eval_dump_per_sample.py` 的 5 种视觉消融可直接判定「token 是否冗余」：
   `mean`（8 token 取均值）/ `repeat`（第 1 个 token 复制 8 份）与 `normal` 的 CE 差 ≈0 ⇒ 冗余。

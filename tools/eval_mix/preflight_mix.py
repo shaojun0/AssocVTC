@@ -17,7 +17,7 @@ import argparse
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--file", default="mix_train.jsonl")
-ap.add_argument("--full", action="store_true", help="全量 token 复核（较慢）")
+ap.add_argument("--fast", action="store_true", help="跳过全量 token 复核（默认全量）")
 ap.add_argument("--n", type=int, default=64)
 args = ap.parse_args()
 
@@ -38,7 +38,7 @@ for i, r in enumerate(rows):
             print("  NOIMG", r["id"], r["image"], flush=True)
     if not r.get("gt"):
         empty += 1
-    if args.full:
+    if not args.fast:
         ids = tok.apply_chat_template(r["messages"], tokenize=True)
         if hasattr(ids, "keys"):
             ids = ids["input_ids"]

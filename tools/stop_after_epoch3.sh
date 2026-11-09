@@ -54,9 +54,9 @@ if [ "$STOP" != "1" ]; then
 fi
 
 echo "[stop] 预计拖过截止 → 在 epoch-3 存档处收尾 $(date -Is)" >> "$LOG"
-pkill -TERM -f "train.py --freeze-encoder-epochs" 2>/dev/null
+pkill -TERM -f "train.py --epochs" 2>/dev/null
 sleep 20
-pkill -KILL -f "train.py --freeze-encoder-epochs" 2>/dev/null
+pkill -KILL -f "train.py --epochs" 2>/dev/null
 sleep 5
 ln -sfn "$CKPT" "$OUT/final"
 printf '[run3] rc=143（在 epoch-3 存档 step=11463 处主动收尾以对齐周一中午截止；LR 已退火到峰值 ~3%%）%s\n' "$(date -Is)" | tee logs/run3.rc

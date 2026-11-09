@@ -49,7 +49,8 @@ def ablation_table(evs):
                      f"{b[ks[0]]['acc'] * 100:.2f}% | {b[ks[-1]]['acc'] * 100:.2f}% |")
     n = evs["normal"].get("n_images")
     lines.append("")
-    lines.append(f"- 同一子集 n={n}（seed {evs['normal'].get('sample_seed')}）；null=视觉置零，shuffle=batch 内错位")
+    lines.append(f"- 同一子集 n={n}（seed {evs['normal'].get('sample_seed')}）；")
+    lines.append("- null=视觉 emb 置零、token 数不变（**不等于没有图**）；shuffle=batch 内错位")
     return "\n".join(lines)
 
 
@@ -59,7 +60,7 @@ def bench_table(js):
     cats = list(js["base"]["by_category"].keys())
     lines = ["| 模型 | " + " | ".join(cats) + " | overall |",
              "|---|" + "---|" * (len(cats) + 1)]
-    for key, label in (("base", "base Qwen3.5-4B"), ("ours", "vlm8b 微调后")):
+    for key, label in (("base", "base Qwen3.5-4B"), ("ours_text", "vlm8b 微调后")):
         d = js.get(key)
         if not d:
             continue

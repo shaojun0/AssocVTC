@@ -82,12 +82,12 @@ def main():
     with torch.no_grad():
         for batch in loader:
             inputs = {key: batch[key].to(device) for key in
-                      ("pixel_values", "input_ids", "attention_mask", "labels")}
+                      ("pixel_values", "input_ids", "attention_mask", "labels",
+                       "has_image")}
             outputs = model(budget_ids=budgets, visual_mode=args.visual_mode, **inputs)
-            generated = model.generate_budget(
-                inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
-                budget_ids=budgets, max_new_tokens=E.MAX_NEW_TOKENS,
-                visual_mode=args.visual_mode)
+            generated = E.generate_prompt_only(
+                model, inputs["pixel_values"], inputs["input_ids"], inputs["labels"],
+                budgets, args.visual_mode, has_image=inputs["has_image"])
             per_sample = outputs["per_budget_ce_per_sample"].float().cpu()
             for i in range(inputs["pixel_values"].size(0)):
                 src = sample[pos][0]
@@ -107,7 +107,8 @@ def main():
 
     out = {"checkpoint": args.checkpoint, "jsonl": args.jsonl,
            "visual_mode": args.visual_mode, "per_source_samples": args.per_source,
-           "budgets": budgets, "per_source": {}, "overall": {}}
+           "budgets": budgets, "per_source": {}, "overall": {},
+           "gen_protocol": "prompt_only", "max_new_tokens": E.MAX_NEW_TOKENS}
     total = defaultdict(lambda: [0.0, 0, 0])
     for src in sorted(agg):
         out["per_source"][src] = {}

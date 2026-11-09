@@ -97,11 +97,6 @@ def main() -> int:
         if n % 500 == 0:
             print(f"  ...{n}/{N_TARGET}", flush=True)
 
-    with open(OUT, "w", encoding="utf-8") as handle:
-        for record in rows:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"[chartqa-train] 写出 {len(rows)} 行 → {OUT}")
-
     held_q = set()
     for line in open(os.path.join(ROOT, "mix_heldout.jsonl"), encoding="utf-8"):
         r = json.loads(line)
@@ -110,7 +105,14 @@ def main() -> int:
     clash = sum(1 for r in rows if r["messages"][1]["content"][1]["text"] in held_q)
     missing = sum(1 for r in rows if not os.path.exists(r["image"]))
     print(f"[chartqa-train] 与 heldout 同题: {clash}；图片缺失: {missing}")
-    return 0 if len(rows) == N_TARGET and missing == 0 else 1
+    if clash or missing or len(rows) != N_TARGET:
+        return 1
+
+    with open(OUT, "w", encoding="utf-8") as handle:
+        for record in rows:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"[chartqa-train] 写出 {len(rows)} 行 → {OUT}")
+    return 0
 
 
 if __name__ == "__main__":

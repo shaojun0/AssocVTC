@@ -3,7 +3,7 @@
 # 产物：/root/autodl-tmp/vlm8b/output/eval_run3_mix_{normal,null,shuffle}/eval.{json,md}
 #       /root/autodl-tmp/vlm8b/output/eval_run3_in100/eval.{json,md}
 #       /root/vlm8b/logs/bench_run3.json、logs/eval_chain_run3.log、标记 logs/RUN3_EVAL_DONE
-set -uo pipefail
+set -euo pipefail
 cd /root/vlm8b
 LOG=logs/eval_chain_run3.log
 DATA=/root/autodl-tmp/vlm8b/data_eval
@@ -17,15 +17,7 @@ done
 sleep 20
 if [ ! -d "$OUT/final" ]; then
   echo "[chain3] NO $OUT/final -> abort ($(date -Is))" >> "$LOG"
-  # 4) 分任务表（source × budget，回答「预算机制在哪类任务上成立」）
-echo "[chain3] breakdown start $(date -Is)" >> "$LOG"
-/root/venv_qwen/bin/python -u eval_mix_breakdown.py \
-  --checkpoint "$OUT/final" --jsonl "$DATA/mix_heldout.jsonl" --image-root "$DATA" \
-  --per-source 25 --visual-mode normal --out logs/run3_breakdown_normal.json >> "$LOG" 2>&1
-echo "[chain3] breakdown rc=$? $(date -Is)" >> "$LOG"
-
-touch logs/RUN3_EVAL_DONE
-  exit 0
+  exit 1
 fi
 echo "[chain3] run3 rc=$(cat logs/run3.rc) $(date -Is)" >> "$LOG"
 
@@ -43,7 +35,8 @@ done
 echo "[chain3] imagenet100 start $(date -Is)" >> "$LOG"
 /root/venv_qwen/bin/python -u eval.py \
   --checkpoint "$OUT/final" --limit 250 --sample-seed 42 --budgets 1,2,3,4,5,6,7,8 \
-  --visual-mode normal >> "$LOG" 2>&1
+  --visual-mode normal \
+  --output-dir /root/autodl-tmp/vlm8b/output/eval_run3_in100 >> "$LOG" 2>&1
 echo "[chain3] imagenet100 rc=$? $(date -Is)" >> "$LOG"
 
 # 3) 通用文本能力（弱智吧/算术/常识）

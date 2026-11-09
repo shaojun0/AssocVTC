@@ -10,7 +10,7 @@ SAVE=${SAVE:-1}
 echo "[run2] start $(date -Is) epochs=$EPOCHS init=$INIT out=$OUT"
 timeout 100000 /root/venv_qwen/bin/python -u -m torch.distributed.run \
   --nproc_per_node=2 --master_port=29511 \
-  train.py --freeze-encoder-epochs 0 --epochs "$EPOCHS" --init-from "$INIT" \
+  train.py --epochs "$EPOCHS" --init-from "$INIT" \
   --output-dir "$OUT" --save-total-limit "$SAVE" \
   --train-jsonl /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/train_nothink_all.jsonl
 rc=$?

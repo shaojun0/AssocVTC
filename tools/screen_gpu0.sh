@@ -14,8 +14,7 @@ echo "[gpu0] heldout dump rc=$? $(date -Is)"
 for mode in normal null shuffle; do
   $PY -u eval.py --checkpoint $CK --jsonl $D/mix_heldout.jsonl --image-root $D \
     --limit 300 --sample-seed 42 --budgets 1,2,3,4,5,6,7,8 --visual-mode $mode \
-    --output-dir /root/autodl-tmp/vlm8b/output/eval_run3_fix_$mode \
-    --gen-protocol prompt
+    --output-dir /root/autodl-tmp/vlm8b/output/eval_run3_fix_$mode
   echo "[gpu0] fix eval $mode rc=$? $(date -Is)"
 done
 touch logs/SCREEN_GPU0_DONE

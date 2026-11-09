@@ -2,10 +2,10 @@
 # vlm8b 预算课程训练（5 阶段，从 0 开始；阶段间 init-from 上一阶段 final）
 # ---------------------------------------------------------------------------
 # 用户 2026-11-06 计划：若 run2 两次判定 PLATEAU → 放弃 run2 结果，按下面课程重新训：
-#   P1: 冻结 encoder, k=8（8 个视觉 token 一次全给）        2 epoch
-#   P2: 冻结 encoder, k∈{4,8}（分 2 步读出）                1 epoch
-#   P3: 冻结 encoder, k∈{2,4,6,8}（分 4 步）                1 epoch
-#   P4: 冻结 encoder, k∈{1..8}（分 8 步）                   1 epoch
+#   P1: k=8（8 个视觉 token 一次全给）                      2 epoch
+#   P2: k∈{4,8}（分 2 步读出）                              1 epoch
+#   P3: k∈{2,4,6,8}（分 4 步）                              1 epoch
+#   P4: k∈{1..8}（分 8 步）                                 1 epoch
 #   P5: 解冻 encoder, k∈{1..8}（分 8 步）                   2 epoch
 # 合计 7 epoch = 26,621 步（448²/p32、8 token、Qwen3.5-4B、ZeRO-2，~8.9 s/step ≈ 65h）。
 # LR（用户确认「大胆点」）：LM 3e-5 / proj 3e-4 / encoder 1e-5（cosine + 3% warmup）。
@@ -18,7 +18,6 @@
 #
 # 产物: /root/autodl-tmp/vlm8b/output/cur/P{1..5}/{final,VLM8B_DONE}
 #       每阶段日志 logs/cur_P{N}.log；总标记 output/cur/CURRICULUM_DONE；失败写 FAILED_P{N}
-# 依赖: train.py 必须是含 E1 冻结修复的版本（feat/vlm8b-v1 @ 0340f40 起）
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -35,10 +34,6 @@ mkdir -p logs "$OUT"
 # ── 前置检查（DRY 时跳过，便于本地/在线演练）───────────────────────────────
 free_gb=999
 if [ "${DRY:-0}" != "1" ]; then
-    if ! grep -q "freeze_encoder_epochs=args.freeze_encoder_epochs" train.py 2>/dev/null; then
-        echo "[cur] ERROR: train.py 缺少 E1 冻结修复（需 feat/vlm8b-v1 @0340f40）；中止" >&2
-        exit 2
-    fi
     if pgrep -f "torch.distributed.run.*train.py" >/dev/null; then
         echo "[cur] ERROR: 已有训练进程在跑，先停掉（pkill -f torch.distributed.run）再启动课程" >&2
         pgrep -af "torch.distributed.run" >&2
@@ -55,8 +50,7 @@ fi
 NAMES=(P1 P2 P3 P4 P5)
 BUDGETS=( "8" "4,8" "2,4,6,8" "1,2,3,4,5,6,7,8" "1,2,3,4,5,6,7,8" )
 EPOCHS=( 2 1 1 1 2 )
-FREEZE=( 2 1 1 1 0 )
-DESC=( "k=8 一次全给" "k={4,8} 分2步" "k={2,4,6,8} 分4步" "k=1..8 分8步" "k=1..8 分8步+解冻encoder" )
+DESC=( "k=8 一次全给" "k={4,8} 分2步" "k={2,4,6,8} 分4步" "k=1..8 分8步" "k=1..8 分8步" )
 
 echo "[cur] plan: total_epochs=7 lr=$LR_LLM/$LR_PROJ/$LR_ENC out=$OUT free=${free_gb}G $(date -Is)"
 
@@ -82,11 +76,11 @@ for idx in "${!NAMES[@]}"; do
     init_args=(); [ -n "$prev" ] && init_args=(--init-from "$prev")
 
     cmd=( $PY -u -m torch.distributed.run --nproc_per_node=2 --master_port "$PORT"
-          train.py --freeze-encoder-epochs "${FREEZE[$idx]}" --epochs "${EPOCHS[$idx]}"
+          train.py --epochs "${EPOCHS[$idx]}"
           --budget-set "${BUDGETS[$idx]}" "${init_args[@]}"
           --lr-llm "$LR_LLM" --lr-proj "$LR_PROJ" --lr-encoder "$LR_ENC"
           --output-dir "$dir" --save-total-limit 1 --train-jsonl "$TRAIN_JSONL" )
-    echo "[cur] ===== $name start $(date -Is) budgets=${BUDGETS[$idx]} epochs=${EPOCHS[$idx]} freeze=${FREEZE[$idx]} init=${prev:-none} (${DESC[$idx]})"
+    echo "[cur] ===== $name start $(date -Is) budgets=${BUDGETS[$idx]} epochs=${EPOCHS[$idx]} init=${prev:-none} (${DESC[$idx]})"
     if [ "$DRY" = "1" ]; then printf '[cur] DRY: %q ' "${cmd[@]}"; echo; prev="$dir/final"; continue; fi
 
     "${cmd[@]}" > "$log" 2>&1 &

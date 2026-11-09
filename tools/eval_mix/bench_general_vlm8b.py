@@ -126,38 +126,27 @@ def run_batch(tokenizer, lm, questions, max_new_tokens: int = 64,
     return outs
 
 
-@torch.no_grad()
-def run_with_visual_prefix(model, tokenizer, questions, max_new_tokens: int = 64):
-    """按训练同格式（8 个 visual token 前缀 + 文本）跑；用空白图 ⇒ 视觉不提供信息。"""
-    from PIL import Image
-    from data import build_image_transform
-
-    transform = build_image_transform(train=False)
-    blank = Image.new("RGB", (448, 448), (255, 255, 255))
-    pixels = transform(blank).unsqueeze(0).to(next(model.parameters()).device)
-    encoder_dtype = next(model.encoder.parameters()).dtype
-    vis = model.projector(model.encoder(pixels.to(dtype=encoder_dtype)).to(
-        model.projector.token_proj.weight.dtype))                       # (1,8,H)
-    outs = []
-    for q in questions:
-        prompt = build_prompt(tokenizer, q)
-        ids = tokenizer(prompt, return_tensors="pt").input_ids.to(vis.device)
-        text_embeds = model.lm.get_input_embeddings()(ids).to(vis.dtype)
-        embeds = torch.cat([vis, text_embeds], dim=1)
-        mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=embeds.device)
-        generated = model.lm.generate(
-            inputs_embeds=embeds, attention_mask=mask, max_new_tokens=max_new_tokens,
-            do_sample=False, pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id)
-        outs.append(tokenizer.decode(generated[0], skip_special_tokens=True).strip())
-    return outs
+def _answer_ok(pred: str, ans: str) -> bool:
+    """答案匹配（输入均已 _norm）：相等优先；单字答案要求整句相等（防 '水' 命中 '水杯'）；
+    多字中文允许出现在长句里（'中国' 命中 '中国和尼泊尔'）；数字/英文按词边界（防 8←89、12←312）。"""
+    if not ans:
+        return False
+    if pred == ans:
+        return True
+    if len(ans) == 1:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", ans):
+        return ans in pred
+    return re.search(rf"(?<![0-9a-zA-Z]){re.escape(ans)}(?![0-9a-zA-Z])", pred) is not None
 
 
 def score(outs, bank):
     cats = {}
     details = []
     for out, (cat, q, ans) in zip(outs, bank):
-        ok = _norm(ans) in _norm(out)
+        pred = re.sub(r"^(?:the answer is|answer|答案是)\s*[:：]?\s*", "",
+                      str(out).strip(), flags=re.IGNORECASE)
+        ok = _answer_ok(_norm(pred), _norm(ans))
         cats.setdefault(cat, [0, 0])
         cats[cat][0] += int(ok)
         cats[cat][1] += 1
@@ -201,12 +190,9 @@ def main():
         from eval import load_trained_model
         config = VLM8BudgetConfig.from_pretrained(args.checkpoint)
         model = load_trained_model(args.checkpoint, config)
-        outs = run_batch(tokenizer, model.lm, questions, enable_thinking=None)
+        outs = run_batch(tokenizer, model.lm, questions, enable_thinking=False)
         cats, details = score(outs, bank)
         results["ours_text"] = {"by_category": cats, "details": details}
-        outs = run_with_visual_prefix(model, tokenizer, questions)
-        cats, details = score(outs, bank)
-        results["ours_vis8"] = {"by_category": cats, "details": details}
         del model
         torch.cuda.empty_cache()
 

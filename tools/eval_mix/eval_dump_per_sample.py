@@ -9,7 +9,7 @@ vlm8b 逐样本筛查 — 每行 × 每预算 CE（多视觉消融）+ 少量 gr
 消融模式（便宜，一次前向算完所有 k）：
 
   · normal   原始 vis
-  · null     vis 置零（等价没有图）
+  · null     vis 置零（token 数不变，不等于无图）
   · shuffle  batch 内错位（看错图）
   · mean     8 个 token 取均值后广播（测「一个 token 是否已含全部信息」）
   · repeat   只用第 1 个 token 复制 8 份（测冗余）
@@ -36,7 +36,7 @@ from torch.utils.data import DataLoader, Subset
 from data import (EightBudgetCollator, SelfDistillSFTDataset,
                   build_image_transform, gt_name)
 from model import VLM8Budget, VLM8BudgetConfig, expand_budget_rows
-from eval import extract_answer, load_trained_model, _norm
+from eval import extract_answer, load_trained_model, prompt_lens, _norm
 
 IGNORE_INDEX = -100
 
@@ -243,6 +243,7 @@ def main() -> None:
             ids = batch["input_ids"].to(device)
             mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+            has_image = batch["has_image"].to(device)
             enc_dtype = next(model.encoder.parameters()).dtype
             z_s = model.encoder(pixel.to(dtype=enc_dtype))
             vis = model.projector(z_s.to(model.projector.token_proj.weight.dtype))
@@ -250,7 +251,8 @@ def main() -> None:
             ce_by_mode: Dict[str, torch.Tensor] = {}
             for mode in modes:
                 rows = expand_budget_rows(
-                    apply_mode(vis, mode), text_embeds.to(vis.dtype), mask, labels, budgets)
+                    apply_mode(vis, mode), text_embeds.to(vis.dtype), mask, labels, budgets,
+                    has_image=has_image)
                 out = model.forward_rows(rows)
                 ce_by_mode[mode] = out["per_budget_ce_per_sample"].float().cpu()  # (B,V)
 
@@ -266,10 +268,10 @@ def main() -> None:
                     for b in range(pixel.size(0)):
                         # ⚠️ 只喂 prompt（到 answer 之前）：喂全文的话模型会看到答案，
                         # 之后继续生成的内容与答案无关（实测大量空串，acc 被严重低估）。
-                        n_prompt = int(mask[b].sum()) - int(
-                            (labels[b] != IGNORE_INDEX).sum())
+                        n_prompt = int(prompt_lens(labels[b:b + 1])[0])
+                        k_eff = k if bool(has_image[b]) else 0
                         embeds = torch.cat(
-                            [vis[b, :k], text_embeds[b, :n_prompt]], dim=0).unsqueeze(0)
+                            [vis[b, :k_eff], text_embeds[b, :n_prompt]], dim=0).unsqueeze(0)
                         row_mask = torch.ones(embeds.shape[:2], dtype=torch.long,
                                               device=embeds.device)
                         gen = lm.generate(inputs_embeds=embeds, attention_mask=row_mask,

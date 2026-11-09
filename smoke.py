@@ -172,8 +172,61 @@ def check_pad(checker: Checker, model: VLM8Budget, batch: dict) -> None:
     checker.close("pad isolation: pad embedding change → all row CE unchanged",
                   model.forward_rows(rows)["row_ce"], base, CLEAN_TOL)
 
+# ═══════════════════════════════════════════════════════════════
+# ⑤ 文本任务零视觉 token   ⑥ prompt 生成边界   ⑦ 静态防回退
+# ═══════════════════════════════════════════════════════════════
+
+def check_text_rows(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """has_image=False ⇒ 该样本 8 个预算行都取 0 个视觉 token。"""
+    z_s = torch.randn(BATCH, NUM_SPECIALS, ENC_DIM,
+                      generator=torch.Generator().manual_seed(3))
+    rows = expand_budget_rows(
+        model.projector(z_s), model.lm.get_input_embeddings()(batch["input_ids"]),
+        batch["attention_mask"], batch["labels"], range(1, 9),
+        has_image=torch.tensor([True, False]))
+    out = model.forward_rows(rows)
+    text_pos = rows.ans_pos[BATCH * 8 - 8:]                  # 文本样本的 8 行
+    checker.check("text row: 8 个预算的 ans_pos 相同（零视觉 token）",
+                  bool((text_pos == text_pos[0]).all()), str(text_pos[0].tolist()))
+    expected = int((batch["labels"][1] != IGNORE_INDEX).to(torch.int8).argmax())
+    checker.check("text row: ans_pos[0] == label_pos-1",
+                  bool(text_pos[0][0] == expected - 1), str(text_pos[0].tolist()))
+    ps = out["per_budget_ce_per_sample"][1]
+    checker.close("text row: 8 个预算的 CE 完全一致", ps, ps[0:1].expand_as(ps), 1e-6)
+    ps_img = out["per_budget_ce_per_sample"][0]
+    checker.check("image row: k=1 与 k=8 的 CE 不同",
+                  abs(float(ps_img[0] - ps_img[-1])) > 1e-6,
+                  f"Δ={float(ps_img[0] - ps_img[-1]):.2e}")
+
+
+def check_prompt_lens(checker: Checker) -> None:
+    """eval.prompt_lens：answer 首 token 位置 = prompt 长度；全 -100 必须报错。"""
+    import eval as E
+    labels = torch.full((2, 10), IGNORE_INDEX, dtype=torch.long)
+    labels[0, 3:] = torch.arange(7)
+    labels[1, 1:4] = torch.tensor([5, 6, 7])
+    checker.check("prompt_lens = 首个非 -100 位置",
+                  E.prompt_lens(labels).tolist() == [3, 1],
+                  str(E.prompt_lens(labels).tolist()))
+    try:
+        E.prompt_lens(torch.full((1, 5), IGNORE_INDEX, dtype=torch.long))
+        checker.check("prompt_lens: 无 answer 时 AssertionError", False)
+    except AssertionError:
+        checker.check("prompt_lens: 无 answer 时 AssertionError", True)
+
+
+def check_static(checker: Checker) -> None:
+    """A/B 两处入口删除后不得再出现（防回退）。"""
+    import pathlib
+    checker.check("model 不再有 generate_budget",
+                  not hasattr(VLM8Budget, "generate_budget"))
+    source = pathlib.Path(__file__).with_name("eval.py").read_text(encoding="utf-8")
+    checker.check("eval.py 无 --gen-protocol", "--gen-protocol" not in source)
+    checker.check("eval.py 产物写 gen_protocol", '"gen_protocol"' in source)
+
+
 def main() -> int:
-    """跑四项检查，返回 0/1。"""
+    """跑七项检查，返回 0/1。"""
     print(f"vlm8b smoke: CPU tensor logic  torch={torch.__version__}")
     model = VLM8Budget(VLM8BudgetConfig(encoder_ckpt="", qwen_dir=""),
                        encoder=_FakeEncoder(), lm=_TinyLM()).eval()
@@ -183,6 +236,9 @@ def main() -> int:
         check_shift(checker, model, batch)
         check_isolation(checker, model, batch)
         check_pad(checker, model, batch)
+        check_text_rows(checker, model, batch)
+    check_prompt_lens(checker)
+    check_static(checker)
     return checker.summary()
 
 if __name__ == "__main__":

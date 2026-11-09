@@ -2,8 +2,8 @@
 vlm8b 训练入口 — HF Trainer + DeepSpeed ZeRO-3
 ==============================================
 
-协议（设计 §5）: E1 encoder 冻结（requires_grad=False / eval），只训 LLM + projector；
-E2–E3 全解冻（encoder 5e-6 / LLM 1e-5 / proj 1e-4），cosine + warmup 3%。
+协议（设计 §5）: 全量微调 3 epoch（encoder 不冻结；encoder 5e-6 / LLM 1e-5 /
+proj 1e-4），cosine + warmup 3%。
 每步 B 张图 × V 行（k=1..8），行 k = `[vis[:, :k]; text]`，loss = Σ_k w_k·CE_k。
 
 **Trainer 内不做 eval**：`forward` 不返回 logits，`prediction_step` 无法工作 ⇒
@@ -79,9 +79,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wd-llm", type=float, default=WD_LLM)
     p.add_argument("--wd-other", type=float, default=WD_OTHER)
     p.add_argument("--warmup-ratio", type=float, default=WARMUP_RATIO)
-    p.add_argument("--freeze-encoder-epochs", type=int, default=1,
-                   help="前 N 个 epoch 冻结 encoder（E1=1；0=全程解冻）。"
-                        "冻结在 DeepSpeed engine 初始化之后生效，E(N+1) 起自动解冻")
     p.add_argument("--budget-set", default=DEFAULT_BUDGET_SET,
                    help="预算集合，逗号分隔，如 1,2,4,8")
     p.add_argument("--loss-weighting", default="equal", choices=["equal", "inv-k"])
@@ -128,23 +125,7 @@ def load_init_weights(model: VLM8Budget, checkpoint: str) -> None:
 
 def build_param_groups(model: VLM8Budget, lr_llm: float, lr_proj: float,
                        lr_encoder: float, wd_llm: float, wd_other: float) -> list:
-    """三组参数（LLM / projector / encoder）各自 lr + wd；bias/LayerNorm 不衰减。
-
-    ⚠️ 冻结协议（DeepSpeed 生命周期；改这里前先读）：
-    - 这 6 个组在 **engine 初始化时** 必须全部是 `requires_grad=True`。DeepSpeed
-      0.19.9 在 engine init 时用 `is_optimized_parameter()`
-      （`deepspeed/runtime/utils.py:822`，判定 = `requires_grad and numel > 0`）把冻结
-      参数从 ZeRO 分区里剔除，于是：
-        · stage 1/2：整组被剔空后 `stage_1_and_2.py:442` 仍按 `bit16_groups[i][0]`
-          取 dtype → `IndexError: list index out of range`（vlm8b 首跑就死在这）；
-        · stage 3：不报错，但该组永远不进 DS 优化器 ⇒ E2 解冻后**静默不更新**。
-    - 所以真正的 E1 冻结只能发生在 **engine 建好之后**（`EncoderFreezeCallback.
-      on_train_begin` 里 `requires_grad=False`）：参数仍留在 ZeRO 分区中，E1 没有
-      梯度 ⇒ AdamW 对 grad=None 的参数整步跳过 ⇒ 权重逐元素不变；E2 解冻后梯度
-      出现 ⇒ 正常更新。
-    - **绝对不要**在 `VLM8BudgetTrainer(...)` / `trainer.train()` 之前调用
-      `encoder.freeze()`（旧版代码就是这么写的，已删除；callback 里有防御断言）。
-    """
+    """三组参数（LLM / projector / encoder）各自 lr + wd；bias/LayerNorm 不衰减。"""
     groups = []
     for module, lr, wd in ((model.lm, lr_llm, wd_llm),
                            (model.projector, lr_proj, wd_other),
@@ -162,18 +143,10 @@ def build_param_groups(model: VLM8Budget, lr_llm: float, lr_proj: float,
 # ═══════════════════════════════════════════════════════════════
 
 class VLM8BudgetTrainer(Trainer):
-    """用 init 时建好的 param groups 构造 AdamW（β=0.9/0.95, eps=1e-8）。
+    """用 init 时建好的 param groups 构造 AdamW（β=0.9/0.95, eps=1e-8）。"""
 
-    `freeze_encoder_epochs` 由 `main()` 传入，**只**用于 `train()` 在进入 DeepSpeed
-    engine 初始化之前做冻结时机检查（见 `train()`）；实际冻结/解冻仍由
-    `EncoderFreezeCallback` 在 engine 建好之后执行。
-    """
-
-    freeze_encoder_epochs = 0
-
-    def __init__(self, *args, param_groups=None, freeze_encoder_epochs=0, **kwargs):
+    def __init__(self, *args, param_groups=None, **kwargs):
         self._param_groups = param_groups
-        self.freeze_encoder_epochs = int(freeze_encoder_epochs)
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self):
@@ -181,63 +154,6 @@ class VLM8BudgetTrainer(Trainer):
         if self.optimizer is None:
             self.optimizer = AdamW(self._param_groups, betas=(0.9, 0.95), eps=1e-8)
         return self.optimizer
-
-    def train(self, *args, **kwargs):
-        """进 DeepSpeed engine init 之前 fail-fast：encoder 不能在 Trainer 之前被冻结。
-
-        这是「冻结太早」唯一会出问题的路径，也是最可靠的检查点：此时 `self.model`
-        还不是 DS engine，`requires_grad` 的状态就是 engine 初始化会看到的状态。
-        若 encoder 已被冻结：
-          · stage 1/2：DS 会把整组从 ZeRO 分区剔除后在 `stage_1_and_2.py:442` 崩
-            `IndexError`（报错完全指不到根因）；
-          · stage 3：不崩，但 E2 解冻后 encoder **静默永不更新**。
-        这里提前抛出可执行的错误信息，把两类问题都变成显式、可诊断的失败。
-        （注意：不能依赖 callback 的 `optimizer` kwargs —— transformers 5.22.1 的
-        `CallbackHandler` 不会给它赋值（`trainer.py` 里从未设置
-        `callback_handler.optimizer`），所以 callback 里的检查会是死代码。）
-        """
-        if self.freeze_encoder_epochs > 0:
-            frozen = [name for name, param in self.model.encoder.named_parameters()
-                      if not param.requires_grad]
-            if frozen:
-                raise RuntimeError(
-                    "encoder 在 Trainer 创建前就被冻结了（%d 个参数，如 %s）。"
-                    "DeepSpeed 只在 engine 初始化时收集未被冻结的参数："
-                    "stage1/2 会在 stage_1_and_2.py:442 报 IndexError，stage3 则 E2 "
-                    "解冻后静默不更新。请删掉 Trainer 创建前的 `encoder.freeze()`，"
-                    "改由 `EncoderFreezeCallback.on_train_begin`（engine 建好之后）"
-                    "执行 E1 冻结。"
-                    % (len(frozen), frozen[:3]))
-        return super().train(*args, **kwargs)
-
-
-class EncoderFreezeCallback(TrainerCallback):
-    """E1 冻结 / E2–E3 解冻 encoder（状态真的切换时才打日志）。
-
-    ⚠️ 只允许在 `on_train_begin`（= DeepSpeed engine 已建好）之后切换冻结状态：
-    `on_train_begin` 由 Trainer 在 `_prepare_for_training()`（engine 初始化）之后调用。
-    若在 engine init 前就 `requires_grad=False`，DeepSpeed 会把该组从 ZeRO 分区里
-    剔除：stage1/2 初始化直接 `IndexError`，stage3 则 E2 解冻后永远不更新
-    （详见 `build_param_groups` 注释；`VLM8BudgetTrainer.train()` 有前置 guard）。
-    """
-
-    def __init__(self, encoder, freeze_epochs: int):
-        self.encoder = encoder
-        self.freeze_epochs = int(freeze_epochs)
-        self._frozen = None
-
-    def _apply(self, freeze: bool) -> None:
-        if self._frozen is freeze:
-            return
-        (self.encoder.freeze if freeze else self.encoder.unfreeze)()
-        self._frozen = freeze
-        print(f"[vlm8b] encoder {'FROZEN (E1)' if freeze else 'TRAINABLE (E2+)'}")
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self._apply(self.freeze_epochs > 0)
-
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        self._apply(int(state.epoch or 0) < self.freeze_epochs)
 
 
 class BudgetCELogCallback(TrainerCallback):
@@ -266,7 +182,7 @@ class BudgetCELogCallback(TrainerCallback):
 # ═══════════════════════════════════════════════════════════════
 
 def main() -> None:
-    """构建模型/数据/Trainer，跑 E1–E3 并保存最终 HF 权重。"""
+    """构建模型/数据/Trainer，跑 3 epoch 并保存最终 HF 权重。"""
     args = parse_args()
     if args.smoke:
         print("[vlm8b] smoke mode: max_steps=2, save_strategy=no")
@@ -282,6 +198,8 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = SelfDistillSFTDataset(
         args.train_jsonl, tokenizer, args.image_root, build_image_transform(train=True))
+    print(f"[vlm8b] dataset={len(train_dataset)} "
+          f"no_image={sum(1 for r in train_dataset.records if not r['has_image'])}")
 
     # transformers 5.x 的 TrainingArguments 没有 warmup_ratio（只有 warmup_steps），
     # 这里按 数据集/等效批 估总步数后换算；smoke 不设 warmup。
@@ -301,11 +219,6 @@ def main() -> None:
         grad_ckpt=args.grad_ckpt)
     if args.init_from:
         load_init_weights(model, args.init_from)
-    # ⚠️ 这里**不能** `model.encoder.freeze()`：Trainer/deepspeed engine 在
-    # `train()` 内部才初始化，此刻冻结会让 DeepSpeed 把 encoder 参数从 ZeRO 分区里
-    # 剔除（stage1/2 初始化 IndexError；stage3 则 E2 解冻后静默不更新）。
-    # E1 冻结由 `EncoderFreezeCallback.on_train_begin`（engine 建好之后）完成；
-    # `VLM8BudgetTrainer.train()` 会在 engine init 前对「提前冻结」fail-fast。
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -328,8 +241,8 @@ def main() -> None:
         report_to=[],
         deepspeed=args.deepspeed or None,
         max_steps=2 if args.smoke else -1,
-        seed=SEED,
-        data_seed=SEED,
+        seed=args.seed,
+        data_seed=args.seed,
         ddp_find_unused_parameters=False,
         save_only_model=True,               # 中途不存 optimizer
     )
@@ -342,16 +255,14 @@ def main() -> None:
         param_groups=build_param_groups(
             model, args.lr_llm, args.lr_proj, args.lr_encoder,
             args.wd_llm, args.wd_other),
-        freeze_encoder_epochs=args.freeze_encoder_epochs,
         callbacks=[
-            EncoderFreezeCallback(model.encoder, args.freeze_encoder_epochs),
             BudgetCELogCallback(
                 model, os.path.join(args.output_dir, "per_budget_ce.jsonl")),
         ],
     )
 
     print(f"[vlm8b] budgets={budgets} loss_weighting={args.loss_weighting} "
-          f"epochs={args.epochs} freeze={args.freeze_encoder_epochs} "
+          f"epochs={args.epochs} "
           f"micro={args.micro_batch_size}×{args.grad_accum} "
           f"lr={args.lr_llm:g}/{args.lr_proj:g}/{args.lr_encoder:g}")
 

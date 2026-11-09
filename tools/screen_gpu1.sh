@@ -11,8 +11,7 @@ PY=/root/venv_qwen/bin/python
 echo "[gpu1] start $(date -Is)"
 $PY -u eval.py --checkpoint $CK --jsonl $I --image-root $IR \
   --limit 250 --sample-seed 42 --budgets 1,2,3,4,5,6,7,8 --visual-mode normal \
-  --output-dir /root/autodl-tmp/vlm8b/output/eval_run3_in100_fix \
-  --gen-protocol prompt
+  --output-dir /root/autodl-tmp/vlm8b/output/eval_run3_in100_fix
 echo "[gpu1] in100 fix rc=$? $(date -Is)"
 $PY -u eval_dump_per_sample.py --checkpoint $CK --jsonl $I --image-root $IR \
   --random-n 400 --seed 42 --gen-k 1,8 --out logs/screen_in100.jsonl
