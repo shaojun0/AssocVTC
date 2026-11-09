@@ -53,6 +53,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-seed", type=int, default=42,
                    help="--limit>0 时随机抽样的种子（避免按类排序的子集偏置）")
     p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    p.add_argument("--gen-protocol", default="prompt", choices=["prompt", "full"],
+                   help="greedy 生成喂什么：prompt=只喂到 answer 之前（正确）；"
+                        "full=连 answer 一起喂（历史协议，会大量出空串、acc 被低估）")
     p.add_argument("--visual-mode", default="normal",
                    choices=["normal", "null", "shuffle"],
                    help="视觉消融：null=vis 置零（等价没有图）/ shuffle=batch 内错位（看错图）")
@@ -98,6 +101,33 @@ def load_trained_model(checkpoint: str, config: VLM8BudgetConfig) -> VLM8Budget:
     return model.to(device=device, dtype=torch.bfloat16).eval()
 
 
+
+@torch.no_grad()
+def generate_prompt_only(model, pixel_values, input_ids, prompt_lens, budgets,
+                         visual_mode: str):
+    """只喂 prompt 的 greedy 生成（正确协议）：`[vis[:k]; prompt]`，逐行解码。"""
+    from model import apply_visual_mode
+    encoder_dtype = next(model.encoder.parameters()).dtype
+    vis = apply_visual_mode(model.projector(model.encoder(
+        pixel_values.to(dtype=encoder_dtype)).to(
+            model.projector.token_proj.weight.dtype)), visual_mode)
+    text_embeds = model.lm.get_input_embeddings()(input_ids).to(vis.dtype)
+    results = {}
+    for k in budgets:
+        results[k] = []
+        for b in range(pixel_values.size(0)):
+            n = int(prompt_lens[b])
+            embeds = torch.cat([vis[b, :k], text_embeds[b, :n]], dim=0).unsqueeze(0)
+            mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=embeds.device)
+            generated = model.lm.generate(
+                inputs_embeds=embeds, attention_mask=mask,
+                max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
+                pad_token_id=model.config.pad_token_id,
+                eos_token_id=model.config.eos_token_id)
+            results[k].append(generated[0].tolist())
+    return results
+
+
 # ═══════════════════════════════════════════════════════════════
 # 评测主循环 / 输出
 # ═══════════════════════════════════════════════════════════════
@@ -133,10 +163,17 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
         inputs = {key: batch[key].to(device) for key in
                   ("pixel_values", "input_ids", "attention_mask", "labels")}
         outputs = model(budget_ids=budgets, visual_mode=args.visual_mode, **inputs)
-        generated = model.generate_budget(
-            inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
-            budget_ids=budgets, max_new_tokens=MAX_NEW_TOKENS,
-            visual_mode=args.visual_mode)
+        if args.gen_protocol == "prompt":
+            prompt_lens = inputs["attention_mask"].sum(dim=1) - (
+                inputs["labels"] != -100).sum(dim=1)
+            generated = generate_prompt_only(
+                model, inputs["pixel_values"], inputs["input_ids"], prompt_lens,
+                budgets, args.visual_mode)
+        else:
+            generated = model.generate_budget(
+                inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
+                budget_ids=budgets, max_new_tokens=MAX_NEW_TOKENS,
+                visual_mode=args.visual_mode)
         per_sample = outputs["per_budget_ce_per_sample"].float().cpu()
         for i in range(inputs["pixel_values"].size(0)):
             gt_name = str(batch["gt_name"][i]).strip()

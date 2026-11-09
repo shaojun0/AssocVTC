@@ -1,8 +1,10 @@
 # vlm8b — AssocVTC 448²/p32 阶段2编码器 → 8 预算并行 → Qwen3.5-4B 全参微调
 
-> **状态（2026-11-05）：仅本机逻辑自检通过** —— `python3 smoke.py` 在
-> torch 2.8 CPU 上 **7 项 PASS / 0 FAIL**（含 shift 等价，tol 1e-5）。**尚未在 GPU /
-> Qwen3.5-4B / ZeRO-3 上跑过**（本机无 transformers 5.22、无 4B 权重）；首次真机请先 `--smoke`。
+> **状态（2026-11-09）：run1 / run2 / run3 已在 2×A800 上跑完**（run3 = 3.0 epoch /
+> 11,463 步 / `mix_train_bal2.jsonl` 122,259 行，见 §7）。本分支现在包含
+> **核心训练/评测代码（root）** + **`tools/`（评测、逐样本筛查、造数、启动与运维脚本，非训练必需）**；
+> 文档/报告在主线 `main`，例如
+> [`doc/2026-11-09/REPORT_budget_screen.md`](https://github.com/shaojun0/AssocVTC/blob/main/doc/2026-11-09/REPORT_budget_screen.md)。
 
 把 AssocVTC 阶段2 的 `z_s (32×1744)` 投成 **8 个 2560 维 visual token**；同一张图一次
 前向展开 **8 行**（行 k 只用前 k 个 token）去预测同一段文本，8 行 CE 取（加权）平均。
@@ -119,9 +121,9 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
-本分支就是一个独立最小项目：只有上面这 9 个文件（`model.py` / `encoder.py` / `data.py` /
-`train.py` / `eval.py` / `smoke.py` / `ds_zero3.json` / `requirements.txt` / `README.md`），
-不含 `doc/`、`tools/` 与历史实验脚本；复制整个目录即可在 remote 跑。
+最小可跑集合是 root 下的 9 个文件（`model.py` / `encoder.py` / `data.py` / `train.py` /
+`eval.py` / `smoke.py` / `ds_zero3.json` / `requirements.txt` / `README.md`）；复制这些即可在
+remote 跑训练。`tools/` 是后来补的**非训练必需**脚本（见 §7.2），单独复制即可单独跑。
 
 ### 6. review 要点 / 已知限制
 
@@ -138,3 +140,46 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
   —— 全部依赖 remote（transformers 5.22.1）；本机只保证 import / CLI / 张量逻辑。
 - **评测权重**：`eval.py` 只读 safetensors 分片索引（Trainer 默认 `save_safetensors=True`）。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。
+
+## 7. run1–run3 实测记录（2026-11-09）
+
+### 7.1 三次续训
+
+| run | 起点 | 训练集 | steps / epoch | 结果要点 |
+|---|---|---|---|---|
+| run1 | 阶段2 encoder + Qwen3.5-4B | ImageNet-100 自蒸馏 66k 左右 | — | in100 val k8 12.0% |
+| run2 | run1/final | 同 run1（续训 2 epoch） | — | in100 val k8 28.8%（旧协议）；loss 平台期回升（续训 LR 重新 warmup 到 1e-5），后自行收敛 |
+| run3 | run2/final | `mix_train_bal2.jsonl` 122,259（文本 82k + 图像 40.3k，in100 锚定 3k） | 3,821 / 11,463（3.0ep） | in100 val k8 **32.4%**（修正协议；旧协议 22.8%）；mix_heldout 分源见 main 的报告 |
+
+三次都用了 **8 预算并行**（`k=1..8` 同一张图同一段文本，answer-only CE）与 ZeRO-2/3。
+
+### 7.2 `tools/` 布局
+
+| 文件 | 作用 |
+|---|---|
+| `tools/eval_mix/build_img_eval_mix.py`、`prepare_mix.py`、`rebalance_mix.py`、`rebuild_mix2.py`、`expand_*.py`、`preflight_mix.py` | 评测对齐混合集的造数/合并/重采样/预检（`build_img_eval_mix` 需要数据集，`preflight` 纯 CPU） |
+| `tools/eval_mix/eval_mix_breakdown.py`、`bench_general_vlm8b.py`、`make_report.py` | 分任务表、通用文本能力 bench、结果拼报告 |
+| `tools/eval_mix/eval_dump_per_sample.py` | **逐样本筛查**：每行 × 每档 k 的 CE（normal/null/shuffle/mean/repeat/pad1）+ k∈{1,8} greedy + 视觉 token 冗余度 |
+| `tools/eval_mix/analyze_screen.py` | 读逐行 dump → 分源表、k 曲线、四象限、分箱、Spearman（纯 CPU，无需 GPU） |
+| `tools/eval_mix/vis_probe.py` | 表征离散度 + full-attention 层「文本 query→视觉 token」注意力份额 |
+| `tools/run_eval_mix.sh`、`run_main_vlm8b.sh`、`run_curriculum_vlm8b.sh`、`run_cont2.sh`、`run_cont3.sh`、`restart_lr.sh` | 训练启动/续训 |
+| `tools/eval_after_run2.sh`、`eval_after_run3.sh`、`stop_after_epoch3.sh`、`screen_gpu0.sh`、`screen_gpu1.sh` | 自动评测链、按时收尾、筛查任务 |
+
+小显存机器上做**代码测试**的最小路径：`python smoke.py`（纯 CPU，张量逻辑）+ `python eval.py
+--checkpoint <小模型/假权重> --limit 8`；`eval_dump_per_sample.py` / `vis_probe.py` 需要真 GPU 与 4B 权重。
+
+### 7.3 评测协议修复（P0，`eval.py`）
+
+**旧实现（bug）**：`generate_budget()` 把 `input_ids`（含 answer）整段拼进 `inputs_embeds` 后调用
+`generate`，模型看到答案后继续生成 ⇒ 大量空串，exact-match acc 被严重低估（300 行：22.3% vs 修正后 49.3%）。
+**修正**：只喂到 answer 之前（`prompt_len = attention_mask.sum() − (labels != -100).sum()`），
+新增 `--gen-protocol {prompt,full}`，**默认 `prompt`**；`full` 仅用于复现旧数字。
+CE（teacher forcing）不受影响。
+
+### 7.4 预算机制筛查结论（代码侧要点）
+
+- `tools/eval_mix/eval_dump_per_sample.py` 的 5 种视觉消融可直接判定「token 是否冗余」：
+  `mean`（8 token 取均值）/ `repeat`（第 1 个 token 复制 8 份）与 `normal` 的 CE 差 ≈0 ⇒ 冗余。
+- 结论：预算收益只在「图真被用上」的行成立，且 k 不增加信息（8 个 visual token = 32 个 z token）；
+  细节任务（OCR/图表/文档）需要**编码器侧**扩容而不是加 k。详见 main 的
+  `doc/2026-11-09/REPORT_budget_screen.md`。

@@ -24,6 +24,7 @@ import statistics
 from typing import List, Optional, Tuple
 
 CE_KEY = "per_budget_ce"
+LOSS_KEY = "loss"
 
 
 def load_rows(path: str) -> List[dict]:
@@ -54,6 +55,16 @@ def window_mean(rows: List[dict], lo: float, hi: float) -> Optional[float]:
     return sum(values) / len(values) if values else None
 
 
+def loss_of(row: dict) -> Optional[float]:
+    value = row.get(LOSS_KEY)
+    return float(value) if value is not None else None
+
+
+def loss_window(rows: List[dict], lo: float, hi: float) -> Optional[float]:
+    values = [loss_of(r) for r in rows if lo <= r["step"] < hi and loss_of(r) is not None]
+    return sum(values) / len(values) if values else None
+
+
 def slope_per_100(rows: List[dict], lo: float) -> Optional[float]:
     """窗口内 CE 对 step 的最小二乘斜率（每 100 步）。"""
     pts = [(r["step"], ce_of(r)) for r in rows if r["step"] >= lo and ce_of(r) is not None]
@@ -81,6 +92,8 @@ def main() -> int:
     parser.add_argument("--min-steps", type=float, default=1200, help="至少跑多少步才判平台")
     parser.add_argument("--rel-tol", type=float, default=0.02)
     parser.add_argument("--abs-tol", type=float, default=0.010)
+    parser.add_argument("--abs-tol-loss", type=float, default=0.10,
+                        help="loss 判平台的绝对阈值（loss 尺度 ~7）")
     parser.add_argument("--gn-mult", type=float, default=3.0)
     args = parser.parse_args()
 
@@ -143,11 +156,27 @@ def main() -> int:
               f"Δ={last - prev:+.4f} ({(last - prev) / prev * 100:+.2f}%)")
         print(f"[monitor] 斜率(最后窗口)={s:+.5f}/100步  early={early:.4f}  "
               f"grad_norm last={gn_last:.1f} early={gn_ref:.1f}")
-        if gn_last is not None and gn_ref:  # 先说发散，避免把发散当平台
-            if last > prev * (1 + args.rel_tol) or gn_last > args.gn_mult * max(gn_ref, 1e-6):
+        loss_last = loss_window(rows, last_lo, step + 1)
+        loss_prev = loss_window(rows, prev_lo, last_lo)
+        if loss_last is not None and loss_prev:
+            loss_rel = (loss_last - loss_prev) / loss_prev
+            print(f"[monitor] loss窗口均值(主判据): prev={loss_prev:.3f} last={loss_last:.3f} "
+                  f"Δ={loss_last - loss_prev:+.3f} ({loss_rel * 100:+.2f}%)")
+            if loss_rel > args.rel_tol or (gn_last is not None and gn_ref and
+                                           gn_last > args.gn_mult * max(gn_ref, 1e-6)):
                 verdict, exit_code = "DIVERGING", 2
-        if verdict == "INSUFFICIENT":
-            if (last - prev) > -max(args.abs_tol, prev * args.rel_tol):
+            elif loss_rel > -max(args.abs_tol_loss / max(loss_prev, 1e-9), args.rel_tol) and \
+                    (loss_last - loss_prev) > -args.abs_tol_loss:
+                verdict, exit_code = "PLATEAU", 1
+            else:
+                verdict = "IMPROVING"
+        else:  # 没有 loss 字段时退回 CE 判据
+            print("[monitor] 无 loss 字段，退回 CE 判据（噪声大，慎用）")
+            if gn_last is not None and gn_ref and (
+                    last > prev * (1 + args.rel_tol) or
+                    gn_last > args.gn_mult * max(gn_ref, 1e-6)):
+                verdict, exit_code = "DIVERGING", 2
+            elif (last - prev) > -max(args.abs_tol, prev * args.rel_tol):
                 verdict, exit_code = "PLATEAU", 1
             else:
                 verdict = "IMPROVING"
