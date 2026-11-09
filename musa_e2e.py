@@ -1,4 +1,4 @@
-"""
+﻿"""
 MUSA 端到端：真实 Trainer + DeepSpeed + 本仓冻结代码（2×MTT S4000）
 =================================================================
 
@@ -21,14 +21,16 @@ MUSA 端到端：真实 Trainer + DeepSpeed + 本仓冻结代码（2×MTT S4000�
     torchrun --nproc_per_node=2 musa_e2e.py --stage 3
 """
 import argparse
+import glob
 import json
 import os
+import shutil
 import sys
-import tempfile
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from safetensors.torch import load_file
 from transformers import Trainer, TrainingArguments, default_data_collator
 
 import musa
@@ -240,8 +242,16 @@ def main() -> int:
 
     ds_json = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            f"ds_zero{a.stage}.json")
-    tmp = tempfile.mkdtemp(prefix="vlm8b_e2e_")
-    ckpt = make_encoder_ckpt(os.path.join(tmp, "enc.pt"))
+    # 产物放 autodl-tmp（50G）；`/` 只有 30G，一个 460MB 的合成 ckpt ×多轮就能写满
+    root = "/root/autodl-tmp/_musa_e2e"
+    os.makedirs(root, exist_ok=True)
+    rank = int(os.environ.get("RANK", "0"))
+    ckpt = os.path.join(root, f"enc_rank{rank}.pt")
+    if not os.path.exists(ckpt):
+        make_encoder_ckpt(ckpt)
+    tmp = os.path.join(root, f"out_rank{rank}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, exist_ok=True)
     res = Result()
     print(f"===== stage={a.stage} ds={ds_json} ckpt={ckpt}", flush=True)
 
@@ -270,6 +280,28 @@ def main() -> int:
     res.check(f"stage{a.stage} A: encoder 全冻 → 与 ckpt 逐位一致", enc == 0.0,
               f"maxΔ={enc:.2e} @{worst_name}")
     res.check(f"stage{a.stage} A: projector 仍在更新", proj > 0.0, f"maxΔ={proj:.2e}")
+
+    # ---- A2: 冻结不影响保存（frozen 参数被剔出 optimizer，但必须仍在 ckpt 里）----
+    save_dir = os.path.join(root, "a_saved")   # 共享目录：save 只在 rank0 落盘
+    if trainer.is_world_process_zero():          # Trainer 只在 world-zero 落盘
+        trainer.save_model(save_dir)
+    import torch.distributed as dist
+    if dist.is_initialized():
+        dist.barrier()
+    saved = {}
+    for shard in sorted(glob.glob(os.path.join(save_dir, "*.safetensors"))):
+        saved.update(load_file(shard))
+    live = dict(model.named_parameters())
+    enc_keys = [k for k in live if k.startswith("encoder.")]
+    present = [k for k in enc_keys if k in saved]
+    res.check(f"stage{a.stage} A2: save_model 仍写出全部 encoder 权重",
+              len(present) == len(enc_keys), f"{len(present)}/{len(enc_keys)} 个张量")
+    worst = max((float((saved[k].float() - live[k].detach().float().cpu()).abs().max())
+                 for k in present), default=-1.0)
+    res.check(f"stage{a.stage} A2: 保存值与引擎内权重逐位一致", worst == 0.0,
+              f"maxΔ={worst:.2e}")
+    res.check(f"stage{a.stage} A2: state_dict 键未被冻结改变",
+              set(saved) >= set(live), f"缺 {len(set(live) - set(saved))} 个")
 
     # ---- B: 静态 last=2 ----
     model, trainer, report, groups = build_trainer(ckpt, os.path.join(tmp, "b"), ds_json,

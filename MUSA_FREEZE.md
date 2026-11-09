@@ -1,4 +1,4 @@
-# encoder 冻结机制 × 国产算力适配（MUSA / MTT S4000）
+﻿# encoder 冻结机制 × 国产算力适配（MUSA / MTT S4000）
 
 > 结论先行，机制在后。全部数据来自 2×MTT S4000（48GB/卡）、driver 5.2.0、
 > torch 2.11.0.post1 + torch_musa 2.11.0.post1、deepspeed 0.19.9、transformers 5.13.0、
@@ -20,7 +20,8 @@ fp64 范数探测、奇数 head_dim 的 SDPA、deepspeed 的 dist-info。详见 
 ```bash
 # 0) 自检（CPU，不加载 Qwen / DeepSpeed）
 python3 smoke.py          # 原张量逻辑，19 项
-python3 test_freeze.py    # 冻结语义，27 项
+python3 test_freeze.py         # 冻结语义，27 项
+python3 test_freeze_compat.py  # 兼容性契约（state_dict/groups/加载/身份），18 项
 
 # 1) 静态冻结：整段 encoder 冻死，只训 proj + LLM
 torchrun --nproc_per_node=2 train.py \
@@ -43,6 +44,23 @@ torchrun --nproc_per_node=2 train.py --freeze-encoder last=2 ...
 逗号（或 `+`）组合。`blocks` 是 `encoder.net.blocks` 的下标，0 最靠输入。
 
 ## 2. 机制：为什么「设 requires_grad=False」远不够
+
+### 2.0 兼容性契约（先看这一节）
+
+冻结被设计成一个**派生状态**：它不新增模块、不新增 buffer、不改 `state_dict`、不改
+默认路径。五条不变量由 `test_freeze_compat.py`（CPU，18 项）+ `musa_e2e.py` 逐条断言：
+
+| 不变量 | 为什么重要 | 怎么保证 / 证据 |
+|---|---|---|
+| **C1 不改 state_dict**：任意冻结规格下参数名/形状完全一致 | 阶段2 ckpt 的 `strict=True` 加载、`save_pretrained`、`--init-from` 都不受影响 | 冻结只动 `requires_grad`；6 种规格键/形状差异 = 0 |
+| **C2 默认路径零改动**：`none` 的 param groups 与旧实现逐组一致（顺序/lr/wd/参数集合） | 不冻结的 run 才能和历史 run 逐位对齐 | 与旧 `build_param_groups` 逐字复刻对照：`new=6 old=6`，逐组一致 |
+| **C3 先冻后载**：已冻结模型仍能 `load_state_dict(strict=True)` | warm start / 续训时「先建模型再灌权重」的顺序很常见 | 冻结后灌入，`max|Δ|=0`，且灌完仍冻结 |
+| **C4 参数身份稳定**：只改 `requires_grad`，不重建 Parameter | 重建会让 optimizer 持有旧引用 → 解冻后静默不更新 | 冻结/解冻前后 `id(p)` 与 `data_ptr()` 均不变 |
+| **C5 冻结不影响保存**（两卡，真 Trainer+ZeRO-2） | 冻结参数被剔出 optimizer，但必须仍在 ckpt 里 | `save_model` 后 43/43 个 encoder 张量齐全、与引擎内**逐位一致**、键无缺失 |
+
+另一条被这次实验抓到的生产问题：`trainer.save_model()` 只在 `args.should_save`
+（world-zero）落盘，其余 rank 若立刻去读/退出会看到半成品。已加
+`accelerator.wait_for_everyone()`（`train.py` 保存后）。
 
 ### 2.1 transformers 侧：三处会咬人
 

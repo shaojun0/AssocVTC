@@ -1,4 +1,4 @@
-# vlm8b — AssocVTC 448²/p32 阶段2编码器 → 8 预算并行 → Qwen3.5-4B 全参微调
+﻿# vlm8b — AssocVTC 448²/p32 阶段2编码器 → 8 预算并行 → Qwen3.5-4B 全参微调
 
 > **状态（2026-11-09）：run1 / run2 / run3 已在 2×A800 上跑完**（run3 = 3.0 epoch /
 > 11,463 步 / `mix_train_bal2.jsonl` 122,259 行，见 §7）。本分支现在包含
@@ -177,6 +177,7 @@ fp64 范数探测降级、奇数 head_dim 的 SDPA 走 math、deepspeed 的 dist
 ```bash
 python3 smoke.py            # 原 19 项张量逻辑
 python3 test_freeze.py      # 冻结语义 27 项（CPU）
+python3 test_freeze_compat.py  # 兼容性契约 18 项（不改 state_dict / 默认路径等价 / 先冻后载）
 torchrun --nproc_per_node=2 musa_e2e.py --stage 2   # 真实 Trainer+DS 7 项
 torchrun --nproc_per_node=2 musa_e2e.py --stage 3   # ZeRO-3 fail-fast 2 项
 ```

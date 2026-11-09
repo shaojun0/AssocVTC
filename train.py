@@ -445,7 +445,9 @@ def main() -> None:
 
     trainer.train()
     final_dir = os.path.join(args.output_dir, "final")
-    trainer.save_model(final_dir)           # ZeRO-3 下由 Trainer gather 后保存
+    trainer.save_model(final_dir)           # 只有 world-zero 真正落盘（args.should_save）
+    if hasattr(trainer, "accelerator"):
+        trainer.accelerator.wait_for_everyone()   # 其余 rank 等写完，避免抢读半成品
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(final_dir)
         with open(os.path.join(args.output_dir, "run_args.json"), "w",
