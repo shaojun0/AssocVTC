@@ -120,7 +120,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `data_8budget.py` | `data.py` | `SelfDistillSFTDataset` / `EightBudgetCollator` / `build_image_transform` |
 | `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `BudgetCELogCallback` |
 | `ds_zero3.json` | `ds_zero3.json` | ZeRO-3 + bf16 + gather-on-save |
-| `smoke_mask.py` | `smoke.py` | 19 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
+| `smoke_mask.py` | `smoke.py` | 22 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / 纯文本 batch / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
@@ -148,6 +148,10 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
   限制：需在仓库根目录运行（`encoder` 从本仓 import）、config 里 `encoder_ckpt`/`qwen_dir`
   指向的路径在本机有效（ckpt 不自包含这两个子模型）；加载按 `config.dtype=float32` 上浮。
   已在 transformers 5.22.2 + 微型 Qwen3.5/encoder 资产上端到端验证 loss/CE 与手工加载完全一致。
+- **纯文本 chat / batch**：`forward(input_ids=..., pixel_values=None)` 等价于 `has_image`
+  全 False（k=0），会跳过 encoder；纯文本**生成**用 `model.lm.generate(...)`
+  （`tools/eval_mix/bench_general_vlm8b.py:run_batch` 是范例，不拼视觉前缀）。
+  参数顺序为 `(input_ids, pixel_values=None, ...)`，与 HF VLM 一致。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。
 
 ### 6.1 encoder 冻结 × 国产适配（MUSA）
@@ -175,7 +179,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 fp64 范数探测降级、奇数 head_dim 的 SDPA 走 math、deepspeed 的 dist-info。自检：
 
 ```bash
-python3 smoke.py            # 原 19 项张量逻辑
+python3 smoke.py            # 原 22 项张量逻辑
 python3 test_freeze.py      # 冻结语义 27 项（CPU）
 python3 test_freeze_compat.py  # 兼容性契约 18 项（不改 state_dict / 默认路径等价 / 先冻后载）
 torchrun --nproc_per_node=2 musa_e2e.py --stage 2   # 真实 Trainer+DS 7 项

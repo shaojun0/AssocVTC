@@ -19,7 +19,7 @@ fp64 范数探测、奇数 head_dim 的 SDPA、deepspeed 的 dist-info。详见 
 
 ```bash
 # 0) 自检（CPU，不加载 Qwen / DeepSpeed）
-python3 smoke.py          # 原张量逻辑，19 项
+python3 smoke.py          # 原张量逻辑，22 项
 python3 test_freeze.py         # 冻结语义，27 项
 python3 test_freeze_compat.py  # 兼容性契约（state_dict/groups/加载/身份），18 项
 

@@ -394,7 +394,7 @@ class VLM8Budget(PreTrainedModel):
             keep_frozen_eval(self.encoder)
         return self
 
-    def forward(self, pixel_values: Tensor, input_ids: Tensor,
+    def forward(self, input_ids: Tensor, pixel_values: Optional[Tensor] = None,
                 attention_mask: Optional[Tensor] = None,
                 labels: Optional[Tensor] = None,
                 budget_ids: Optional[Sequence[int]] = None,
@@ -404,14 +404,25 @@ class VLM8Budget(PreTrainedModel):
                 **kwargs) -> Dict[str, object]:
         """训练 / teacher-forcing 前向（生成在 `eval.py`）。
 
-        `has_image[b]=False` ⇒ 该样本的预算行取 0 个视觉 token（文本任务）。
+        纯文本 batch / 纯文本 chat：`pixel_values=None`（或 `has_image` 全 False）⇒
+        **不跑 encoder**，所有预算行 k=0，等价于不带视觉前缀的普通 LM 前向。
+        `has_image[b]=False` ⇒ 该样本的预算行取 0 个视觉 token（文本任务）；混批时
+        文本行可像 data.py 那样带一张零图占位，encoder 只对图行有贡献。
+
+        纯文本**生成**不要走这里（forward 只算 CE）：直接 `model.lm.generate(...)`，
+        见 `tools/eval_mix/bench_general_vlm8b.py:run_batch`。
         """
-        encoder_dtype = next(self.encoder.parameters()).dtype
-        z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))         # (B,32,1744)
-        vis = apply_visual_mode(
-            self.projector(z_s.to(self.projector.token_proj.weight.dtype)),
-            visual_mode)
+        B = input_ids.size(0)
         text_embeds = self.lm.get_input_embeddings()(input_ids)          # (B,T,2560)
+        if pixel_values is None or (has_image is not None and not bool(has_image.any())):
+            vis = text_embeds.new_zeros((B, VISUAL_TOKENS, text_embeds.size(-1)))
+            has_image = torch.zeros(B, dtype=torch.bool, device=input_ids.device)
+        else:
+            encoder_dtype = next(self.encoder.parameters()).dtype
+            z_s = self.encoder(pixel_values.to(dtype=encoder_dtype))     # (B,32,1744)
+            vis = apply_visual_mode(
+                self.projector(z_s.to(self.projector.token_proj.weight.dtype)),
+                visual_mode)
         rows = expand_budget_rows(
             vis, text_embeds.to(vis.dtype), attention_mask, labels,
             self._budgets(budget_ids), has_image=has_image)

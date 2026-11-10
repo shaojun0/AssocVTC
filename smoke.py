@@ -199,6 +199,27 @@ def check_text_rows(checker: Checker, model: VLM8Budget, batch: dict) -> None:
                   f"Δ={float(ps_img[0] - ps_img[-1]):.2e}")
 
 
+def check_text_only(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """纯文本 batch：`pixel_values=None` ⇒ 不跑 encoder，8 个预算行全 k=0。"""
+    calls = []
+    handle = model.encoder.register_forward_hook(lambda *args: calls.append(1))
+    try:
+        out = model(input_ids=batch["input_ids"], pixel_values=None,
+                    attention_mask=batch["attention_mask"], labels=batch["labels"])
+    finally:
+        handle.remove()
+    checker.check("text-only: pixel_values=None 不跑 encoder", not calls)
+    ref = model(input_ids=batch["input_ids"],
+                pixel_values=torch.zeros(BATCH, 3, 448, 448),
+                attention_mask=batch["attention_mask"], labels=batch["labels"],
+                has_image=torch.zeros(BATCH, dtype=torch.bool))
+    checker.close("text-only: forward(None) == 零图 + has_image=False",
+                  out["loss"], ref["loss"], CLEAN_TOL)
+    ps = out["per_budget_ce"]
+    checker.close("text-only: 8 个预算 CE 完全一致",
+                  ps, ps[0:1].expand_as(ps), CLEAN_TOL)
+
+
 def check_prompt_lens(checker: Checker) -> None:
     """eval.prompt_lens：answer 首 token 位置 = prompt 长度；全 -100 必须报错。"""
     import eval as E
@@ -240,6 +261,7 @@ def check_static(checker: Checker) -> None:
 def main() -> int:
     """跑七项检查，返回 0/1。"""
     print(f"vlm8b smoke: CPU tensor logic  torch={torch.__version__}")
+    torch.manual_seed(0)                    # 固定替身权重：否则 1/20 概率 truncation 阈值随机失败
     model = VLM8Budget(VLM8BudgetConfig(encoder_ckpt="", qwen_dir=""),
                        encoder=_FakeEncoder(), lm=_TinyLM()).eval()
     checker, batch = Checker(), make_batch()
@@ -249,6 +271,7 @@ def main() -> int:
         check_isolation(checker, model, batch)
         check_pad(checker, model, batch)
         check_text_rows(checker, model, batch)
+        check_text_only(checker, model, batch)
     check_prompt_lens(checker)
     check_static(checker)
     return checker.summary()
