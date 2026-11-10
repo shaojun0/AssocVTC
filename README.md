@@ -120,7 +120,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `data_8budget.py` | `data.py` | `SelfDistillSFTDataset` / `EightBudgetCollator` / `build_image_transform` |
 | `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `BudgetCELogCallback` |
 | `ds_zero3.json` | `ds_zero3.json` | ZeRO-3 + bf16 + gather-on-save |
-| `smoke_mask.py` | `smoke.py` | 22 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / 纯文本 batch / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
+| `smoke_mask.py` | `smoke.py` | 26 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / 纯文本 batch / **无图样本行去重** / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
@@ -179,7 +179,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 fp64 范数探测降级、奇数 head_dim 的 SDPA 走 math、deepspeed 的 dist-info。自检：
 
 ```bash
-python3 smoke.py            # 原 22 项张量逻辑
+python3 smoke.py            # 26 项张量逻辑（含 4 项去重等价性）
 python3 test_freeze.py      # 冻结语义 27 项（CPU）
 python3 test_freeze_compat.py  # 兼容性契约 18 项（不改 state_dict / 默认路径等价 / 先冻后载）
 torchrun --nproc_per_node=2 musa_e2e.py --stage 2   # 真实 Trainer+DS 7 项
@@ -235,3 +235,17 @@ CE（teacher forcing）不受影响。
 - 结论：预算收益只在「图真被用上」的行成立，且 k 不增加信息（8 个 visual token = 32 个 z token）；
   细节任务（OCR/图表/文档）需要**编码器侧**扩容而不是加 k。详见 main 的
   `doc/2026-11-09/REPORT_budget_screen.md`。
+
+### 7.6 无图样本 8 行去重（训练侧精确加速）
+
+A 修复后无图样本的 `kb` 全 0 ⇒ `[vis[:k]; text]` 的 8 个预算行**逐位相同**，送进 LM 就是
+同一行算 8 遍（loss 是 8 个相同 CE 的平均）。现在 `expand_budget_rows` 只保留无图样本的
+第 0 行（`unique_index`/`row_index`），`forward_rows` 只对唯一行跑 LM，再把行 CE 广播回
+V 个预算：
+
+- **数学等价**：loss、每预算 CE、对 text embedding 的梯度与全量展开一致（`smoke.py` 的
+  `dedup` 用例逐项对比，fp32 CPU 上 max|Δ|=0）；图像行完全不变。
+- **收益**：run3 数据 122,259 行里文本 82,000（67%）⇒ 行数 `B×V` → `B_img×V + B_txt`，
+  B=8 时 64 → 26.5，约 **2.4×**；纯文本 batch（`pixel_values=None`）从 `B×V` 行降到 `B` 行。
+- **不变**：`per_budget_ce` / `per_budget_ce_per_sample` / `row_ce` 的形状与语义不变
+  （无图样本的 V 行仍是同一份 CE 的广播），`per_budget_ce.jsonl` 日志不受影响。

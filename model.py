@@ -88,7 +88,11 @@ class VLM8BudgetConfig(PretrainedConfig):
 # ═══════════════════════════════════════════════════════════════
 
 class BudgetRows(NamedTuple):
-    """行顺序 `b * V + vi`；`ans_pos` 是取 hidden 的**预测位置**（无效位 -1）。"""
+    """行顺序 `b * V + vi`；`ans_pos` 是取 hidden 的**预测位置**（无效位 -1）。
+
+    无图样本的 V 行逐位相同（见 `expand_budget_rows`），`unique_index` 给出真正要
+    送进 LM 的行号、`row_index` 把每行映射回其中一份；两者为 None 时按全量行送。
+    """
 
     embeds: Tensor
     attention_mask: Tensor
@@ -98,6 +102,8 @@ class BudgetRows(NamedTuple):
     budget_ks: Tensor
     num_images: int
     num_budgets: int
+    unique_index: Optional[Tensor] = None
+    row_index: Optional[Tensor] = None
 
 
 def expand_budget_rows(
@@ -121,6 +127,22 @@ def expand_budget_rows(
     kb = torch.tensor(ks, device=text_embeds.device, dtype=torch.long).view(1, V).expand(B, V).clone()
     if has_image is not None:
         kb = kb * has_image.to(device=text_embeds.device, dtype=torch.long).view(B, 1)
+
+    # 无图样本的 V 行逐位相同（kb 全 0 ⇒ 同一段文本、同一 ans_pos、同一 CE），送进 LM
+    # 就是同一行算 V 遍。这里只留它的第 0 行，`forward_rows` 再把 CE 广播回 V 个预算
+    # —— loss/梯度与全量展开数学等价（等价性由 smoke 的 dedup 用例逐项验证）。
+    unique_index = row_index = None
+    is_text = ~kb.gt(0).any(dim=1)              # (B,) 无图样本 ⇔ 所有预算都取 0 个视觉 token
+    if V > 1 and bool(is_text.any()):
+        keep = torch.ones(B, V, dtype=torch.bool, device=text_embeds.device)
+        keep[is_text, 1:] = False
+        unique_index = torch.nonzero(keep.reshape(-1)).squeeze(1)
+        row_index = torch.empty(B * V, dtype=torch.long, device=text_embeds.device)
+        row_index[unique_index] = torch.arange(unique_index.numel(),
+                                               device=text_embeds.device)
+        row_index = row_index.reshape(B, V)
+        row_index[is_text] = row_index[is_text, 0].unsqueeze(1)   # 其余行 → 同一份
+        row_index = row_index.reshape(-1)
 
     embeds = text_embeds.new_zeros((B, V, L, H))
     masks = text_mask.new_zeros((B, V, L))
@@ -163,6 +185,8 @@ def expand_budget_rows(
         budget_ks=torch.tensor(ks, device=labels.device),
         num_images=B,
         num_budgets=V,
+        unique_index=unique_index,
+        row_index=row_index,
     )
 
 
@@ -430,17 +454,27 @@ class VLM8Budget(PreTrainedModel):
 
     def forward_rows(self, rows: BudgetRows,
                      budget_weights: Optional[Tensor] = None) -> Dict[str, object]:
-        """对已展开的 `BudgetRows` 跑 LM + answer-only CE（smoke 也走这条路径）。"""
+        """对已展开的 `BudgetRows` 跑 LM + answer-only CE（smoke 也走这条路径）。
+
+        `rows.unique_index` 非空时只对唯一行跑 LM（无图样本的 V 行逐位相同，算 1 遍
+        即可），再把行 CE 用 `rows.row_index` 广播回 `B*V`——loss/梯度与全量行等价。
+        """
+        sel = rows.unique_index
+        embeds = rows.embeds if sel is None else rows.embeds.index_select(0, sel)
+        mask = rows.attention_mask if sel is None else rows.attention_mask.index_select(0, sel)
+        ans_pos = rows.ans_pos if sel is None else rows.ans_pos.index_select(0, sel)
+        ans_targets = rows.ans_targets if sel is None else rows.ans_targets.index_select(0, sel)
+
         hidden = self.lm.model(
-            inputs_embeds=rows.embeds, attention_mask=rows.attention_mask,
+            inputs_embeds=embeds, attention_mask=mask,
             use_cache=False).last_hidden_state                     # (R,L,H)
         R, L, H = hidden.shape
-        A = rows.ans_pos.size(1)
+        A = ans_pos.size(1)
 
         # 只 gather 预测位置（不 materialize 全序列 vocab logits），CE 在 fp32 分块算。
-        flat = (torch.arange(R, device=hidden.device).unsqueeze(1) * L + rows.ans_pos.clamp(min=0)).reshape(-1)
+        flat = (torch.arange(R, device=hidden.device).unsqueeze(1) * L + ans_pos.clamp(min=0)).reshape(-1)
         gathered = hidden.reshape(R * L, H).index_select(0, flat)
-        targets = rows.ans_targets.reshape(-1)
+        targets = ans_targets.reshape(-1)
         ce = torch.empty(R * A, device=hidden.device, dtype=torch.float32)
         for start in range(0, ce.numel(), CE_CHUNK):
             stop = start + CE_CHUNK
@@ -448,8 +482,10 @@ class VLM8Budget(PreTrainedModel):
                 self.lm.lm_head(gathered[start:stop]).float(), targets[start:stop],
                 reduction="none", ignore_index=IGNORE_INDEX)
 
-        counts = (rows.ans_targets != IGNORE_INDEX).sum(dim=1).clamp(min=1)
+        counts = (ans_targets != IGNORE_INDEX).sum(dim=1).clamp(min=1)
         row_ce = ce.reshape(R, A).sum(dim=1) / counts.to(ce.dtype)
+        if rows.row_index is not None:          # 无图样本的 V 行共用同一份 CE ⇒ 广播回去
+            row_ce = row_ce.index_select(0, rows.row_index)
         per_budget = row_ce.reshape(rows.num_images, rows.num_budgets).mean(dim=0)
         k = rows.budget_ks.float()
         w = budget_weights if budget_weights is not None else (

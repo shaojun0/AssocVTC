@@ -220,6 +220,37 @@ def check_text_only(checker: Checker, model: VLM8Budget, batch: dict) -> None:
                   ps, ps[0:1].expand_as(ps), CLEAN_TOL)
 
 
+def check_row_dedup(checker: Checker, model: VLM8Budget, batch: dict) -> None:
+    """无图样本 V 行逐位相同 ⇒ 只算 1 行；CE/loss/梯度与全量展开等价。"""
+    z_s = torch.randn(BATCH, NUM_SPECIALS, ENC_DIM,
+                      generator=torch.Generator().manual_seed(3))
+    vis = model.projector(z_s).detach()
+    has_image = torch.tensor([True, False])
+    text = model.lm.get_input_embeddings()(batch["input_ids"]).detach().requires_grad_(True)
+
+    def run(dedup: bool):
+        rows = expand_budget_rows(
+            vis, text, batch["attention_mask"], batch["labels"], range(1, 9),
+            has_image=has_image)
+        if not dedup:
+            rows = rows._replace(unique_index=None, row_index=None)  # 全量行（旧路径）
+        out = model.forward_rows(rows)
+        out["loss"].backward()
+        grad, text.grad = text.grad.clone(), None
+        return rows, out, grad
+
+    rows, dedup_out, dedup_grad = run(True)
+    _, full_out, full_grad = run(False)
+    checker.check("dedup: 16 行里只送 9 行（8 图行 + 1 文本行）",
+                  rows.unique_index is not None and rows.unique_index.numel() == 9,
+                  str(None if rows.unique_index is None else rows.unique_index.tolist()))
+    checker.close("dedup: row_ce == 全量展开", dedup_out["row_ce"], full_out["row_ce"], 1e-6)
+    checker.close("dedup: loss == 全量展开", dedup_out["loss"], full_out["loss"], 1e-6)
+    checker.check("dedup: 对文本 embedding 的梯度 == 全量展开",
+                  torch.allclose(dedup_grad, full_grad, atol=1e-6, rtol=1e-5),
+                  f"max|Δ|={float((dedup_grad - full_grad).abs().max()):.2e}")
+
+
 def check_prompt_lens(checker: Checker) -> None:
     """eval.prompt_lens：answer 首 token 位置 = prompt 长度；全 -100 必须报错。"""
     import eval as E
@@ -272,6 +303,7 @@ def main() -> int:
         check_pad(checker, model, batch)
         check_text_rows(checker, model, batch)
         check_text_only(checker, model, batch)
+    check_row_dedup(checker, model, batch)      # 需要梯度，放在 no_grad 之外
     check_prompt_lens(checker)
     check_static(checker)
     return checker.summary()
