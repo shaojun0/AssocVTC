@@ -89,6 +89,30 @@ class VLM8BudgetConfig(PretrainedConfig):
 # 8 预算行展开（纯张量；smoke.py 单测这一层）
 # ═══════════════════════════════════════════════════════════════
 
+def _repeat_cache(cache: object, repeats: int) -> None:
+    """把 prefill 的 KV/状态 cache 按 batch 维扩成 `repeats` 份（行序 `b*V+vi`）。
+
+    HF 只给**纯注意力**的 cache 层实现了 `batch_repeat_interleave`；Qwen3.5 是 hybrid
+    （24 层线性注意力 + 8 层全注意力），线性注意力层存的是 conv/recurrent 状态，没有这个
+    方法，所以按层类型分开处理。遇到没见过的层类型直接报错——静默算错比崩更糟。
+    """
+    if getattr(cache, "layers", None) is None:      # transformers 4.x 的纯注意力 cache
+        cache.batch_repeat_interleave(repeats)
+        return
+    for layer in cache.layers:
+        if hasattr(layer, "batch_repeat_interleave"):
+            layer.batch_repeat_interleave(repeats)
+        elif hasattr(layer, "conv_states") or hasattr(layer, "recurrent_states"):
+            for name in ("conv_states", "recurrent_states"):     # 线性注意力：状态也在 dim 0
+                state = getattr(layer, name, None)
+                if state is not None:
+                    setattr(layer, name, state.repeat_interleave(repeats, dim=0))
+            layer.batch_size *= repeats
+        else:
+            raise RuntimeError(
+                f"未知 cache 层类型 {type(layer).__name__}：无法把 prefill 复用到 V 个预算")
+
+
 class BudgetRows(NamedTuple):
     """prompt 段跨预算共享；每行 `segment` = `[prompt 末 token; vis[:k]; answer]`。
 
@@ -470,7 +494,7 @@ class VLM8Budget(PreTrainedModel):
             use_cache=True).past_key_values
         assert cache is not None, ("拿不到 prompt 的 KV cache：`--grad-ckpt` 会把 use_cache "
                                   "强制关掉，两段式前向必须关梯度检查点")
-        cache.batch_repeat_interleave(rows.num_budgets)        # 原地扩成 B*V 行（行序 b*V+vi）
+        _repeat_cache(cache, rows.num_budgets)                 # 原地扩成 B*V 行（行序 b*V+vi）
         mask = torch.cat([rows.prompt_mask.repeat_interleave(rows.num_budgets, dim=0),
                           rows.segment_mask], dim=1)
         hidden = self.lm.model(

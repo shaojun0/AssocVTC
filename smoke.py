@@ -270,6 +270,32 @@ def check_text_rows(checker: Checker, model: VLM8Budget, batch: dict) -> None:
                   f"Δ={float(ps_img[0] - ps_img[-1]):.2e}")
 
 
+def check_repeat_cache(checker: Checker) -> None:
+    """混合 cache：线性注意力层没有 `batch_repeat_interleave`，要按状态张量扩 batch。"""
+    from model import _repeat_cache
+
+    class _Linear:
+        def __init__(self):
+            self.conv_states = torch.zeros(2, 4, 3)
+            self.recurrent_states = torch.zeros(2, 2, 5)
+            self.batch_size = 2
+
+    class _Full:
+        def __init__(self):
+            self.repeats = 0
+
+        def batch_repeat_interleave(self, repeats):
+            self.repeats = repeats
+
+    cache = SimpleNamespace(layers=[_Linear(), _Full()])
+    _repeat_cache(cache, 8)
+    linear, full = cache.layers
+    checker.check("_repeat_cache: 线性注意力状态/全注意力层都扩成 8 份",
+                  tuple(linear.conv_states.shape) == (16, 4, 3)
+                  and tuple(linear.recurrent_states.shape) == (16, 2, 5)
+                  and linear.batch_size == 16 and full.repeats == 8)
+
+
 def check_text_only(checker: Checker, model: VLM8Budget, batch: dict) -> None:
     """纯文本 batch：`pixel_values=None` ⇒ 不跑 encoder，8 个预算行全 k=0。"""
     calls = []
@@ -345,6 +371,7 @@ def main() -> int:
         check_two_stage(checker, model, batch)
         check_prompt_mask(checker, model, batch)
         check_text_only(checker, model, batch)
+    check_repeat_cache(checker)
     check_prompt_lens(checker)
     check_static(checker)
     return checker.summary()

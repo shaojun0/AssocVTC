@@ -66,6 +66,9 @@ loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
   再按预算展开成 `B·V` 条独立短段，行与行是独立 batch 行。
 - **防泄露 = 截断 + padding mask**：段 k 只含 `vis[:, :k]`，**不用 mask 遮 visual**。
   `smoke.py` 验证：改 `z_s[4]`（第 2 个 visual token）不影响 k=1、影响 k=2。
+- **prefill 复用要按层扩 batch**：`_repeat_cache()` 对全注意力层走
+  `batch_repeat_interleave`，对线性注意力层扩 `conv_states`/`recurrent_states`
+  （Qwen3.5 hybrid 的线性层没有该方法；遇到未知层类型直接报错）。
 - **`position_ids` 显式传**：prompt 段用 `arange(P)`；每条段从「本样本 prompt 长度 − 1」
   开始续接（锚点 + visual token + answer 各占一个位置），所以 `k=0`（文本任务）时答案
   0 的预测位置就是段首锚点。
