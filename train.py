@@ -373,6 +373,9 @@ def main() -> None:
         loss_weighting=args.loss_weighting,
         pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id),
         grad_ckpt=args.grad_ckpt)
+    assert not args.grad_ckpt, (
+        "--grad-ckpt 与两段式前向不兼容：梯度检查点会强制 use_cache=False，"
+        "prompt 的 KV cache 就没了；算力已经省在 prompt 只前向一次上，别再开检查点")
     if args.init_from:
         load_init_weights(model, args.init_from)
 

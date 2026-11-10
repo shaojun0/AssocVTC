@@ -6,8 +6,9 @@
 > 文档/报告在主线 `main`，例如
 > [`doc/2026-11-09/REPORT_budget_screen.md`](https://github.com/shaojun0/AssocVTC/blob/main/doc/2026-11-09/REPORT_budget_screen.md)。
 
-把 AssocVTC 阶段2 的 `z_s (32×1744)` 投成 **8 个 2560 维 visual token**；同一张图一次
-前向展开 **8 行**（行 k 只用前 k 个 token）去预测同一段文本，8 行 CE 取（加权）平均。
+把 AssocVTC 阶段2 的 `z_s (32×1744)` 投成 **8 个 2560 维 visual token**；文本 prompt
+先编码（跨预算共享、**只前向一次**），答案段按预算 k 只看前 k 个 visual token
+（「先看文字、后看图」），8 条答案段的 CE 取（加权）平均。
 3 epoch：全量微调（encoder 不冻结）；DeepSpeed ZeRO-3。
 
 设计文档：[`doc/2026-11-05/DESIGN_8budget_vlm_finetune.md`](https://github.com/shaojun0/AssocVTC/blob/main/doc/2026-11-05/DESIGN_8budget_vlm_finetune.md)
@@ -27,10 +28,12 @@ z_s (B,32,1744)
 tokens (B,32,640) → reshape (B,8,4×640=2560) → LayerNorm(2560)
    ▼
 vis (B,8,2560)               与 Qwen LM hidden 同维
-   ▼  每图 V 行（默认 k=1..8）：行 k = [vis[:, :k] ; text_embeds]，right-pad 到 max_k+T
-rows (B·V, 8+T, 2560)        2D right-padding mask；labels 除 answer 外 -100
+   ▼  文本 prompt 只前向一次（跨预算共享 KV cache）：prompt = text_embeds[:, :P-1]
+prompt cache (B,P-1,·)       预算与 k 无关 ⇒ 预算只影响答案段
+   ▼  每图 V 行（默认 k=1..8）：段 = [prompt 末 token（锚点）; vis[:, :k] ; answer]
+rows.segment (B·V, 1+8+A, 2560)  段内 right-padding mask；labels 除 answer 外 -100
    ▼  Qwen3.5-4B 文本主干（只喂 inputs_embeds；不喂 pixel_values；vision tower 已删）
-hidden (B·V, 8+T, 2560)      只 gather answer 的**预测位置** → lm_head（分块）
+hidden (B·V, 1+8+A, 2560)    只 gather 段内**预测位置** `k+j` → lm_head（分块）
    ▼
 loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
 ```
@@ -44,27 +47,35 @@ loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
 | `tokens` | `(B,32,640)` | `LayerNorm(1744) → Linear(1744,640)`，逐 token |
 | `vis` | `(B,8,2560)` | `reshape(B,8,4*640) → LayerNorm(2560)` |
 | `text_embeds` | `(B,T,2560)` | `lm.get_input_embeddings()(input_ids)` |
-| `rows.embeds` | `(B·V, 8+T, 2560)` | 行 k = `[vis[:,:k]; text]`，右侧补 `8-k` 个零 |
-| `rows.ans_pos` | `(B·V, A)` | **预测位置** `k + (label_pos − 1)`，无效位 `-1` |
+| `rows.prompt` | `(B,P−1,2560)` | 跨预算共享的前缀（末 token 进段做锚点），**只前向一次** |
+| `rows.segment` | `(B·V, 1+8+A, 2560)` | 段 = `[prompt 末 token; vis[:,:k]; answer]`，右侧补零 |
+| `rows.prompt_mask` / `rows.segment_mask` | `(B,P−1)` / `(B·V,1+8+A)` | 两段各自的 2D mask；prompt 右 pad、段尾 pad 均为 0 |
+| `rows.position_ids` | `(B·V, 1+8+A)` | 段的位置，从**本样本** prompt 长度 − 1 开始续接 |
+| `rows.ans_pos` | `(B·V, A)` | **段内预测位置** `k + j`（k = `row_ks`），无效位 `-1` |
+| `rows.row_ks` | `(B·V,)` | 每行实际视觉 token 数（无图样本 0） |
 | `loss` | 标量 | `Σ_k w_k·CE_k` |
 
-`T` = 文本长度（nothink ≈ 112，think ≈ 578）；`A` = answer 长度（nothink 4）；
-`V` = 预算数（默认 8）；`A` 轴按批内最长 answer 对齐。
+`T` = 文本总长度（prompt+answer；nothink ≈ 112，think ≈ 578）；`P` = 批内最大 prompt 长度；
+`A` = answer 长度（nothink 4）；`V` = 预算数（默认 8）；`A` 轴按批内最长 answer 对齐。
 
 ### 2. 三条关键裁决（§4）
 
 - **8 行批，不打包**：Qwen3.5 是 hybrid（24 层 gated-delta 线性注意力 + 8 层全注意力）；
   线性层收到 4D 自定义 mask 时 `create_recurrent_attention_mask()` 返回 `None` ⇒ 打包会
-  跨段泄露。本实现只用 **2D right-padding mask**，行与行是独立 batch 行。
-- **防泄露 = 截断 + padding mask**：行 k 只含 `vis[:, :k]`，**不用 mask 遮 visual**。
+  跨段泄露。本实现只用 **2D right-padding mask**：prompt 段一次 prefill（KV cache），
+  再按预算展开成 `B·V` 条独立短段，行与行是独立 batch 行。
+- **防泄露 = 截断 + padding mask**：段 k 只含 `vis[:, :k]`，**不用 mask 遮 visual**。
   `smoke.py` 验证：改 `z_s[4]`（第 2 个 visual token）不影响 k=1、影响 k=2。
-- **`position_ids` 不传**：Qwen3.5 文本 forward 默认 `arange(0..L-1)`，与 mask 无关。
+- **`position_ids` 显式传**：prompt 段用 `arange(P)`；每条段从「本样本 prompt 长度 − 1」
+  开始续接（锚点 + visual token + answer 各占一个位置），所以 `k=0`（文本任务）时答案
+  0 的预测位置就是段首锚点。
 
-**shift 公式一行**：取 hidden 的位置 = `k + (label_pos − 1)`，targets = `labels[label_pos]`，
-`label_pos = answer 起始 + j`（`start >= 1` 断言）；**绝不能**用 label 自身位置取 hidden
-（hidden 已看见该 token 的 embedding ⇒ 目标泄露，loss 可被"复制输入"压到 0）。
-`smoke.py` 的 shift 检查用**非循环**参考：`F.cross_entropy(logits[:, :-1], labels[:, 1:])`
-按行 mean，与 `forward_rows()["row_ce"]` 差 ≤ 1e-5。
+**shift 公式一行**：取 hidden 的**段内**位置 = `k + j`（k = 该行视觉 token 数，j = 答案内
+偏移），targets = `labels[answer 起始 + j]`（`answer 起始 >= 2` 断言，因为要留 prompt 末
+token 做锚点）；**绝不能**用 label 自身位置取 hidden（hidden 已看见该 token 的 embedding
+⇒ 目标泄露，loss 可被"复制输入"压到 0）。`smoke.py` 的 shift 检查把 prompt+段拼成一条
+序列跑同一次前向，与 `forward_rows()["row_ce"]` 差 ≤ 1e-5；把 `ans_pos` 改成 label 位置
+（+1）必须改变 CE。
 
 ### 3. 训练协议（§5）
 
@@ -75,7 +86,7 @@ loss = Σ_k w_k · CE_k        w_k = 1/V（equal）或 (1/k)/Σ(1/j)（inv-k）
 | wd | LLM 0.1 / 其余 0.05；bias+LayerNorm 不衰减 | `build_param_groups` |
 | 调度 | cosine，warmup 3%，grad clip 1.0 | `TrainingArguments` |
 | 批次 | micro 2 img/GPU（16 行）× accum 8 × 2 GPU | `--micro-batch-size/--grad-accum` |
-| 精度 / ckpt | bf16 + grad ckpt（`use_reentrant=False`） | `ds_zero2.json`（ZeRO-3 见 §6.1：与本 encoder 不兼容） / `load_lm` |
+| 精度 / ckpt | bf16 + ZeRO-2；**不用 `--grad-ckpt`** | `ds_zero2.json`（ZeRO-3 见 §6.1：与本 encoder 不兼容） / `load_lm`（梯度检查点会强制 `use_cache=False`，与两段式前向不兼容） |
 | 日志 | 每 20 步 per-budget CE → `per_budget_ce.jsonl` | `BudgetCELogCallback` |
 | eval | **Trainer 内不做**（`eval_strategy="no"`，不传 eval_dataset） | 评测走 `eval.py` |
 
@@ -132,8 +143,12 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 
 ### 6. review 要点 / 已知限制
 
-- **P0 shift**：`expand_budget_rows()` 里 `ans_pos = k + label_pos − 1`；改动此处必跑
-  `smoke.py`（shift 等价 + 槽位覆盖双锁）。临时改回 no-shift 会让 shift 检查 FAIL。
+- **P0 shift**：`expand_budget_rows()` 里 `ans_pos = k + j`（段内预测位置 = 该行视觉
+  token 数 + 答案内偏移）；改动此处必跑 `smoke.py`（shift 等价 + 防泄露）。临时改成
+  label 自身位置（`+1`）会让防泄露检查 FAIL。
+- **两段式前向与 `--grad-ckpt` 不兼容**：prompt 只前向一次靠的是 KV cache，梯度检查点
+  会强制 `use_cache=False` ⇒ 第二段拿不到 cache。`train.py` 已 fail-fast；省显存请调
+  micro-batch / ZeRO-2，别开检查点。
 - **encoder 冻结**：见 §6.1；原来的 `EncoderFreezeCallback` / `_keep_encoder_eval()` 已被
   `freeze.py` 里的通用实现取代（`--freeze-encoder` / `--freeze-encoder-epochs`）。
 - **`encoder.py` 是 vendored 副本**：主线 `model_v2_linattn.py`（commit `1fc4920`）逐字抽取；
@@ -149,9 +164,9 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
   指向的路径在本机有效（ckpt 不自包含这两个子模型）；加载按 `config.dtype=float32` 上浮。
   已在 transformers 5.22.2 + 微型 Qwen3.5/encoder 资产上端到端验证 loss/CE 与手工加载完全一致。
 - **纯文本 chat / batch**：`forward(input_ids=..., pixel_values=None)` 等价于 `has_image`
-  全 False（k=0），会跳过 encoder；纯文本**生成**用 `model.lm.generate(...)`
-  （`tools/eval_mix/bench_general_vlm8b.py:run_batch` 是范例，不拼视觉前缀）。
-  参数顺序为 `(input_ids, pixel_values=None, ...)`，与 HF VLM 一致。
+  全 False（k=0），会跳过 encoder、答案段里只有锚点 + 答案；纯文本**生成**用
+  `model.lm.generate(...)`（`tools/eval_mix/bench_general_vlm8b.py:run_batch` 是范例，
+  不拼视觉 token）。参数顺序为 `(input_ids, pixel_values=None, ...)`，与 HF VLM 一致。
 - **数据**：`train_nothink_all.jsonl` 的 `image` 是相对路径；`--image-root` 必须对。
 
 ### 6.1 encoder 冻结 × 国产适配（MUSA）
@@ -225,7 +240,8 @@ CE（teacher forcing）不受影响。
 
 `data.py:is_text_only()` 用 `img/_blank/` 占位路径判定无图样本 ⇒ `has_image=False`；
 `expand_budget_rows(..., has_image=)` 对无图样本的**所有预算行**都取 0 个视觉 token，
-`eval.py`/`eval_dump_per_sample.py`/`eval_mix_breakdown.py` 的生成路径同样按 `has_image` 取 `k=0`。
+`eval.py`/`eval_dump_per_sample.py`/`eval_mix_breakdown.py` 的生成路径同样按 `has_image`
+取 `k=0`（生成布局 `[prompt][vis[:k]]`，先文本后视觉、k 只影响 prompt 之后的视觉段）。
 注意 `--visual-mode null` 只是把 8 个 emb 置零、**token 数不变，不等于没有图**。
 
 ### 7.5 预算机制筛查结论（代码侧要点）

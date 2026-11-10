@@ -200,6 +200,8 @@ torchrun --nproc_per_node=2 musa_e2e.py --stage 3   # 2 项 fail-fast PASS
 - **ZeRO-3 不可用**（§3.5）。想用 ZeRO-3 需要把 encoder 的三个裸 Parameter 包成子模块
   ——那会改参数名，破坏阶段2 ckpt 的 `strict=True` 契约，需要同时迁移 ckpt。
 - **分阶段冻结不是严格 bit-exact**（§2.4）；要严格不变请用静态冻结。
+- **`--grad-ckpt` 不可用**：两段式前向让文本 prompt 只前向一次、预算只影响答案段，靠的
+  是 KV cache；梯度检查点会强制 `use_cache=False` ⇒ 不兼容（`train.py` 已 fail-fast）。
 - **`transformers` 版本敏感**：本机 5.13 与 `requirements.txt` 的 5.22.1 行为不同
   （post_init 重初始化已在代码里兜住，但其它 v5 小版本差异未逐一验证）。
 - 本机没有 Qwen3.5-4B 权重与阶段2 ckpt（`/root/qwen_models`、`exp448/B` 不存在），

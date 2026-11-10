@@ -9,18 +9,20 @@ vlm8b — AssocVTC 448²/p32 阶段2 编码器 → 8 预算并行 → Qwen3.5-4B
       → z_s (B,32,1744)
       → BudgetProjector: LayerNorm(1744) → Linear(1744,640)          [逐 token]
       → reshape (B,8,4*640=2560) → LayerNorm(2560) → vis (B,8,2560)
-      → 每图 V 行（默认 k=1..8）：行 k = [vis[:, :k]; text]           [截断]
-      → Qwen3.5-4B 文本主干（只喂 inputs_embeds，不喂 pixel_values，vision tower 已删）
+      → 文本 prompt 先过一遍 Qwen（跨预算共享的 KV cache，只前向一次）
+      → 每图 V 行（默认 k=1..8）：段 = [prompt 末 token; vis[:, :k]; answer]
+      → 段作为续写接在 cache 后面跑短前向（先看文字、后看图）
       → hidden → 只 gather answer 的**预测位置** → lm_head → CE（fp32 分块）
 
 关键裁决（`doc/2026-11-05/DESIGN_8budget_vlm_finetune.md` §4）:
 
-  · **8 行批，不打包成一条序列**：Qwen3.5 是 hybrid（24 层线性注意力 + 8 层全
-    注意力），线性层收到 4D mask 时会忽略段边界 ⇒ 只用 2D right-padding mask。
-  · **截断防泄露**：行 k 只含 `vis[:, :k]`，不靠 mask 遮 visual。
-  · **标准因果 shift**：position p 的 hidden 只能预测 `label[p+1]`，故
-    `ans_pos = k + (label_pos − 1)`、targets = `labels[label_pos]`，且 `label_pos ≥ 1`。
-    用 label 自身位置取 hidden 会目标泄露（hidden 已看见该 token 的 embedding）。
+  · **prompt 只算一次**：视觉 token 放在 prompt 之后、答案之前，于是 prompt 段与预算
+    k 无关，可以走一次 KV cache 复用（真实收益与限制见 README「先看文字、后看图」）。
+  · **段内截断防泄露**：行 k 只含 `vis[:, :k]`，不靠 mask 遮 visual；prompt 段里属于
+    短 prompt 样本的答案 token 必须被 mask 掉（它们不是 prompt）。
+  · **标准因果 shift**：段里 answer token j 在 `k+j+1` 位，故 `ans_pos = k + j`
+    （答案 token 前一位，k=0 时是段首的 prompt 末 token）。用 label 自身位置取
+    hidden 会目标泄露（hidden 已看见该 token 的 embedding）。
 
 Qwen 相关 import 全部在函数内部（本机 transformers 4.57 没有 `Qwen3_5*`），所以
 `import model` 不会加载 Qwen。
@@ -88,14 +90,22 @@ class VLM8BudgetConfig(PretrainedConfig):
 # ═══════════════════════════════════════════════════════════════
 
 class BudgetRows(NamedTuple):
-    """行顺序 `b * V + vi`；`ans_pos` 是取 hidden 的**预测位置**（无效位 -1）。"""
+    """prompt 段跨预算共享；每行 `segment` = `[prompt 末 token; vis[:k]; answer]`。
 
-    embeds: Tensor
-    attention_mask: Tensor
-    labels: Tensor
-    ans_pos: Tensor
-    ans_targets: Tensor
-    budget_ks: Tensor
+    行顺序 `b * V + vi`。`ans_pos` 是段内**预测位置**（答案 token 的前一位，无效位 -1）：
+    答案 token `j` 在段里的下标是 `1 + k + j`，所以预测位置恒为 `k + j`——`k=0`
+    （文本任务）时就是段首那个 prompt 末 token。
+    """
+
+    prompt: Tensor              # (B, P-1, H)     跨预算共享的前缀（只前向一次）
+    prompt_mask: Tensor         # (B, P-1)
+    segment: Tensor             # (B*V, 1+K+A, H) 锚点 + 视觉槽位 + 答案
+    segment_mask: Tensor        # (B*V, 1+K+A)
+    position_ids: Tensor        # (B*V, 1+K+A)
+    ans_pos: Tensor             # (B*V, A)        段内预测位置（无效位 -1）
+    ans_targets: Tensor         # (B*V, A)
+    budget_ks: Tensor           # (V,)
+    row_ks: Tensor              # (B*V,)          每行实际视觉 token 数 k_b
     num_images: int
     num_budgets: int
 
@@ -108,59 +118,76 @@ def expand_budget_rows(
     budget_ks: Sequence[int],
     has_image: Optional[Tensor] = None,
 ) -> BudgetRows:
-    """`vis (B,8,H)` + `text (B,T,H)` → 每图 V 行 `[vis[:, :n]; text]`（right-pad）。
+    """B 个样本 → `B*V` 行的「prompt 共享 + [锚点; vis[:k]; answer] 段」。
 
-    `has_image[b]=False` ⇒ 该样本所有预算行都取 0 个视觉 token（文本任务零视觉前缀）。
+    因果顺序（`s_b` = 样本 b 的 prompt 长度）::
+
+        prompt 段（跨预算共享，只前向一次）: [0 .. s_b-2]       位置 0 .. s_b-2
+        段（每预算一行）                  : [prompt 末 token][vis[:k]][answer]
+                                            位置 s_b-1      s_b..     s_b+k..
+
+    **prompt 末 token 进段**是为了 `k=0` 也有预测位置：答案 token 0 的前一位在
+    `k=0` 时是 prompt 末 token、在 `k>0` 时是最后一个视觉 token，两者都在段内，
+    于是 `ans_pos = k + j` 对所有行统一成立，CE 只需一次 gather。
+
+    `has_image[b]=False`（文本任务）⇒ 该样本所有预算行 k=0（段里只有锚点+答案）。
     """
     B, T, H = text_embeds.shape
     ks = [int(k) for k in budget_ks]
-    assert ks and min(ks) >= 0 and max(ks) <= vis_embeds.size(1), f"预算越界: {ks}"
-    V, L = len(ks), max(ks) + T
-
-    # 每行实际视觉 token 数 kb[b][vi]：文本样本（has_image=False）恒为 0。
-    kb = torch.tensor(ks, device=text_embeds.device, dtype=torch.long).view(1, V).expand(B, V).clone()
-    if has_image is not None:
-        kb = kb * has_image.to(device=text_embeds.device, dtype=torch.long).view(B, 1)
-
-    embeds = text_embeds.new_zeros((B, V, L, H))
-    masks = text_mask.new_zeros((B, V, L))
-    row_labels = labels.new_full((B, V, L), IGNORE_INDEX)
-    kb_list = kb.tolist()                       # 只同步一次；B*V ≤ 32
-    for vi in range(V):
-        for b in range(B):
-            n = kb_list[b][vi]                  # 文本样本 n=0 ⇒ 零视觉 token
-            if n:
-                embeds[b, vi, :n] = vis_embeds[b, :n]
-                masks[b, vi, :n] = 1
-            embeds[b, vi, n:n + T] = text_embeds[b]
-            masks[b, vi, n:n + T] = text_mask[b]
-            row_labels[b, vi, n:n + T] = labels[b]
+    assert ks and min(ks) >= 1 and max(ks) <= vis_embeds.size(1), f"预算越界: {ks}"
+    V, K, dev = len(ks), max(ks), text_embeds.device
+    R = B * V
 
     valid = labels != IGNORE_INDEX
     runs = (valid[:, 1:] & ~valid[:, :-1]).sum(dim=1) + valid[:, 0].long()
     assert int(runs.max()) <= 1, "answer 标签不是连续单段（多段会让 label_pos 跨过非答案 token）"
-    starts = valid.long().argmax(dim=1)         # 每行 answer 起始（连续段）
-    assert int(starts.min()) >= 1, "answer 从文本第 0 位开始，没有 prompt 末 token 可预测"
+    starts = valid.long().argmax(dim=1)             # (B,) prompt 长度
+    assert int(starts.min()) >= 2, "prompt 只有 1 个 token：段首锚点没有可回退的位置"
     counts = valid.sum(dim=1)
-    A = int(counts.max())
-    j = torch.arange(A, device=labels.device).unsqueeze(0)
-    label_pos = starts.unsqueeze(1) + j                          # (B,A)
+    A, P = int(counts.max()), int(starts.max())
+
+    # 行 r = b*V + vi；文本样本（has_image=False）所有预算 k=0。
+    ar = torch.arange(R, device=dev)
+    rows_b = torch.div(ar, V, rounding_mode="floor")
+    k_row = torch.tensor(ks, device=dev)[ar % V]                       # (R,)
+    if has_image is not None:
+        k_row = k_row * has_image.to(device=dev).long()[rows_b]
+
+    j = torch.arange(A, device=dev).unsqueeze(0)                        # (1,A)
+    label_pos = starts.unsqueeze(1) + j                                 # (B,A) 答案在原文的位置
     ans_valid = j < counts.unsqueeze(1)
-    targets = labels.gather(
-        1, label_pos.clamp(max=T - 1)).masked_fill(~ans_valid, IGNORE_INDEX)
+    gather_pos = label_pos.clamp(max=T - 1)
+    targets = labels.gather(1, gather_pos).masked_fill(~ans_valid, IGNORE_INDEX)
 
-    # 标准因果 shift：预测位置 = label 位置 − 1；再用 +kb 换成行内绝对下标。
-    # ⚠️ 不能写成 label 位置本身（hidden 已看见该 token ⇒ 目标泄露）。
-    pos = (label_pos - 1).unsqueeze(1) + kb.unsqueeze(-1)
-    pos = pos.masked_fill(~ans_valid.unsqueeze(1), -1)
+    # 段：[锚点][vis[:k]][answer]，右侧补零到 1+K+A
+    L = 1 + K + A
+    anchor = text_embeds.gather(1, (starts - 1).view(B, 1, 1).expand(B, 1, H)).squeeze(1)
+    segment = text_embeds.new_zeros((R, L, H))
+    segment_mask = text_mask.new_zeros((R, L))
+    segment[:, 0] = anchor[rows_b]
+    segment_mask[:, 0] = 1
+    slot_keep = torch.arange(K, device=dev).unsqueeze(0) < k_row.unsqueeze(1)
+    segment[:, 1:1 + K] = vis_embeds[rows_b][:, :K] * slot_keep.unsqueeze(-1).to(vis_embeds.dtype)
+    segment_mask[:, 1:1 + K] = slot_keep.to(segment_mask.dtype)
+    ans_idx = 1 + k_row.unsqueeze(1) + j                                # (R,A) 答案在段内下标
+    segment.scatter_(1, ans_idx.unsqueeze(-1).expand(R, A, H),
+                     text_embeds.gather(1, gather_pos.unsqueeze(-1).expand(B, A, H))[rows_b])
+    segment_mask.scatter_(1, ans_idx, ans_valid[rows_b].to(segment_mask.dtype))
 
+    # prompt 短于 P-1 的样本：块内 s_b-1..P-2 是它**自己的答案 token**（全文 mask=1），
+    # 必须在这里遮掉，否则它们会进共享 prompt 的 KV cache → 答案段 attend 到答案（泄露）。
+    prompt_mask = text_mask[:, :P - 1] & (
+        torch.arange(P - 1, device=dev).unsqueeze(0) < (starts - 1).unsqueeze(1))
     return BudgetRows(
-        embeds=embeds.reshape(B * V, L, H),
-        attention_mask=masks.reshape(B * V, L),
-        labels=row_labels.reshape(B * V, L),
-        ans_pos=pos.reshape(B * V, A),
-        ans_targets=targets.unsqueeze(1).expand(B, V, A).reshape(B * V, A),
-        budget_ks=torch.tensor(ks, device=labels.device),
+        prompt=text_embeds[:, :P - 1],
+        prompt_mask=prompt_mask,
+        segment=segment,
+        segment_mask=segment_mask,
+        position_ids=(starts[rows_b] - 1).unsqueeze(1) + torch.arange(L, device=dev),
+        ans_pos=(k_row.unsqueeze(1) + j).masked_fill(~ans_valid[rows_b], -1),
+        ans_targets=targets[rows_b],
+        budget_ks=torch.tensor(ks, device=dev),
+        row_ks=k_row,
         num_images=B,
         num_budgets=V,
     )
@@ -404,10 +431,11 @@ class VLM8Budget(PreTrainedModel):
                 **kwargs) -> Dict[str, object]:
         """训练 / teacher-forcing 前向（生成在 `eval.py`）。
 
-        纯文本 batch / 纯文本 chat：`pixel_values=None`（或 `has_image` 全 False）⇒
-        **不跑 encoder**，所有预算行 k=0，等价于不带视觉前缀的普通 LM 前向。
-        `has_image[b]=False` ⇒ 该样本的预算行取 0 个视觉 token（文本任务）；混批时
-        文本行可像 data.py 那样带一张零图占位，encoder 只对图行有贡献。
+        「先看文字、后看图」：文本 prompt 先编码（跨 8 个预算只算一次），
+        视觉 token `vis[:k]` 只出现在答案段。`pixel_values=None`（或 `has_image` 全 False）
+        ⇒ **不跑 encoder**，所有行 k=0，等于「读完题直接答」的普通 LM。
+        `has_image[b]=False`（文本任务）⇒ 该样本所有预算行 k=0；混批时文本行可像
+        data.py 那样带一张零图占位，encoder 只对图行有贡献。
 
         纯文本**生成**不要走这里（forward 只算 CE）：直接 `model.lm.generate(...)`，
         见 `tools/eval_mix/bench_general_vlm8b.py:run_batch`。
@@ -430,10 +458,25 @@ class VLM8Budget(PreTrainedModel):
 
     def forward_rows(self, rows: BudgetRows,
                      budget_weights: Optional[Tensor] = None) -> Dict[str, object]:
-        """对已展开的 `BudgetRows` 跑 LM + answer-only CE（smoke 也走这条路径）。"""
+        """两段式前向：prompt 段只跑一次（KV cache）→ 每预算一条短段 → answer-only CE。
+
+        这是「先看文字、后看图」的落点：prompt 段与预算 k 无关，所以只前向一次；
+        视觉 token 在段里按 `vis[:k]` 拼在答案前面，`k` 只影响段，不影响 prompt。
+        """
+        B, P = rows.num_images, rows.prompt.size(1)
+        cache = self.lm.model(
+            inputs_embeds=rows.prompt, attention_mask=rows.prompt_mask,
+            position_ids=torch.arange(P, device=rows.prompt.device).unsqueeze(0).expand(B, -1),
+            use_cache=True).past_key_values
+        assert cache is not None, ("拿不到 prompt 的 KV cache：`--grad-ckpt` 会把 use_cache "
+                                  "强制关掉，两段式前向必须关梯度检查点")
+        cache.batch_repeat_interleave(rows.num_budgets)        # 原地扩成 B*V 行（行序 b*V+vi）
+        mask = torch.cat([rows.prompt_mask.repeat_interleave(rows.num_budgets, dim=0),
+                          rows.segment_mask], dim=1)
         hidden = self.lm.model(
-            inputs_embeds=rows.embeds, attention_mask=rows.attention_mask,
-            use_cache=False).last_hidden_state                     # (R,L,H)
+            inputs_embeds=rows.segment, attention_mask=mask,
+            position_ids=rows.position_ids, past_key_values=cache,
+            use_cache=False).last_hidden_state                     # (R,1+K+A,H)
         R, L, H = hidden.shape
         A = rows.ans_pos.size(1)
 

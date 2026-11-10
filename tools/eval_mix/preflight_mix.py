@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """run3 数据预检（CPU only，不占 GPU）：
 1) 全量：图片存在、token 长度 <=1024、答案 span 非空
-2) 抽样：真实走 data.py 的 Dataset+Collator，再用 model.expand_budget_rows 验证 8 预算行展开
+2) 抽样：真实走 data.py 的 Dataset+Collator，再用 model.expand_budget_rows 验证
+   「prompt 跨预算共享 + [锚点; vis[:k]; answer] 段」展开（先文字、后看图）
 """
 import json
 import os
@@ -69,22 +70,27 @@ vis = torch.randn(B, 8, H)
 text_embeds = torch.randn(B, T, H)
 rows_b = expand_budget_rows(vis, text_embeds, batch["attention_mask"], batch["labels"],
                             [1, 2, 3, 4, 5, 6, 7, 8])
-print("budget rows:", tuple(rows_b.embeds.shape), "num_images", rows_b.num_images,
-      "num_budgets", rows_b.num_budgets, "A(max ans len)", rows_b.ans_pos.size(1), flush=True)
-assert rows_b.embeds.shape == (B * 8, T + 8, H), rows_b.embeds.shape
 valid = rows_b.ans_targets != IGNORE_INDEX
-assert bool((rows_b.ans_pos[valid] >= 1).all()), rows_b.ans_pos[valid].min()
-print("valid target count:", int(valid.sum()), "expected:", int((rows_b.ans_targets != IGNORE_INDEX).sum()),
+lab_valid = batch["labels"] != IGNORE_INDEX
+starts, counts = lab_valid.long().argmax(dim=1), lab_valid.sum(dim=1)
+print(f"budget rows: prompt={tuple(rows_b.prompt.shape)} "
+      f"segment={tuple(rows_b.segment.shape)} num_images={rows_b.num_images} "
+      f"num_budgets={rows_b.num_budgets} A(max ans len)={rows_b.ans_pos.size(1)}",
       flush=True)
+assert rows_b.prompt.shape == (B, int(starts.max()) - 1, H), rows_b.prompt.shape
+assert rows_b.segment.shape == (B * 8, 1 + 8 + int(counts.max()), H), rows_b.segment.shape
+assert rows_b.row_ks.tolist() == [k for _ in range(B) for k in range(1, 9)]
+print("valid target count:", int(valid.sum()), flush=True)
 # k=1 行 与 k=8 行的 target 应完全一致
 t1 = rows_b.ans_targets[0::8]
 t8 = rows_b.ans_targets[7::8]
 assert torch.equal(t1, t8)
-# ans_pos 应满足 pos[k] = pos[1] + (k-1)
-pos1 = rows_b.ans_pos[0::8]
-v1 = rows_b.ans_targets[0::8] != IGNORE_INDEX
-for k in range(8):
-    pk = rows_b.ans_pos[k::8]
-    assert torch.equal(pk[v1] - pos1[v1], torch.full_like(pos1[v1], k)), k
-print("expand_budget_rows OK（行序/移位/target 一致）", flush=True)
+# 段内预测位置 = 该行视觉 token 数 + 答案内偏移（只依赖 row_ks ⇒ 跨预算只差 k）
+j = torch.arange(rows_b.ans_pos.size(1)).unsqueeze(0).expand_as(rows_b.ans_pos)
+assert torch.equal(rows_b.ans_pos[valid], (rows_b.row_ks.unsqueeze(1) + j)[valid])
+assert bool((rows_b.ans_pos[~valid] == -1).all())
+# 段长 = 锚点 1 + k 个视觉 token + 该样本答案 token 数
+assert torch.equal(rows_b.segment_mask.sum(dim=1),
+                   1 + rows_b.row_ks + counts.repeat_interleave(8))
+print("expand_budget_rows OK（段布局 / ans_pos=row_ks+j / target 一致）", flush=True)
 print("PREFLIGHT OK", flush=True)

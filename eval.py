@@ -110,7 +110,7 @@ def prompt_lens(labels):
 @torch.no_grad()
 def generate_prompt_only(model, pixel_values, input_ids, labels, budgets,
                          visual_mode: str, has_image=None):
-    """只喂 prompt 的 greedy 生成（正确协议）：`[vis[:k]; prompt]`，逐行解码。"""
+    """只喂 prompt 的 greedy 生成：`[prompt][vis[:k]]`（先文字后图），逐行解码。"""
     from model import apply_visual_mode
     prompt_lens_ = prompt_lens(labels)
     encoder_dtype = next(model.encoder.parameters()).dtype
@@ -124,7 +124,7 @@ def generate_prompt_only(model, pixel_values, input_ids, labels, budgets,
         for b in range(pixel_values.size(0)):
             n = int(prompt_lens_[b])
             k_eff = k if has_image is None or bool(has_image[b]) else 0
-            embeds = torch.cat([vis[b, :k_eff], text_embeds[b, :n]], dim=0).unsqueeze(0)
+            embeds = torch.cat([text_embeds[b, :n], vis[b, :k_eff]], dim=0).unsqueeze(0)
             mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=embeds.device)
             generated = model.lm.generate(
                 inputs_embeds=embeds, attention_mask=mask,

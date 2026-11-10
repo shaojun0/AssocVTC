@@ -5,10 +5,10 @@ vlm8b 数据管线 — SFT jsonl → (pixel_values, input_ids, labels)
 数据源（remote）: /root/autodl-tmp/exp_qwen/in100_selfdistill/sft/*.jsonl
 字段：`image`（相对根目录）、`messages_short`、`gt`（评测 GT 类名）。
 
-文本布局（视觉前缀由 `model.expand_budget_rows()` 拼）::
+文本布局（视觉 token 由 `model.expand_budget_rows()` 插到 prompt 与答案之间）::
 
-    [system][user][assistant header]  = prompt（labels 全 -100）
-    [answer][eos]                     = answer（labels 保留 id）
+    [system][user][assistant header]  = prompt（labels 全 -100，跨预算共享、只前向一次）
+    [vis[:k]][answer][eos]            = 答案段（labels 保留 answer+eos 的 id）
 
 图像变换：train = RRC(448,0.35–1.0)+HFlip；val = Resize(512)+CenterCrop(448)；
 两者都 ImageNet Normalize。collator 只 right-pad B 张图；V 行展开在 model 内。

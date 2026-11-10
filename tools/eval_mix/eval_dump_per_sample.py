@@ -14,8 +14,9 @@ vlm8b 逐样本筛查 — 每行 × 每预算 CE（多视觉消融）+ 少量 gr
   · mean     8 个 token 取均值后广播（测「一个 token 是否已含全部信息」）
   · repeat   只用第 1 个 token 复制 8 份（测冗余）
 
-⏱ 成本：一次 forward_rows 覆盖 8 个预算；5 个模式 ≈ 22× 单序列前向；greedy 只跑
-`--gen-k` 指定的预算（默认 1,8）。
+⏱ 成本：一次 forward_rows 覆盖 8 个预算（prompt 段只前向一次，预算只影响答案短段，
+旧布局「每行重复前向 prompt」不再有）；5 个模式 ≈ 10× 单序列前向（nothink）；greedy
+只跑 `--gen-k` 指定的预算（默认 1,8）。
 
 用法::
 
@@ -268,10 +269,11 @@ def main() -> None:
                     for b in range(pixel.size(0)):
                         # ⚠️ 只喂 prompt（到 answer 之前）：喂全文的话模型会看到答案，
                         # 之后继续生成的内容与答案无关（实测大量空串，acc 被严重低估）。
+                        # 布局 `[prompt][vis[:k]]`（先文字后看图），与 forward_rows 一致。
                         n_prompt = int(prompt_lens(labels[b:b + 1])[0])
                         k_eff = k if bool(has_image[b]) else 0
                         embeds = torch.cat(
-                            [vis[b, :k_eff], text_embeds[b, :n_prompt]], dim=0).unsqueeze(0)
+                            [text_embeds[b, :n_prompt], vis[b, :k_eff]], dim=0).unsqueeze(0)
                         row_mask = torch.ones(embeds.shape[:2], dtype=torch.long,
                                               device=embeds.device)
                         gen = lm.generate(inputs_embeds=embeds, attention_mask=row_mask,

@@ -75,26 +75,40 @@ def make_encoder_ckpt(path: str) -> str:
 
 
 class _Backbone(nn.Module):
-    """一维 causal 自注意力骨架（只为给 Trainer 提供 hidden）。"""
+    """一维 causal 自注意力骨架（给 Trainer 提供 hidden；支持 KV cache/位置）。"""
 
-    def __init__(self, dim=LM_HIDDEN, heads=8):
+    def __init__(self, dim=LM_HIDDEN, heads=8, max_pos=4096):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
+        self.pos = nn.Embedding(max_pos, dim)
         self.heads = heads
 
-    def forward(self, inputs_embeds, attention_mask=None, use_cache=False):
+    def forward(self, inputs_embeds, attention_mask=None, position_ids=None,
+                use_cache=False, past_key_values=None):
+        from types import SimpleNamespace
+        from transformers.cache_utils import DynamicCache
+        if position_ids is None:
+            position_ids = torch.arange(inputs_embeds.shape[1],
+                                        device=inputs_embeds.device).unsqueeze(0)
         b, n, d = inputs_embeds.shape
+        hidden = inputs_embeds + self.pos(position_ids)
         if attention_mask is None:
-            attention_mask = inputs_embeds.new_ones((b, n), dtype=torch.long)
-        q, k, v = self.qkv(inputs_embeds).reshape(
+            attention_mask = hidden.new_ones((b, n), dtype=torch.long)
+        q, k, v = self.qkv(hidden).reshape(
             b, n, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
+        if past_key_values is None and use_cache:
+            past_key_values = DynamicCache()
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, 0)
+        total = k.size(2)
         scores = q @ k.transpose(-1, -2) / (d // self.heads) ** 0.5
-        causal = torch.ones(n, n, dtype=torch.bool, device=inputs_embeds.device).tril()
+        causal = torch.ones(n, total, dtype=torch.bool,
+                            device=hidden.device).tril(diagonal=total - n)
         scores = scores.masked_fill(~(causal & attention_mask.bool()[:, None, None, :]), -1e9)
         out = (scores.softmax(-1) @ v).transpose(1, 2).reshape(b, n, d)
-        from types import SimpleNamespace
-        return SimpleNamespace(last_hidden_state=inputs_embeds + self.proj(out))
+        return SimpleNamespace(last_hidden_state=hidden + self.proj(out),
+                               past_key_values=past_key_values)
 
 
 class _TinyLM(nn.Module):
