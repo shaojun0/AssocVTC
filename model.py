@@ -89,28 +89,101 @@ class VLM8BudgetConfig(PretrainedConfig):
 # 8 预算行展开（纯张量；smoke.py 单测这一层）
 # ═══════════════════════════════════════════════════════════════
 
-def _repeat_cache(cache: object, repeats: int) -> None:
-    """把 prefill 的 KV/状态 cache 按 batch 维扩成 `repeats` 份（行序 `b*V+vi`）。
+def _repeat_cache(cache: object, repeats: int, batch: int) -> None:
+    """把 prefill 的 cache 按 batch 维扩成 `repeats` 份（行序 `b*V+vi`）。
 
-    HF 只给**纯注意力**的 cache 层实现了 `batch_repeat_interleave`；Qwen3.5 是 hybrid
-    （24 层线性注意力 + 8 层全注意力），线性注意力层存的是 conv/recurrent 状态，没有这个
-    方法，所以按层类型分开处理。遇到没见过的层类型直接报错——静默算错比崩更糟。
+    全注意力层有 `batch_repeat_interleave`；Qwen3.5 的线性注意力层没有——它的状态在
+    `conv_states` / `recurrent_states` 这类 `dict[str, Tensor]` 里（transformers 5.22 实测，
+    dim 0 就是 batch），所以这里按「dim0 == batch 的张量」逐个扩。遇到不认识的层类型
+    直接报错：静默算错比崩更糟。
     """
     if getattr(cache, "layers", None) is None:      # transformers 4.x 的纯注意力 cache
         cache.batch_repeat_interleave(repeats)
         return
+
+    def grow(value: object) -> object:
+        if torch.is_tensor(value) and value.dim() and value.size(0) == batch:
+            return value.repeat_interleave(repeats, dim=0)
+        if isinstance(value, dict):
+            return {key: grow(item) for key, item in value.items()}
+        return value
+
     for layer in cache.layers:
         if hasattr(layer, "batch_repeat_interleave"):
             layer.batch_repeat_interleave(repeats)
-        elif hasattr(layer, "conv_states") or hasattr(layer, "recurrent_states"):
-            for name in ("conv_states", "recurrent_states"):     # 线性注意力：状态也在 dim 0
-                state = getattr(layer, name, None)
-                if state is not None:
-                    setattr(layer, name, state.repeat_interleave(repeats, dim=0))
-            layer.batch_size *= repeats
-        else:
+            continue
+        grown = False
+        for name, value in list(vars(layer).items()):
+            if isinstance(value, dict):
+                value = {key: item for key, item in value.items() if torch.is_tensor(item)}
+            if not (torch.is_tensor(value) or value):
+                continue
+            new_value = grow(value)
+            if new_value is not value:
+                setattr(layer, name, new_value)
+                grown = True
+        if not grown:
             raise RuntimeError(
                 f"未知 cache 层类型 {type(layer).__name__}：无法把 prefill 复用到 V 个预算")
+
+
+def _patch_linear_cache_out_of_place() -> None:
+    """Qwen3.5 线性注意力 cache 的「原地 copy_」改成赋值（训两段式前向必需）。
+
+    HF 为了让 cudagraphs 保住缓冲区地址，用 `self.recurrent_states[i].copy_(新状态)` 原地
+    写；但 FLA 的反向要把**初态**存下来，而这块缓冲区正是初态本身 → 训练时报
+    `one of the variables needed for gradient computation has been modified by an inplace
+    operation`。两段式前向（prefill 的 cache 被答案段复用）必须让 cache 更新是函数式的，
+    所以把这两个方法换成「赋值新张量」（值不变，只是不再原地写）。
+    """
+    try:
+        from transformers.cache_utils import LinearAttentionLayer as layer_cls
+    except ImportError:                              # 纯注意力模型（Qwen2 等）用不到
+        return
+
+    def update_recurrent_state(self, recurrent_states, state_idx: int = 0, **kwargs):
+        if not self.is_recurrent_states_initialized[state_idx]:
+            self.lazy_initialization(recurrent_states=recurrent_states, state_idx=state_idx)
+        self.recurrent_states[state_idx] = recurrent_states
+        return recurrent_states
+
+    def update_conv_state(self, conv_states, state_idx: int = 0,
+                          conv_kernel_size=None, **kwargs):
+        if not self.is_conv_states_initialized[state_idx]:
+            self.lazy_initialization(conv_states=conv_states, state_idx=state_idx,
+                                     conv_kernel_size=conv_kernel_size)
+        kernel = self.conv_kernel_size[state_idx]
+        if not self.has_previous_state[state_idx]:   # prefill：必要时左侧补零
+            full = conv_states
+            self.has_previous_state[state_idx] = True
+            if not self.record_past and full.shape[-1] < kernel:
+                full = F.pad(full, (kernel - full.shape[-1], 0), value=0)
+        else:
+            full = torch.cat([self.conv_states[state_idx], conv_states], dim=-1)
+        self.conv_states[state_idx] = full if self.record_past else full[..., -kernel:]
+        return full
+
+    layer_cls.update_recurrent_state = update_recurrent_state
+    layer_cls.update_conv_state = update_conv_state
+
+
+def _assert_two_stage_supported(lm: nn.Module) -> None:
+    """两段式前向要求「带 cache 的多 token 续算」；hybrid 线性注意力层做不到就 fail-fast。
+
+    Qwen3.5/Qwen3Next 的线性注意力层只在 `seq_len == 1`（逐 token 解码）时才吃 cache 的
+    状态，多 token 续算会把 initial_state 丢掉重算 ⇒ 段的线性层完全看不到 prompt。真机
+    实测（Qwen3.5-4B / transformers 5.22）：两段式与整段单趟前向 CE 差 0.27，不能当优化用。
+    所以有条带 cache 前向能力的模型才允许走两段式，否则宁可报错也不要静默训一个错的模型。
+    """
+    cfg = getattr(lm, "config", None)
+    layer_types = getattr(cfg, "layer_types", None) or getattr(
+        getattr(cfg, "text_config", None), "layer_types", None) or []
+    if any("linear" in str(t) for t in layer_types):
+        raise RuntimeError(
+            "这个骨干是 hybrid（线性注意力层），两段式前向会丢 prompt 的 cache 状态："
+            "实测 CE 差 0.27。请用旧布局（每行 [prompt; vis[:k]; answer] 一次前向），"
+            "或用随机预算采样省算力。"
+        )
 
 
 class BudgetRows(NamedTuple):
@@ -350,6 +423,7 @@ class VLM8Budget(PreTrainedModel):
                  encoder: Optional[nn.Module] = None, lm: Optional[nn.Module] = None,
                  grad_ckpt: bool = False):
         super().__init__(config)
+        _patch_linear_cache_out_of_place()        # 两段式前向需要函数式的 cache 更新
         self.projector = BudgetProjector()
         self.encoder = encoder if encoder is not None else AssocVTCEncoder(
             config.encoder_ckpt)
@@ -487,6 +561,7 @@ class VLM8Budget(PreTrainedModel):
         这是「先看文字、后看图」的落点：prompt 段与预算 k 无关，所以只前向一次；
         视觉 token 在段里按 `vis[:k]` 拼在答案前面，`k` 只影响段，不影响 prompt。
         """
+        _assert_two_stage_supported(self.lm)
         B, P = rows.num_images, rows.prompt.size(1)
         cache = self.lm.model(
             inputs_embeds=rows.prompt, attention_mask=rows.prompt_mask,
@@ -494,7 +569,7 @@ class VLM8Budget(PreTrainedModel):
             use_cache=True).past_key_values
         assert cache is not None, ("拿不到 prompt 的 KV cache：`--grad-ckpt` 会把 use_cache "
                                   "强制关掉，两段式前向必须关梯度检查点")
-        _repeat_cache(cache, rows.num_budgets)                 # 原地扩成 B*V 行（行序 b*V+vi）
+        _repeat_cache(cache, rows.num_budgets, rows.num_images)  # 原地扩成 B*V 行（b*V+vi）
         mask = torch.cat([rows.prompt_mask.repeat_interleave(rows.num_budgets, dim=0),
                           rows.segment_mask], dim=1)
         hidden = self.lm.model(

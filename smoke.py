@@ -274,11 +274,11 @@ def check_repeat_cache(checker: Checker) -> None:
     """混合 cache：线性注意力层没有 `batch_repeat_interleave`，要按状态张量扩 batch。"""
     from model import _repeat_cache
 
-    class _Linear:
+    class _Linear:                       # transformers 5.22 实测形态：状态在 dict 里
         def __init__(self):
-            self.conv_states = torch.zeros(2, 4, 3)
-            self.recurrent_states = torch.zeros(2, 2, 5)
-            self.batch_size = 2
+            self.conv_states = {0: torch.zeros(2, 4, 3)}
+            self.recurrent_states = {0: torch.zeros(2, 2, 5)}
+            self.has_previous_state = {0: True}
 
     class _Full:
         def __init__(self):
@@ -288,12 +288,12 @@ def check_repeat_cache(checker: Checker) -> None:
             self.repeats = repeats
 
     cache = SimpleNamespace(layers=[_Linear(), _Full()])
-    _repeat_cache(cache, 8)
+    _repeat_cache(cache, 8, 2)
     linear, full = cache.layers
-    checker.check("_repeat_cache: 线性注意力状态/全注意力层都扩成 8 份",
-                  tuple(linear.conv_states.shape) == (16, 4, 3)
-                  and tuple(linear.recurrent_states.shape) == (16, 2, 5)
-                  and linear.batch_size == 16 and full.repeats == 8)
+    checker.check("_repeat_cache: 线性注意力 dict 状态/全注意力层都扩成 8 份",
+                  tuple(linear.conv_states[0].shape) == (16, 4, 3)
+                  and tuple(linear.recurrent_states[0].shape) == (16, 2, 5)
+                  and linear.has_previous_state == {0: True} and full.repeats == 8)
 
 
 def check_text_only(checker: Checker, model: VLM8Budget, batch: dict) -> None:

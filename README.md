@@ -134,7 +134,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 | `data_8budget.py` | `data.py` | `SelfDistillSFTDataset` / `EightBudgetCollator` / `build_image_transform` |
 | `train_8budget.py` | `train.py` | `VLM8BudgetTrainer` / `BudgetCELogCallback` |
 | `ds_zero3.json` | `ds_zero3.json` | ZeRO-3 + bf16 + gather-on-save |
-| `smoke_mask.py` | `smoke.py` | 22 项自检（形状 / ans_pos / shift 等价 / 截断隔离×2 / 行独立 / pad 隔离 / 文本行零视觉 token / 纯文本 batch / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
+| `smoke_mask.py` | `smoke.py` | **29 项**自检（形状 / ans_pos / 两段式=单趟 shift 等价 / 截断隔离 / 行独立 / pad 隔离 / 文本行零视觉 token / 纯文本 batch / prompt_mask 防泄露 / LM 只前向 2 次 / `_repeat_cache` / prompt_lens / HF 加载契约 / jinja 模板 / 静态防回退） |
 | `eval_8budget.py` | `eval.py` | per-k CE + greedy + json/md |
 | `report_8budget.py` | 未做（v1） | `eval.md` 直接出表；画图留给报告脚本 |
 
@@ -149,6 +149,13 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 - **P0 shift**：`expand_budget_rows()` 里 `ans_pos = k + j`（段内预测位置 = 该行视觉
   token 数 + 答案内偏移）；改动此处必跑 `smoke.py`（shift 等价 + 防泄露）。临时改成
   label 自身位置（`+1`）会让防泄露检查 FAIL。
+- **⚠️ 只在纯注意力骨干上成立**：Qwen3.5/Qwen3Next 的线性注意力层只在 `seq_len == 1`
+  （逐 token 解码）时才吃 cache 状态，多 token 的答案段会把 `initial_state` 丢掉重算。
+  真机实测（Qwen3.5-4B / transformers 5.22 / A800）：两段式 vs 整段单趟前向 CE 差 **0.27**、
+  hidden 差 20，**不能当优化用**；而且共享 prompt 的右 pad 会被 `apply_mask_to_padding_states`
+  置零后照常跑 conv/delta-rule，把状态打掉（`conv_state` norm 148→0）。所以
+  `forward_rows` 里对 hybrid 骨干直接 fail-fast，改造只对纯注意力骨干有效（真机加速
+  1.2~1.8×，见 commit 说明），要省 hybrid 的 8× 请用随机预算采样。
 - **两段式前向与 `--grad-ckpt` 不兼容**：prompt 只前向一次靠的是 KV cache，梯度检查点
   会强制 `use_cache=False` ⇒ 第二段拿不到 cache。`train.py` 已 fail-fast；省显存请调
   micro-batch / ZeRO-2，别开检查点。
@@ -197,7 +204,7 @@ Qwen `/root/qwen_models/Qwen3.5-4B`、图片根 `/root/autodl-tmp/datasets/image
 fp64 范数探测降级、奇数 head_dim 的 SDPA 走 math、deepspeed 的 dist-info。自检：
 
 ```bash
-python3 smoke.py            # 原 22 项张量逻辑
+python3 smoke.py            # 29 项张量逻辑（CPU，不需要权重）
 python3 test_freeze.py      # 冻结语义 27 项（CPU）
 python3 test_freeze_compat.py  # 兼容性契约 18 项（不改 state_dict / 默认路径等价 / 先冻后载）
 torchrun --nproc_per_node=2 musa_e2e.py --stage 2   # 真实 Trainer+DS 7 项
