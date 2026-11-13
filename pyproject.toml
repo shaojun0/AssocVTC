@@ -1,0 +1,18 @@
+[project]
+name = "assocvtc"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.41.0",
+    "datasets>=2.14.0",
+    "pillow>=9.0.0",
+    "safetensors>=0.4.0",
+    "sentencepiece>=0.1.99",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "tqdm>=4.64.0",
+    # Qwen3.5 GDN (torch_chunk_gated_delta_rule) requires 5.22.2+
+    "transformers>=5.22.2",
+]
