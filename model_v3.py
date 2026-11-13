@@ -482,19 +482,20 @@ def patches_to_image(pixels: Tensor, H: int, W: int,
                      clamp_255: bool = True) -> Tensor:
     """(B,N,588) 像素 patch → (B,H,W,3) 图像（给定 mean/std 时反归一化到 0-255）。
 
-    **布局的权威定义 = SRPhase1V2.decode 里 target_pix 的构造**: patch 向量 =
-    (C,14,14) **通道优先**（展开序 = c*14*14 + dy*14 + dx）, patch 顺序
-    row-major（先 y 后 x）, N=(H/14)*(W/14)。本函数是它的**严格逆**,
+    **布局的权威定义 = SRPhase1V2.decode 里 target_pix 的构造**, 现在是
+    `F.unfold(patch=14, stride=14)`（ATen 定义: 列序 c*14*14 + dy*14 + dx,
+    块序 row-major）, N=(H/14)*(W/14)。本函数 = 它的严格逆 `F.fold`。
     model_v3.py 自检 §1b 有往返断言（patches_to_image(target_pix,
     clamp_255=False) == 输入图 (B,H,W,C) 逐位相等）。
 
-    踩坑记录（2026-09-15 修）: 消费方历史上把反变换写成
-    `reshape(B, gh, gw, 14, 14, 3).permute(0,1,3,2,4,5)`——把 588 当成
+    踩坑记录（2026-09-15 修, 2026-11-13 改为 fold）: 消费方历史上把反变换
+    写成 `reshape(B, gh, gw, 14, 14, 3).permute(...)`——把 588 当成
     "(14,14,3) 通道在后"读, 与 decode 的通道优先布局不符 ⇒ 每张"重建图"的
     每个 14×14 patch 内部像素被打乱（实测往返 vs 原图 max|diff|=255 /
     mean≈85; 修正后为 0）。训练不受影响（loss 两侧同用同一个 patch 平铺
     向量, 无需求逆）, 但可视化与 0-255 口径的 L1 都不可信。消费方
     （infer_v2_test.py / visualize_recon_pixel.py）一律调用本函数。
+    改用 `F.fold` 后布局由库保证, 不再依赖手写 permute 顺序。
 
     clamp_255: 只在反归一化后生效（默认 True）; 纯布局往返（输入已在
     归一化空间、不传 mean/std）传 False, 否则会被 clamp 破坏数值。
@@ -503,9 +504,9 @@ def patches_to_image(pixels: Tensor, H: int, W: int,
     assert px == 3 * 14 * 14, f"patch 向量长度应为 588, got {px}"
     assert (H // 14) * (W // 14) == N, \
         f"N={N} 与 {H}x{W} 的 patch 数 {(H // 14) * (W // 14)} 不符"
-    img = pixels.reshape(B, H // 14, W // 14, 3, 14, 14) \
-                .permute(0, 1, 4, 2, 5, 3) \
-                .reshape(B, H, W, 3)
+    img = F.fold(pixels.transpose(1, 2), output_size=(H, W),
+                 kernel_size=14, stride=14)          # (B,3,H,W)
+    img = img.permute(0, 2, 3, 1)                    # (B,H,W,3)
     if mean is not None and std is not None:
         m = torch.as_tensor(mean, dtype=img.dtype,
                             device=img.device).view(1, 1, 1, 3)
@@ -821,6 +822,11 @@ class SRPhase1V2(nn.Module):
         self.num_patches = num_patches
         self.dim = dim
         self.patch_px = patch_px
+        # 构造参数留档（子类 / 诊断脚本读这里, 不用去嗅探
+        # nn.TransformerDecoderLayer 的内部属性 linear1 / dropout1）
+        self.heads = heads
+        self.mlp_ratio = mlp_ratio
+        self.decoder_dropout = decoder_dropout
 
         # 最终生效采样步集: 先按 N 计划选步（K 尚未推导; 与 train/infer
         # CLI 的 slice 索引口径一致, 见 select_steps）; K = 显式 num_specials
@@ -910,7 +916,11 @@ class SRPhase1V2(nn.Module):
     def _pixel_target(self, x: Tensor) -> Tensor:
         """(B,3,H,W) 归一化像素 → (B,N,patch_px) patch（通道优先布局）。
 
-        布局权威定义仍是这里（`patches_to_image` 是严格逆）; 逐帧调用。
+        布局权威定义 = `F.unfold`（ATen 里写死: 列序 = c*14*14 + dy*14 + dx,
+        块序 row-major）, `patches_to_image` 的 `F.fold` 是它的严格逆。
+        2026-11-13: 原来是手写 reshape/permute/reshape, 与 unfold 逐位等价
+        但需自己维护布局口径（历史上"通道优先 vs 通道在后"踩过坑）,
+        现直接调库。逐帧调用。
         """
         B, C, H, W = x.shape
         assert H % 14 == 0 and W % 14 == 0, "输入须为 14 的倍数"
@@ -919,9 +929,7 @@ class SRPhase1V2(nn.Module):
             f"但模型 num_patches={self.num_patches}"
         assert C * 14 * 14 == self.patch_px, \
             f"通道数 {C} 对应 patch_px={C * 14 * 14}, 但模型 patch_px={self.patch_px}"
-        return x.reshape(B, C, H // 14, 14, W // 14, 14) \
-                .permute(0, 2, 4, 1, 3, 5) \
-                .reshape(B, self.num_patches, self.patch_px)
+        return F.unfold(x, kernel_size=14, stride=14).transpose(1, 2)
 
     # ── decode: 逐帧解码 + 逐帧像素损失（唯一路径）──
     def decode(self, z_cls: Tensor, z_s: Tensor, pixel_values: Tensor) -> dict:
