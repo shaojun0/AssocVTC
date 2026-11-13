@@ -1,0 +1,11 @@
+=== 32M bs4 F32 warm24  v8 frame_chunk=4
+[v7] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=4 F=32 n_warm=24 grad_frames/step=32 | 5.40 s/step | 168.7 ms/梯度帧 | peak 5.1 GB | psnr 10.74
+[v8] params=88.0M (enc 33.2 / mid 24.1 / dec 30.7) bs=4 F=32 n_warm=24 grad_frames/step=32 | 3.51 s/step | 109.8 ms/梯度帧 | peak 8.8 GB | psnr 10.77
+[v8] params=88.0M (enc 33.2 / mid 24.1 / dec 30.7) bs=4 F=32 n_warm=24 grad_frames/step=32 | 3.53 s/step | 110.3 ms/梯度帧 | peak 8.8 GB | psnr 10.77
+=== 32M bs8 F32 warm24  v8 frame_chunk=4
+[v7] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=8 F=32 n_warm=24 grad_frames/step=64 | 7.15 s/step | 111.7 ms/梯度帧 | peak 9.3 GB | psnr 10.74
+[v8] OOM (bs=8 F=32)
+=== 240M bs1 F16 warm8  v8 frame_chunk=2
+[v7] params=703.3M (enc 242.7 / mid 228.5 / dec 232.0) bs=1 F=16 n_warm=8 grad_frames/step=8 | 2.97 s/step | 371.7 ms/梯度帧 | peak 7.7 GB | psnr 10.75
+[v8] params=661.1M (enc 242.7 / mid 186.4 / dec 232.0) bs=1 F=16 n_warm=8 grad_frames/step=8 | 2.11 s/step | 264.3 ms/梯度帧 | peak 7.7 GB | psnr 10.78
+Fri Nov 13 11:04:32 CST 2026

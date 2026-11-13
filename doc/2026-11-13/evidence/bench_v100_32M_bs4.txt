@@ -1,0 +1,5 @@
+=== 32M bs4 F32 warm24
+[v7] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=4 F=32 n_warm=24 grad_frames/step=32 | 5.66 s/step | 176.8 ms/梯度帧 | peak 5.1 GB | psnr 10.74
+[v7b] OOM (bs=4 F=32)
+[v8] OOM (bs=4 F=32)
+Fri Nov 13 11:01:44 CST 2026

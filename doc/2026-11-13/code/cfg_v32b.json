@@ -1,0 +1,55 @@
+{
+  "img": 448,
+  "patch": 32,
+  "grid": 14,
+  "num_patches": 196,
+  "num_specials": 16,
+  "steps": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "enc": {
+    "dim": 512,
+    "depth": 10,
+    "heads": 8,
+    "ratio": 4.0
+  },
+  "mid": {
+    "dim": 512,
+    "depth": 7,
+    "heads": 8,
+    "ratio": 4.0,
+    "grad_ckpt": false
+  },
+  "dec": {
+    "dim": 512,
+    "depth": 7,
+    "heads": 8,
+    "ratio": 4.0,
+    "grad_ckpt": true,
+    "plan": "fixed",
+    "block": 2,
+    "head_cfg": {
+      "ch0": 128,
+      "mid": [
+        96,
+        72,
+        48,
+        32
+      ],
+      "nblk": [
+        2,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  }
+}

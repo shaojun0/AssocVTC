@@ -1,0 +1,12 @@
+free GB 12.7
+=== 32M bs2 F32 warm24
+  with device_autocast_ctx, torch.cpu.amp.autocast(**cpu_autocast_kwargs), recompute_context:  # type: ignore[attr-defined]
+[v7] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=2 F=32 n_warm=24 grad_frames/step=16 | 6.40 s/step | 399.8 ms/梯度帧 | peak 3.1 GB | psnr 10.74
+[v7b] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=2 F=32 n_warm=24 grad_frames/step=16 | 4.03 s/step | 251.7 ms/梯度帧 | peak 7.0 GB | psnr 10.77
+[v8] params=88.0M (enc 33.2 / mid 24.1 / dec 30.7) bs=2 F=32 n_warm=24 grad_frames/step=16 | 4.08 s/step | 255.0 ms/梯度帧 | peak 7.1 GB | psnr 10.77
+=== 32M bs2 F8 cold
+  with device_autocast_ctx, torch.cpu.amp.autocast(**cpu_autocast_kwargs), recompute_context:  # type: ignore[attr-defined]
+[v7] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=2 F=8 n_warm=0 grad_frames/step=16 | 5.96 s/step | 372.3 ms/梯度帧 | peak 3.8 GB | psnr 10.75
+[v7b] params=93.4M (enc 33.2 / mid 29.5 / dec 30.7) bs=2 F=8 n_warm=0 grad_frames/step=16 | 3.43 s/step | 214.2 ms/梯度帧 | peak 7.7 GB | psnr 10.78
+[v8] params=88.0M (enc 33.2 / mid 24.1 / dec 30.7) bs=2 F=8 n_warm=0 grad_frames/step=16 | 1.87 s/step | 117.0 ms/梯度帧 | peak 7.7 GB | psnr 10.77
+Fri Nov 13 10:58:56 CST 2026

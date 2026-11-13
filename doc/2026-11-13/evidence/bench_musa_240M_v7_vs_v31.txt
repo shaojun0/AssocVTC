@@ -1,0 +1,11 @@
+torch 2.11.0.post1
+=== 240M 单卡 bs4 F32 w24  bf16  (真实 run 的每卡口径)
+device=musa:0
+[v7] params=703.3M (enc 242.7 / mid 228.5 / dec 232.0) bs=4 F=32 n_warm=24 grad_frames/step=32 | 33.02 s/step | 1032.0 ms/梯度帧 | peak 24.9 GB | psnr 10.78
+[v7b] params=703.3M (enc 242.7 / mid 228.5 / dec 232.0) bs=4 F=32 n_warm=24 grad_frames/step=32 | 31.55 s/step | 985.8 ms/梯度帧 | peak 31.9 GB | psnr 10.77
+[v8] params=661.1M (enc 242.7 / mid 186.4 / dec 232.0) bs=4 F=32 n_warm=24 grad_frames/step=32 | 8.41 s/step | 262.8 ms/梯度帧 | peak 30.5 GB | psnr 10.77
+=== 240M 单卡 bs2 F32 w24
+device=musa:0
+[v7] params=703.3M (enc 242.7 / mid 228.5 / dec 232.0) bs=2 F=32 n_warm=24 grad_frames/step=16 | 29.55 s/step | 1846.7 ms/梯度帧 | peak 19.5 GB | psnr 10.78
+[v8] params=661.1M (enc 242.7 / mid 186.4 / dec 232.0) bs=2 F=32 n_warm=24 grad_frames/step=16 | 5.33 s/step | 333.2 ms/梯度帧 | peak 17.7 GB | psnr 10.77
+Fri Nov 13 16:19:09 CST 2026

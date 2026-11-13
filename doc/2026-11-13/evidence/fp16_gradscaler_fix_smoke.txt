@@ -1,0 +1,20 @@
+[11-13 13:36:22] VAL cold=10.677 rec=10.674 warm=10.654
+/root/venv32/lib/python3.12/site-packages/torch/utils/checkpoint.py:1399: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with device_autocast_ctx, torch.cpu.amp.autocast(**cpu_autocast_kwargs), recompute_context:  # type: ignore[attr-defined]
+[11-13 13:36:26] grad_norm(before clip) 0.240
+[11-13 13:36:41] step 5 loss 0.2464 psnr 11.25 lr 1.00e-04 3.89s/step elapsed 0.01h n_warm 0 mem 7.1G
+[11-13 13:36:45] grad_norm(before clip) 0.048
+[11-13 13:37:00] step 10 loss 0.2280 psnr 11.86 lr 2.00e-04 3.84s/step elapsed 0.01h n_warm 0 mem 7.1G
+[11-13 13:37:04] grad_norm(before clip) 0.104
+[11-13 13:37:19] step 15 loss 0.2540 psnr 10.96 lr 1.92e-04 3.82s/step elapsed 0.02h n_warm 0 mem 7.1G
+[11-13 13:37:23] grad_norm(before clip) 0.238
+[11-13 13:37:38] step 20 loss 0.2023 psnr 12.47 lr 1.61e-04 3.82s/step elapsed 0.02h n_warm 0 mem 7.1G
+[11-13 13:37:42] grad_norm(before clip) 0.220
+[11-13 13:37:57] step 25 loss 0.2694 psnr 10.83 lr 1.15e-04 3.81s/step elapsed 0.03h n_warm 0 mem 7.1G
+[11-13 13:38:01] grad_norm(before clip) 0.138
+[11-13 13:38:16] step 30 loss 0.2352 psnr 11.61 lr 6.64e-05 3.80s/step elapsed 0.03h n_warm 0 mem 7.1G
+[11-13 13:38:20] grad_norm(before clip) 0.254
+[11-13 13:38:35] step 35 loss 0.2473 psnr 11.35 lr 2.81e-05 3.80s/step elapsed 0.04h n_warm 0 mem 7.1G
+[11-13 13:38:38] grad_norm(before clip) 0.101
+[11-13 13:38:54] step 40 loss 0.2331 psnr 11.73 lr 1.05e-05 3.80s/step elapsed 0.04h n_warm 0 mem 7.1G
+[11-13 13:38:56] DONE step 40 -> /tmp/smoke_fp16/last.pt

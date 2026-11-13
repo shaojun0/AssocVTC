@@ -1,0 +1,54 @@
+{
+  "img": 448,
+  "patch": 32,
+  "grid": 14,
+  "num_patches": 196,
+  "num_specials": 32,
+  "steps": [
+    1,
+    4,
+    9,
+    16,
+    25
+  ],
+  "enc": {
+    "dim": 1024,
+    "depth": 19,
+    "heads": 16,
+    "ratio": 4.0
+  },
+  "mid": {
+    "dim": 1536,
+    "depth": 6,
+    "heads": 16,
+    "ratio": 4.0,
+    "grad_ckpt": false,
+    "kind": "gdn"
+  },
+  "dec": {
+    "dim": 1536,
+    "depth": 6,
+    "heads": 16,
+    "ratio": 4.0,
+    "grad_ckpt": true,
+    "head_cfg": {
+      "ch0": 192,
+      "mid": [
+        160,
+        128,
+        96,
+        64
+      ],
+      "nblk": [
+        2,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    "frame_batch": true,
+    "frame_chunk": 4
+  },
+  "arch": "v8"
+}
