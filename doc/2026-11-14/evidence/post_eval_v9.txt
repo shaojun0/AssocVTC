@@ -1,0 +1,72 @@
+[11-15 02:51:43] 检测到 final_model.pt，等 90 s 让存档落盘完
+[11-15 02:53:13] 开始 val_long 评测
+device=cuda:0  torch=2.12.1+cu130  MUSA_VISIBLE_DEVICES=?
+root=/root/autodl-tmp/video_recon/data3/val_long  clips=4  window=120  chunk=8  enc_chunk=8  amp=bf16
+protocols: cold=True rec=True warm=True hist=[1, 4, 8, 16]
+loaded: /root/autodl-tmp/video_recon/run_v9_vid/final_model.pt
+params: {'encoder': '242.7M', 'middle': '123.4M', 'decoder': '126.0M', 'total': '492.1M'}  steps: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+[0] actnet_v_LQW4hk1FLgw_0001050.mp4  frames=120
+  cold  12.534 dB  (1.6s)
+  rec   12.342 dB  (2.2s)
+  hist=1  12.342 dB  (2.1s)
+  hist=4  12.342 dB  (2.1s)
+  hist=8  12.342 dB  (2.1s)
+  hist=16 12.342 dB  (2.1s)
+  warm  12.342 dB  (2.1s)
+  copy_prev=21.84  copy_best=22.33  (1 帧龄中位)  peak=3187MB  15.6s
+
+[1] actnet_v_SSTom962aPk_0001388.mp4  frames=120
+  cold  15.449 dB  (1.2s)
+  rec   15.616 dB  (2.1s)
+  hist=1  15.616 dB  (2.2s)
+  hist=4  15.616 dB  (2.1s)
+  hist=8  15.616 dB  (2.1s)
+  hist=16 15.616 dB  (2.1s)
+  warm  15.616 dB  (2.1s)
+  copy_prev=23.17  copy_best=23.49  (1 帧龄中位)  peak=3187MB  14.9s
+
+[2] actnetqa_v_-GYS5LjMTZo_0001224.mp4  frames=120
+  cold  14.822 dB  (1.2s)
+  rec   14.668 dB  (2.1s)
+  hist=1  14.668 dB  (2.1s)
+  hist=4  14.668 dB  (2.1s)
+  hist=8  14.668 dB  (2.1s)
+  hist=16 14.668 dB  (2.1s)
+  warm  14.668 dB  (2.1s)
+  copy_prev=20.25  copy_best=20.32  (1 帧龄中位)  peak=3187MB  14.7s
+
+[3] actnetqa_v_-r-4Ncgbj8E_0000396.mp4  frames=120
+  cold  13.115 dB  (1.2s)
+  rec   13.181 dB  (2.1s)
+  hist=1  13.181 dB  (2.1s)
+  hist=4  13.181 dB  (2.1s)
+  hist=8  13.181 dB  (2.1s)
+  hist=16 13.181 dB  (2.1s)
+  warm  13.181 dB  (2.1s)
+  copy_prev=29.29  copy_best=29.71  (1 帧龄中位)  peak=3187MB  14.6s
+
+wrote /root/autodl-tmp/eval_v9_long/results.json
+
+=== SUMMARY ===
+clips=4  window=120  root=/root/autodl-tmp/video_recon/data3/val_long  amp=bf16
+protocol         PSNR(dB)   Δvs rec  Δvs cold   s/clip
+cold               13.980    +0.028    +0.000      1.3
+rec                13.952    +0.000    -0.028      2.1
+hist_1             13.952    +0.000    -0.028      2.1
+hist_4             13.952    +0.000    -0.028      2.1
+hist_8             13.952    +0.000    -0.028      2.1
+hist_16            13.952    +0.000    -0.028      2.1
+warm               13.952    +0.000    -0.028      2.1
+
+hist 曲线（历史长度 → PSNR）: 0=13.952 | 1=13.952 | 4=13.952 | 8=13.952 | 16=13.952 | None=13.952
+  相对 rec: 0=+0.000 | 1=+0.000 | 4=+0.000 | 8=+0.000 | 16=+0.000 | None=+0.000
+
+--- 基线 / 检索（全局均值）---
+copy_prev     23.638 dB     copy_best  23.965 dB（帧龄中位 1.0）
+retr_cos_max  0.9996            top_age 中位 1.5     prev_cos 0.9992
+
+总耗时 60s（14.9s/clip），峰值显存 3187 MB
+saved /root/autodl-tmp/eval_v9_long/results.md
+saved /root/autodl-tmp/eval_v9_long/vis.png
+[11-15 02:54:37] 评测完成 rc=0

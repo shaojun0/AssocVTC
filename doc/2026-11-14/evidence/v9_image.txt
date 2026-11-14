@@ -1,0 +1,872 @@
+[11-13 23:52:38] stage=image out=/root/autodl-tmp/video_recon/run_v9_img device=cuda:0 world=1 rank=0
+[11-13 23:52:38] cfg={"img": 448, "patch": 32, "grid": 14, "num_patches": 196, "num_specials": 32, "steps": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "enc": {"dim": 1024, "depth": 19, "heads": 16, "ratio": 4.0}, "mid": {"dim": 1024, "depth": 9, "heads": 16, "ratio": 4.0, "grad_ckpt": false, "kind": "gdn"}, "dec": {"dim": 1024, "depth": 7, "heads": 16, "ratio": 4.0, "grad_ckpt": true, "plan": "fixed", "block": 2, "head_cfg": {"ch0": 192, "mid": [160, 128, 96, 64], "nblk": [2, 1, 1, 1, 1]}, "frame_batch": true, "frame_chunk": 4, "parallel": true, "head_kind": "mlp", "mlp_hidden": 2048, "step_emb": true, "read_plan": "fixed"}, "arch": "v9"}
+[11-13 23:52:40] steps=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] windows=[(0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), (0, 14), (0, 16), (0, 18), (0, 20), (0, 22), (0, 24), (0, 26), (0, 28), (0, 30), (0, 32)]
+[11-13 23:52:41] params encoder=242.7M middle=123.4M decoder=126.0M total=492.1M
+[11-13 23:52:41] train clips=32165 val clips=1142
+[11-13 23:52:47] VAL cold=10.528 rec=10.529 warm=10.529
+[11-13 23:52:57] step 20 loss 0.2392 psnr 11.43 lr 2.67e-05 0.50s/step elapsed 0.00h n_warm 0 mem 30.5G
+[11-13 23:53:07] step 40 loss 0.2353 psnr 11.45 lr 5.33e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-13 23:53:16] step 60 loss 0.2175 psnr 12.08 lr 8.00e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-13 23:53:16] auto total_steps=14940 (sps=0.48s)
+[11-13 23:53:26] step 80 loss 0.2056 psnr 12.51 lr 1.07e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-13 23:53:35] step 100 loss 0.2341 psnr 11.29 lr 1.33e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-13 23:53:45] step 120 loss 0.2303 psnr 11.52 lr 1.60e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-13 23:53:55] step 140 loss 0.2384 psnr 11.41 lr 1.87e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-13 23:54:04] step 160 loss 0.2340 psnr 11.48 lr 2.00e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-13 23:54:14] step 180 loss 0.2489 psnr 11.02 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-13 23:54:24] step 200 loss 0.2271 psnr 11.85 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-13 23:54:34] step 220 loss 0.2381 psnr 11.41 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-13 23:54:43] step 240 loss 0.2282 psnr 11.77 lr 2.00e-04 0.48s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-13 23:54:53] step 260 loss 0.2226 psnr 11.75 lr 2.00e-04 0.49s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-13 23:55:03] step 280 loss 0.2307 psnr 11.68 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-13 23:55:12] step 300 loss 0.2317 psnr 11.78 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-13 23:55:22] step 320 loss 0.2263 psnr 11.73 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-13 23:55:32] step 340 loss 0.2381 psnr 11.54 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-13 23:55:41] step 360 loss 0.2274 psnr 11.89 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-13 23:55:51] step 380 loss 0.2238 psnr 11.90 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-13 23:56:01] step 400 loss 0.2320 psnr 11.60 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-13 23:56:11] step 420 loss 0.2271 psnr 11.82 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-13 23:56:20] step 440 loss 0.2255 psnr 11.86 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-13 23:56:30] step 460 loss 0.2269 psnr 11.80 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-13 23:56:40] step 480 loss 0.2221 psnr 11.97 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-13 23:56:50] step 500 loss 0.2393 psnr 11.45 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-13 23:56:51] reload data: train clips=32165 val clips=1142
+[11-13 23:56:52] VAL cold=11.057 rec=11.055 warm=11.055
+[11-14 00:27:29] stage=image out=/root/autodl-tmp/video_recon/run_v9_img device=cuda:0 world=1 rank=0
+[11-14 00:27:29] cfg={"img": 448, "patch": 32, "grid": 14, "num_patches": 196, "num_specials": 32, "steps": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "enc": {"dim": 1024, "depth": 19, "heads": 16, "ratio": 4.0}, "mid": {"dim": 1024, "depth": 9, "heads": 16, "ratio": 4.0, "grad_ckpt": false, "kind": "gdn"}, "dec": {"dim": 1024, "depth": 7, "heads": 16, "ratio": 4.0, "grad_ckpt": true, "plan": "fixed", "block": 2, "head_cfg": {"ch0": 192, "mid": [160, 128, 96, 64], "nblk": [2, 1, 1, 1, 1]}, "frame_batch": true, "frame_chunk": 4, "parallel": true, "head_kind": "mlp", "mlp_hidden": 2048, "step_emb": true, "read_plan": "fixed"}, "arch": "v9"}
+[11-14 00:27:31] steps=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] windows=[(0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), (0, 14), (0, 16), (0, 18), (0, 20), (0, 22), (0, 24), (0, 26), (0, 28), (0, 30), (0, 32)]
+[11-14 00:27:32] params encoder=242.7M middle=123.4M decoder=126.0M total=492.1M
+[11-14 00:27:32] train clips=32165 val clips=1142
+[11-14 00:27:38] VAL cold=10.528 rec=10.529 warm=10.529
+[11-14 00:27:48] step 20 loss 0.2392 psnr 11.43 lr 2.67e-05 0.50s/step elapsed 0.00h n_warm 0 mem 30.5G
+[11-14 00:27:57] step 40 loss 0.2353 psnr 11.45 lr 5.33e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:28:07] step 60 loss 0.2175 psnr 12.08 lr 8.00e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:28:07] auto total_steps=14895 (sps=0.48s)
+[11-14 00:28:17] step 80 loss 0.2056 psnr 12.51 lr 1.07e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:28:26] step 100 loss 0.2341 psnr 11.29 lr 1.33e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:28:36] step 120 loss 0.2303 psnr 11.52 lr 1.60e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:28:46] step 140 loss 0.2384 psnr 11.41 lr 1.87e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:28:55] step 160 loss 0.2340 psnr 11.48 lr 2.00e-04 0.49s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:29:05] step 180 loss 0.2489 psnr 11.02 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:29:15] step 200 loss 0.2271 psnr 11.85 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:29:25] step 220 loss 0.2381 psnr 11.41 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:29:34] step 240 loss 0.2282 psnr 11.77 lr 2.00e-04 0.49s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:29:44] step 260 loss 0.2226 psnr 11.75 lr 2.00e-04 0.49s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:29:54] step 280 loss 0.2307 psnr 11.68 lr 2.00e-04 0.49s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:30:04] step 300 loss 0.2317 psnr 11.78 lr 2.00e-04 0.49s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:30:13] step 320 loss 0.2263 psnr 11.73 lr 2.00e-04 0.49s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:30:23] step 340 loss 0.2381 psnr 11.54 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:30:33] step 360 loss 0.2274 psnr 11.89 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:30:42] step 380 loss 0.2238 psnr 11.90 lr 2.00e-04 0.49s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:30:52] step 400 loss 0.2320 psnr 11.60 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:31:02] step 420 loss 0.2271 psnr 11.83 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:31:12] step 440 loss 0.2255 psnr 11.87 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:31:21] step 460 loss 0.2269 psnr 11.80 lr 2.00e-04 0.49s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:31:31] step 480 loss 0.2221 psnr 11.97 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:31:41] step 500 loss 0.2434 psnr 11.33 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:31:42] reload data: train clips=32165 val clips=1142
+[11-14 00:31:44] VAL cold=11.039 rec=11.036 warm=11.036
+[11-14 00:50:43] stage=image out=/root/autodl-tmp/video_recon/run_v9_img device=cuda:0 world=1 rank=0
+[11-14 00:50:43] cfg={"img": 448, "patch": 32, "grid": 14, "num_patches": 196, "num_specials": 32, "steps": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "enc": {"dim": 1024, "depth": 19, "heads": 16, "ratio": 4.0}, "mid": {"dim": 1024, "depth": 9, "heads": 16, "ratio": 4.0, "grad_ckpt": false, "kind": "gdn"}, "dec": {"dim": 1024, "depth": 7, "heads": 16, "ratio": 4.0, "grad_ckpt": true, "plan": "fixed", "block": 2, "head_cfg": {"ch0": 192, "mid": [160, 128, 96, 64], "nblk": [2, 1, 1, 1, 1]}, "frame_batch": true, "frame_chunk": 4, "parallel": true, "head_kind": "mlp", "mlp_hidden": 2048, "step_emb": true, "read_plan": "fixed"}, "arch": "v9"}
+[11-14 00:50:46] steps=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] windows=[(0, 2), (0, 4), (0, 6), (0, 8), (0, 10), (0, 12), (0, 14), (0, 16), (0, 18), (0, 20), (0, 22), (0, 24), (0, 26), (0, 28), (0, 30), (0, 32)]
+[11-14 00:50:46] params encoder=242.7M middle=123.4M decoder=126.0M total=492.1M
+[11-14 00:50:46] train clips=32165 val clips=1142
+[11-14 00:50:52] VAL cold=10.528 rec=10.529 warm=10.529
+[11-14 00:51:02] step 20 loss 0.2392 psnr 11.43 lr 2.67e-05 0.50s/step elapsed 0.00h n_warm 0 mem 30.5G
+[11-14 00:51:12] step 40 loss 0.2353 psnr 11.45 lr 5.33e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:51:22] step 60 loss 0.2175 psnr 12.08 lr 8.00e-05 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:51:22] auto total_steps=14970 (sps=0.48s)
+[11-14 00:51:31] step 80 loss 0.2056 psnr 12.51 lr 1.07e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:51:41] step 100 loss 0.2341 psnr 11.29 lr 1.33e-04 0.49s/step elapsed 0.01h n_warm 0 mem 30.5G
+[11-14 00:51:50] step 120 loss 0.2303 psnr 11.52 lr 1.60e-04 0.48s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:52:00] step 140 loss 0.2384 psnr 11.41 lr 1.87e-04 0.48s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:52:10] step 160 loss 0.2340 psnr 11.48 lr 2.00e-04 0.48s/step elapsed 0.02h n_warm 0 mem 30.5G
+[11-14 00:52:19] step 180 loss 0.2489 psnr 11.02 lr 2.00e-04 0.48s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:52:29] step 200 loss 0.2271 psnr 11.85 lr 2.00e-04 0.48s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:52:39] step 220 loss 0.2381 psnr 11.41 lr 2.00e-04 0.48s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:52:48] step 240 loss 0.2282 psnr 11.77 lr 2.00e-04 0.48s/step elapsed 0.03h n_warm 0 mem 30.5G
+[11-14 00:52:58] step 260 loss 0.2226 psnr 11.75 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:53:08] step 280 loss 0.2307 psnr 11.68 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:53:17] step 300 loss 0.2317 psnr 11.78 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:53:27] step 320 loss 0.2263 psnr 11.73 lr 2.00e-04 0.48s/step elapsed 0.04h n_warm 0 mem 30.5G
+[11-14 00:53:36] step 340 loss 0.2381 psnr 11.54 lr 2.00e-04 0.48s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:53:46] step 360 loss 0.2274 psnr 11.89 lr 2.00e-04 0.48s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:53:56] step 380 loss 0.2238 psnr 11.90 lr 2.00e-04 0.48s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:54:05] step 400 loss 0.2320 psnr 11.60 lr 2.00e-04 0.48s/step elapsed 0.05h n_warm 0 mem 30.5G
+[11-14 00:54:15] step 420 loss 0.2271 psnr 11.82 lr 2.00e-04 0.48s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:54:25] step 440 loss 0.2255 psnr 11.87 lr 2.00e-04 0.48s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:54:35] step 460 loss 0.2269 psnr 11.80 lr 2.00e-04 0.48s/step elapsed 0.06h n_warm 0 mem 30.5G
+[11-14 00:54:44] step 480 loss 0.2221 psnr 11.97 lr 2.00e-04 0.48s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:54:54] step 500 loss 0.2422 psnr 11.41 lr 2.00e-04 0.48s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:54:55] VAL cold=11.040 rec=11.040 warm=11.040
+[11-14 00:55:05] step 520 loss 0.2262 psnr 11.97 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:55:15] step 540 loss 0.2369 psnr 11.60 lr 2.00e-04 0.49s/step elapsed 0.07h n_warm 0 mem 30.5G
+[11-14 00:55:24] step 560 loss 0.2338 psnr 11.67 lr 2.00e-04 0.49s/step elapsed 0.08h n_warm 0 mem 30.5G
+[11-14 00:55:34] step 580 loss 0.2339 psnr 11.53 lr 2.00e-04 0.49s/step elapsed 0.08h n_warm 0 mem 30.5G
+[11-14 00:55:44] step 600 loss 0.2442 psnr 11.22 lr 2.00e-04 0.49s/step elapsed 0.08h n_warm 0 mem 30.5G
+[11-14 00:55:49] save ckpt step 600 -> last.pt step600.pt
+[11-14 00:55:59] step 620 loss 0.2313 psnr 11.70 lr 2.00e-04 0.49s/step elapsed 0.09h n_warm 0 mem 30.5G
+[11-14 00:56:08] step 640 loss 0.2259 psnr 11.74 lr 1.99e-04 0.49s/step elapsed 0.09h n_warm 0 mem 30.5G
+[11-14 00:56:18] step 660 loss 0.2290 psnr 11.87 lr 1.99e-04 0.49s/step elapsed 0.09h n_warm 0 mem 30.5G
+[11-14 00:56:28] step 680 loss 0.2344 psnr 11.49 lr 1.99e-04 0.49s/step elapsed 0.09h n_warm 0 mem 30.5G
+[11-14 00:56:37] step 700 loss 0.2173 psnr 12.08 lr 1.99e-04 0.49s/step elapsed 0.10h n_warm 0 mem 30.5G
+[11-14 00:56:47] step 720 loss 0.2306 psnr 11.66 lr 1.99e-04 0.49s/step elapsed 0.10h n_warm 0 mem 30.5G
+[11-14 00:56:57] step 740 loss 0.2429 psnr 11.28 lr 1.99e-04 0.49s/step elapsed 0.10h n_warm 0 mem 30.5G
+[11-14 00:57:06] step 760 loss 0.2418 psnr 11.25 lr 1.99e-04 0.49s/step elapsed 0.11h n_warm 0 mem 30.5G
+[11-14 00:57:16] step 780 loss 0.2592 psnr 10.75 lr 1.99e-04 0.49s/step elapsed 0.11h n_warm 0 mem 30.5G
+[11-14 00:57:26] step 800 loss 0.2389 psnr 11.37 lr 1.99e-04 0.49s/step elapsed 0.11h n_warm 0 mem 30.5G
+[11-14 00:57:35] step 820 loss 0.2184 psnr 12.07 lr 1.99e-04 0.49s/step elapsed 0.11h n_warm 0 mem 30.5G
+[11-14 00:57:45] step 840 loss 0.2405 psnr 11.35 lr 1.99e-04 0.49s/step elapsed 0.12h n_warm 0 mem 30.5G
+[11-14 00:57:55] step 860 loss 0.2322 psnr 11.66 lr 1.99e-04 0.49s/step elapsed 0.12h n_warm 0 mem 30.5G
+[11-14 00:58:04] step 880 loss 0.2426 psnr 11.25 lr 1.99e-04 0.49s/step elapsed 0.12h n_warm 0 mem 30.5G
+[11-14 00:58:14] step 900 loss 0.2278 psnr 11.76 lr 1.99e-04 0.49s/step elapsed 0.12h n_warm 0 mem 30.5G
+[11-14 00:58:24] step 920 loss 0.2429 psnr 11.41 lr 1.99e-04 0.49s/step elapsed 0.13h n_warm 0 mem 30.5G
+[11-14 00:58:33] step 940 loss 0.2415 psnr 11.30 lr 1.99e-04 0.49s/step elapsed 0.13h n_warm 0 mem 30.5G
+[11-14 00:58:43] step 960 loss 0.2330 psnr 11.52 lr 1.99e-04 0.49s/step elapsed 0.13h n_warm 0 mem 30.5G
+[11-14 00:58:53] step 980 loss 0.2308 psnr 11.59 lr 1.99e-04 0.49s/step elapsed 0.13h n_warm 0 mem 30.5G
+[11-14 00:59:02] step 1000 loss 0.2174 psnr 12.01 lr 1.98e-04 0.49s/step elapsed 0.14h n_warm 0 mem 30.5G
+[11-14 00:59:04] VAL cold=11.051 rec=11.049 warm=11.049
+[11-14 00:59:13] step 1020 loss 0.2308 psnr 11.80 lr 1.98e-04 0.49s/step elapsed 0.14h n_warm 0 mem 30.5G
+[11-14 00:59:23] step 1040 loss 0.2360 psnr 11.60 lr 1.98e-04 0.49s/step elapsed 0.14h n_warm 0 mem 30.5G
+[11-14 00:59:33] step 1060 loss 0.2320 psnr 11.61 lr 1.98e-04 0.49s/step elapsed 0.15h n_warm 0 mem 30.5G
+[11-14 00:59:43] step 1080 loss 0.2411 psnr 11.42 lr 1.98e-04 0.49s/step elapsed 0.15h n_warm 0 mem 30.5G
+[11-14 00:59:52] step 1100 loss 0.2368 psnr 11.42 lr 1.98e-04 0.49s/step elapsed 0.15h n_warm 0 mem 30.5G
+[11-14 01:00:01] step 1120 loss 0.2282 psnr 11.78 lr 1.98e-04 0.49s/step elapsed 0.15h n_warm 0 mem 30.5G
+[11-14 01:00:11] step 1140 loss 0.2312 psnr 11.67 lr 1.98e-04 0.49s/step elapsed 0.16h n_warm 0 mem 30.5G
+[11-14 01:00:21] step 1160 loss 0.2301 psnr 11.75 lr 1.98e-04 0.49s/step elapsed 0.16h n_warm 0 mem 30.5G
+[11-14 01:00:30] step 1180 loss 0.2329 psnr 11.58 lr 1.98e-04 0.49s/step elapsed 0.16h n_warm 0 mem 30.5G
+[11-14 01:00:40] step 1200 loss 0.2386 psnr 11.43 lr 1.98e-04 0.49s/step elapsed 0.16h n_warm 0 mem 30.5G
+[11-14 01:00:51] save ckpt step 1200 -> last.pt step1200.pt
+[11-14 01:00:51] prune step600.pt
+[11-14 01:01:00] step 1220 loss 0.2279 psnr 11.72 lr 1.98e-04 0.50s/step elapsed 0.17h n_warm 0 mem 30.5G
+[11-14 01:01:10] step 1240 loss 0.2262 psnr 11.89 lr 1.97e-04 0.50s/step elapsed 0.17h n_warm 0 mem 30.5G
+[11-14 01:01:20] step 1260 loss 0.2272 psnr 11.81 lr 1.97e-04 0.50s/step elapsed 0.18h n_warm 0 mem 30.5G
+[11-14 01:01:29] step 1280 loss 0.2328 psnr 11.76 lr 1.97e-04 0.50s/step elapsed 0.18h n_warm 0 mem 30.5G
+[11-14 01:01:39] step 1300 loss 0.2252 psnr 11.75 lr 1.97e-04 0.50s/step elapsed 0.18h n_warm 0 mem 30.5G
+[11-14 01:01:49] step 1320 loss 0.2465 psnr 11.19 lr 1.97e-04 0.50s/step elapsed 0.18h n_warm 0 mem 30.5G
+[11-14 01:01:59] step 1340 loss 0.2358 psnr 11.57 lr 1.97e-04 0.50s/step elapsed 0.19h n_warm 0 mem 30.5G
+[11-14 01:02:08] step 1360 loss 0.2304 psnr 11.66 lr 1.97e-04 0.50s/step elapsed 0.19h n_warm 0 mem 30.5G
+[11-14 01:02:18] step 1380 loss 0.2384 psnr 11.40 lr 1.97e-04 0.50s/step elapsed 0.19h n_warm 0 mem 30.5G
+[11-14 01:02:28] step 1400 loss 0.2486 psnr 10.99 lr 1.97e-04 0.50s/step elapsed 0.19h n_warm 0 mem 30.5G
+[11-14 01:02:38] step 1420 loss 0.2290 psnr 11.77 lr 1.97e-04 0.50s/step elapsed 0.20h n_warm 0 mem 30.5G
+[11-14 01:02:47] step 1440 loss 0.2191 psnr 12.08 lr 1.96e-04 0.50s/step elapsed 0.20h n_warm 0 mem 30.5G
+[11-14 01:02:57] step 1460 loss 0.2327 psnr 11.60 lr 1.96e-04 0.50s/step elapsed 0.20h n_warm 0 mem 30.5G
+[11-14 01:03:07] step 1480 loss 0.2421 psnr 11.26 lr 1.96e-04 0.50s/step elapsed 0.21h n_warm 0 mem 30.5G
+[11-14 01:03:16] step 1500 loss 0.2210 psnr 11.83 lr 1.96e-04 0.50s/step elapsed 0.21h n_warm 0 mem 30.5G
+[11-14 01:03:18] VAL cold=11.059 rec=11.059 warm=11.059
+[11-14 01:03:28] step 1520 loss 0.2196 psnr 11.96 lr 1.96e-04 0.50s/step elapsed 0.21h n_warm 0 mem 30.5G
+[11-14 01:03:37] step 1540 loss 0.2098 psnr 12.34 lr 1.96e-04 0.50s/step elapsed 0.21h n_warm 0 mem 30.5G
+[11-14 01:03:47] step 1560 loss 0.2011 psnr 12.52 lr 1.96e-04 0.50s/step elapsed 0.22h n_warm 0 mem 30.5G
+[11-14 01:03:57] step 1580 loss 0.1935 psnr 12.71 lr 1.96e-04 0.50s/step elapsed 0.22h n_warm 0 mem 30.5G
+[11-14 01:04:06] step 1600 loss 0.1992 psnr 12.47 lr 1.96e-04 0.50s/step elapsed 0.22h n_warm 0 mem 30.5G
+[11-14 01:04:16] step 1620 loss 0.2007 psnr 12.30 lr 1.95e-04 0.50s/step elapsed 0.22h n_warm 0 mem 30.5G
+[11-14 01:04:26] step 1640 loss 0.1929 psnr 12.74 lr 1.95e-04 0.50s/step elapsed 0.23h n_warm 0 mem 30.5G
+[11-14 01:04:36] step 1660 loss 0.2108 psnr 12.14 lr 1.95e-04 0.50s/step elapsed 0.23h n_warm 0 mem 30.5G
+[11-14 01:04:45] step 1680 loss 0.2035 psnr 12.57 lr 1.95e-04 0.50s/step elapsed 0.23h n_warm 0 mem 30.5G
+[11-14 01:04:55] step 1700 loss 0.2051 psnr 12.31 lr 1.95e-04 0.50s/step elapsed 0.24h n_warm 0 mem 30.5G
+[11-14 01:05:05] step 1720 loss 0.1985 psnr 12.68 lr 1.95e-04 0.50s/step elapsed 0.24h n_warm 0 mem 30.5G
+[11-14 01:05:15] step 1740 loss 0.1963 psnr 12.81 lr 1.95e-04 0.50s/step elapsed 0.24h n_warm 0 mem 30.5G
+[11-14 01:05:24] step 1760 loss 0.1890 psnr 12.84 lr 1.95e-04 0.50s/step elapsed 0.24h n_warm 0 mem 30.5G
+[11-14 01:05:34] step 1780 loss 0.1998 psnr 12.31 lr 1.94e-04 0.50s/step elapsed 0.25h n_warm 0 mem 30.5G
+[11-14 01:05:44] step 1800 loss 0.1878 psnr 12.92 lr 1.94e-04 0.50s/step elapsed 0.25h n_warm 0 mem 30.5G
+[11-14 01:05:50] save ckpt step 1800 -> last.pt step1800.pt
+[11-14 01:05:50] prune step1200.pt
+[11-14 01:05:59] step 1820 loss 0.2113 psnr 12.02 lr 1.94e-04 0.50s/step elapsed 0.25h n_warm 0 mem 30.5G
+[11-14 01:06:09] step 1840 loss 0.1960 psnr 12.54 lr 1.94e-04 0.50s/step elapsed 0.26h n_warm 0 mem 30.5G
+[11-14 01:06:19] step 1860 loss 0.1924 psnr 12.81 lr 1.94e-04 0.50s/step elapsed 0.26h n_warm 0 mem 30.5G
+[11-14 01:06:28] step 1880 loss 0.1910 psnr 12.68 lr 1.94e-04 0.50s/step elapsed 0.26h n_warm 0 mem 30.5G
+[11-14 01:06:38] step 1900 loss 0.1948 psnr 13.10 lr 1.94e-04 0.50s/step elapsed 0.26h n_warm 0 mem 30.5G
+[11-14 01:06:48] step 1920 loss 0.1867 psnr 12.96 lr 1.93e-04 0.50s/step elapsed 0.27h n_warm 0 mem 30.5G
+[11-14 01:06:58] step 1940 loss 0.1899 psnr 13.07 lr 1.93e-04 0.50s/step elapsed 0.27h n_warm 0 mem 30.5G
+[11-14 01:07:07] step 1960 loss 0.1966 psnr 12.75 lr 1.93e-04 0.50s/step elapsed 0.27h n_warm 0 mem 30.5G
+[11-14 01:07:17] step 1980 loss 0.1946 psnr 12.71 lr 1.93e-04 0.50s/step elapsed 0.27h n_warm 0 mem 30.5G
+[11-14 01:07:27] step 2000 loss 0.1879 psnr 13.04 lr 1.93e-04 0.50s/step elapsed 0.28h n_warm 0 mem 30.5G
+[11-14 01:07:28] VAL cold=11.098 rec=11.100 warm=11.100
+[11-14 01:07:38] step 2020 loss 0.1915 psnr 12.65 lr 1.93e-04 0.50s/step elapsed 0.28h n_warm 0 mem 30.5G
+[11-14 01:07:47] step 2040 loss 0.2020 psnr 12.35 lr 1.92e-04 0.50s/step elapsed 0.28h n_warm 0 mem 30.5G
+[11-14 01:07:57] step 2060 loss 0.1888 psnr 12.78 lr 1.92e-04 0.50s/step elapsed 0.29h n_warm 0 mem 30.5G
+[11-14 01:08:07] step 2080 loss 0.1978 psnr 12.85 lr 1.92e-04 0.50s/step elapsed 0.29h n_warm 0 mem 30.5G
+[11-14 01:08:17] step 2100 loss 0.1953 psnr 12.68 lr 1.92e-04 0.50s/step elapsed 0.29h n_warm 0 mem 30.5G
+[11-14 01:08:27] step 2120 loss 0.1801 psnr 13.20 lr 1.92e-04 0.50s/step elapsed 0.29h n_warm 0 mem 30.5G
+[11-14 01:08:36] step 2140 loss 0.1924 psnr 12.74 lr 1.92e-04 0.50s/step elapsed 0.30h n_warm 0 mem 30.5G
+[11-14 01:08:46] step 2160 loss 0.1814 psnr 13.34 lr 1.92e-04 0.50s/step elapsed 0.30h n_warm 0 mem 30.5G
+[11-14 01:08:56] step 2180 loss 0.1905 psnr 12.71 lr 1.91e-04 0.50s/step elapsed 0.30h n_warm 0 mem 30.5G
+[11-14 01:09:06] step 2200 loss 0.1920 psnr 12.84 lr 1.91e-04 0.50s/step elapsed 0.30h n_warm 0 mem 30.5G
+[11-14 01:09:15] step 2220 loss 0.1841 psnr 12.99 lr 1.91e-04 0.50s/step elapsed 0.31h n_warm 0 mem 30.5G
+[11-14 01:09:25] step 2240 loss 0.1827 psnr 13.09 lr 1.91e-04 0.50s/step elapsed 0.31h n_warm 0 mem 30.5G
+[11-14 01:09:35] step 2260 loss 0.1841 psnr 12.97 lr 1.91e-04 0.50s/step elapsed 0.31h n_warm 0 mem 30.5G
+[11-14 01:09:44] step 2280 loss 0.1984 psnr 12.27 lr 1.90e-04 0.50s/step elapsed 0.32h n_warm 0 mem 30.5G
+[11-14 01:09:54] step 2300 loss 0.1998 psnr 12.36 lr 1.90e-04 0.50s/step elapsed 0.32h n_warm 0 mem 30.5G
+[11-14 01:10:04] step 2320 loss 0.1914 psnr 13.02 lr 1.90e-04 0.50s/step elapsed 0.32h n_warm 0 mem 30.5G
+[11-14 01:10:14] step 2340 loss 0.1843 psnr 13.01 lr 1.90e-04 0.50s/step elapsed 0.32h n_warm 0 mem 30.5G
+[11-14 01:10:23] step 2360 loss 0.1940 psnr 12.61 lr 1.90e-04 0.50s/step elapsed 0.33h n_warm 0 mem 30.5G
+[11-14 01:10:33] step 2380 loss 0.1912 psnr 12.79 lr 1.90e-04 0.50s/step elapsed 0.33h n_warm 0 mem 30.5G
+[11-14 01:10:43] step 2400 loss 0.1928 psnr 12.79 lr 1.89e-04 0.50s/step elapsed 0.33h n_warm 0 mem 30.5G
+[11-14 01:10:49] save ckpt step 2400 -> last.pt step2400.pt
+[11-14 01:10:49] prune step1800.pt
+[11-14 01:10:58] step 2420 loss 0.2011 psnr 12.48 lr 1.89e-04 0.50s/step elapsed 0.34h n_warm 0 mem 30.5G
+[11-14 01:11:08] step 2440 loss 0.1960 psnr 12.56 lr 1.89e-04 0.50s/step elapsed 0.34h n_warm 0 mem 30.5G
+[11-14 01:11:18] step 2460 loss 0.1964 psnr 12.38 lr 1.89e-04 0.50s/step elapsed 0.34h n_warm 0 mem 30.5G
+[11-14 01:11:27] step 2480 loss 0.1994 psnr 12.46 lr 1.89e-04 0.50s/step elapsed 0.34h n_warm 0 mem 30.5G
+[11-14 01:11:37] step 2500 loss 0.1856 psnr 13.03 lr 1.88e-04 0.50s/step elapsed 0.35h n_warm 0 mem 30.5G
+[11-14 01:11:38] VAL cold=10.750 rec=10.749 warm=10.749
+[11-14 01:11:48] step 2520 loss 0.1868 psnr 12.86 lr 1.88e-04 0.50s/step elapsed 0.35h n_warm 0 mem 30.5G
+[11-14 01:11:58] step 2540 loss 0.1794 psnr 13.38 lr 1.88e-04 0.50s/step elapsed 0.35h n_warm 0 mem 30.5G
+[11-14 01:12:08] step 2560 loss 0.1898 psnr 12.88 lr 1.88e-04 0.50s/step elapsed 0.36h n_warm 0 mem 30.5G
+[11-14 01:12:17] step 2580 loss 0.1928 psnr 12.72 lr 1.88e-04 0.50s/step elapsed 0.36h n_warm 0 mem 30.5G
+[11-14 01:12:27] step 2600 loss 0.1941 psnr 12.73 lr 1.87e-04 0.50s/step elapsed 0.36h n_warm 0 mem 30.5G
+[11-14 01:12:37] step 2620 loss 0.1807 psnr 13.23 lr 1.87e-04 0.50s/step elapsed 0.36h n_warm 0 mem 30.5G
+[11-14 01:12:46] step 2640 loss 0.1803 psnr 13.37 lr 1.87e-04 0.50s/step elapsed 0.37h n_warm 0 mem 30.5G
+[11-14 01:12:56] step 2660 loss 0.1846 psnr 13.00 lr 1.87e-04 0.50s/step elapsed 0.37h n_warm 0 mem 30.5G
+[11-14 01:13:06] step 2680 loss 0.1931 psnr 12.52 lr 1.87e-04 0.50s/step elapsed 0.37h n_warm 0 mem 30.5G
+[11-14 01:13:15] step 2700 loss 0.1932 psnr 12.73 lr 1.86e-04 0.50s/step elapsed 0.37h n_warm 0 mem 30.5G
+[11-14 01:13:25] step 2720 loss 0.1740 psnr 13.35 lr 1.86e-04 0.50s/step elapsed 0.38h n_warm 0 mem 30.5G
+[11-14 01:13:35] step 2740 loss 0.1847 psnr 13.02 lr 1.86e-04 0.50s/step elapsed 0.38h n_warm 0 mem 30.5G
+[11-14 01:13:45] step 2760 loss 0.1933 psnr 12.75 lr 1.86e-04 0.50s/step elapsed 0.38h n_warm 0 mem 30.5G
+[11-14 01:13:54] step 2780 loss 0.1986 psnr 12.52 lr 1.86e-04 0.50s/step elapsed 0.39h n_warm 0 mem 30.5G
+[11-14 01:14:04] step 2800 loss 0.1869 psnr 12.85 lr 1.85e-04 0.50s/step elapsed 0.39h n_warm 0 mem 30.5G
+[11-14 01:14:14] step 2820 loss 0.1940 psnr 12.95 lr 1.85e-04 0.50s/step elapsed 0.39h n_warm 0 mem 30.5G
+[11-14 01:14:23] step 2840 loss 0.1783 psnr 13.32 lr 1.85e-04 0.50s/step elapsed 0.39h n_warm 0 mem 30.5G
+[11-14 01:14:33] step 2860 loss 0.1895 psnr 12.69 lr 1.85e-04 0.50s/step elapsed 0.40h n_warm 0 mem 30.5G
+[11-14 01:14:43] step 2880 loss 0.1849 psnr 12.81 lr 1.85e-04 0.50s/step elapsed 0.40h n_warm 0 mem 30.5G
+[11-14 01:14:53] step 2900 loss 0.1862 psnr 12.83 lr 1.84e-04 0.50s/step elapsed 0.40h n_warm 0 mem 30.5G
+[11-14 01:15:02] step 2920 loss 0.1901 psnr 12.96 lr 1.84e-04 0.50s/step elapsed 0.40h n_warm 0 mem 30.5G
+[11-14 01:15:12] step 2940 loss 0.1942 psnr 12.70 lr 1.84e-04 0.50s/step elapsed 0.41h n_warm 0 mem 30.5G
+[11-14 01:15:22] step 2960 loss 0.1912 psnr 12.88 lr 1.84e-04 0.50s/step elapsed 0.41h n_warm 0 mem 30.5G
+[11-14 01:15:31] step 2980 loss 0.1804 psnr 13.03 lr 1.83e-04 0.50s/step elapsed 0.41h n_warm 0 mem 30.5G
+[11-14 01:15:41] step 3000 loss 0.1679 psnr 13.83 lr 1.83e-04 0.50s/step elapsed 0.41h n_warm 0 mem 30.5G
+[11-14 01:15:42] VAL cold=10.824 rec=10.824 warm=10.824
+[11-14 01:15:48] save ckpt step 3000 -> last.pt step3000.pt
+[11-14 01:15:48] prune step2400.pt
+[11-14 01:15:58] step 3020 loss 0.1877 psnr 12.97 lr 1.83e-04 0.50s/step elapsed 0.42h n_warm 0 mem 30.5G
+[11-14 01:16:08] step 3040 loss 0.1903 psnr 12.65 lr 1.83e-04 0.50s/step elapsed 0.42h n_warm 0 mem 30.5G
+[11-14 01:16:18] step 3060 loss 0.1854 psnr 13.01 lr 1.83e-04 0.50s/step elapsed 0.42h n_warm 0 mem 30.5G
+[11-14 01:16:27] step 3080 loss 0.1986 psnr 12.30 lr 1.82e-04 0.50s/step elapsed 0.43h n_warm 0 mem 30.5G
+[11-14 01:16:37] step 3100 loss 0.1882 psnr 12.66 lr 1.82e-04 0.50s/step elapsed 0.43h n_warm 0 mem 30.5G
+[11-14 01:16:47] step 3120 loss 0.1719 psnr 13.80 lr 1.82e-04 0.50s/step elapsed 0.43h n_warm 0 mem 30.5G
+[11-14 01:16:57] step 3140 loss 0.2003 psnr 12.27 lr 1.82e-04 0.50s/step elapsed 0.44h n_warm 0 mem 30.5G
+[11-14 01:17:06] step 3160 loss 0.1915 psnr 13.03 lr 1.81e-04 0.50s/step elapsed 0.44h n_warm 0 mem 30.5G
+[11-14 01:17:16] step 3180 loss 0.1883 psnr 12.73 lr 1.81e-04 0.50s/step elapsed 0.44h n_warm 0 mem 30.5G
+[11-14 01:17:26] step 3200 loss 0.1865 psnr 12.83 lr 1.81e-04 0.50s/step elapsed 0.44h n_warm 0 mem 30.5G
+[11-14 01:17:35] step 3220 loss 0.1852 psnr 12.77 lr 1.81e-04 0.50s/step elapsed 0.45h n_warm 0 mem 30.5G
+[11-14 01:17:45] step 3240 loss 0.1839 psnr 13.05 lr 1.80e-04 0.50s/step elapsed 0.45h n_warm 0 mem 30.5G
+[11-14 01:17:55] step 3260 loss 0.1852 psnr 13.24 lr 1.80e-04 0.50s/step elapsed 0.45h n_warm 0 mem 30.5G
+[11-14 01:18:04] step 3280 loss 0.1834 psnr 12.94 lr 1.80e-04 0.50s/step elapsed 0.45h n_warm 0 mem 30.5G
+[11-14 01:18:14] step 3300 loss 0.1899 psnr 12.69 lr 1.80e-04 0.50s/step elapsed 0.46h n_warm 0 mem 30.5G
+[11-14 01:18:24] step 3320 loss 0.1921 psnr 12.71 lr 1.79e-04 0.50s/step elapsed 0.46h n_warm 0 mem 30.5G
+[11-14 01:18:34] step 3340 loss 0.1873 psnr 13.36 lr 1.79e-04 0.50s/step elapsed 0.46h n_warm 0 mem 30.5G
+[11-14 01:18:43] step 3360 loss 0.1788 psnr 13.36 lr 1.79e-04 0.50s/step elapsed 0.47h n_warm 0 mem 30.5G
+[11-14 01:18:53] step 3380 loss 0.1853 psnr 12.98 lr 1.79e-04 0.50s/step elapsed 0.47h n_warm 0 mem 30.5G
+[11-14 01:19:03] step 3400 loss 0.1827 psnr 12.96 lr 1.78e-04 0.50s/step elapsed 0.47h n_warm 0 mem 30.5G
+[11-14 01:19:13] step 3420 loss 0.1952 psnr 12.48 lr 1.78e-04 0.50s/step elapsed 0.47h n_warm 0 mem 30.5G
+[11-14 01:19:22] step 3440 loss 0.1880 psnr 12.77 lr 1.78e-04 0.50s/step elapsed 0.48h n_warm 0 mem 30.5G
+[11-14 01:19:32] step 3460 loss 0.1873 psnr 12.75 lr 1.78e-04 0.50s/step elapsed 0.48h n_warm 0 mem 30.5G
+[11-14 01:19:42] step 3480 loss 0.1855 psnr 12.85 lr 1.77e-04 0.50s/step elapsed 0.48h n_warm 0 mem 30.5G
+[11-14 01:19:51] step 3500 loss 0.1906 psnr 12.82 lr 1.77e-04 0.50s/step elapsed 0.48h n_warm 0 mem 30.5G
+[11-14 01:19:53] VAL cold=10.924 rec=10.924 warm=10.924
+[11-14 01:20:03] step 3520 loss 0.1813 psnr 12.80 lr 1.77e-04 0.50s/step elapsed 0.49h n_warm 0 mem 30.5G
+[11-14 01:20:12] step 3540 loss 0.1970 psnr 12.44 lr 1.77e-04 0.50s/step elapsed 0.49h n_warm 0 mem 30.5G
+[11-14 01:20:22] step 3560 loss 0.1825 psnr 13.14 lr 1.76e-04 0.50s/step elapsed 0.49h n_warm 0 mem 30.5G
+[11-14 01:20:32] step 3580 loss 0.1970 psnr 12.43 lr 1.76e-04 0.50s/step elapsed 0.50h n_warm 0 mem 30.5G
+[11-14 01:20:41] step 3600 loss 0.1875 psnr 13.33 lr 1.76e-04 0.50s/step elapsed 0.50h n_warm 0 mem 30.5G
+[11-14 01:20:47] save ckpt step 3600 -> last.pt step3600.pt
+[11-14 01:20:47] prune step3000.pt
+[11-14 01:20:57] step 3620 loss 0.1959 psnr 12.41 lr 1.75e-04 0.50s/step elapsed 0.50h n_warm 0 mem 30.5G
+[11-14 01:21:07] step 3640 loss 0.1784 psnr 13.16 lr 1.75e-04 0.50s/step elapsed 0.51h n_warm 0 mem 30.5G
+[11-14 01:21:17] step 3660 loss 0.1748 psnr 13.35 lr 1.75e-04 0.50s/step elapsed 0.51h n_warm 0 mem 30.5G
+[11-14 01:21:26] step 3680 loss 0.1946 psnr 12.61 lr 1.75e-04 0.50s/step elapsed 0.51h n_warm 0 mem 30.5G
+[11-14 01:21:36] step 3700 loss 0.1842 psnr 13.59 lr 1.74e-04 0.50s/step elapsed 0.51h n_warm 0 mem 30.5G
+[11-14 01:21:46] step 3720 loss 0.1894 psnr 12.91 lr 1.74e-04 0.50s/step elapsed 0.52h n_warm 0 mem 30.5G
+[11-14 01:21:55] step 3740 loss 0.1797 psnr 13.32 lr 1.74e-04 0.50s/step elapsed 0.52h n_warm 0 mem 30.5G
+[11-14 01:22:05] step 3760 loss 0.1888 psnr 12.56 lr 1.74e-04 0.50s/step elapsed 0.52h n_warm 0 mem 30.5G
+[11-14 01:22:15] step 3780 loss 0.1926 psnr 12.65 lr 1.73e-04 0.50s/step elapsed 0.52h n_warm 0 mem 30.5G
+[11-14 01:22:25] step 3800 loss 0.1933 psnr 12.99 lr 1.73e-04 0.50s/step elapsed 0.53h n_warm 0 mem 30.5G
+[11-14 01:22:34] step 3820 loss 0.1830 psnr 13.56 lr 1.73e-04 0.50s/step elapsed 0.53h n_warm 0 mem 30.5G
+[11-14 01:22:44] step 3840 loss 0.1888 psnr 12.91 lr 1.72e-04 0.50s/step elapsed 0.53h n_warm 0 mem 30.5G
+[11-14 01:22:54] step 3860 loss 0.1833 psnr 12.98 lr 1.72e-04 0.50s/step elapsed 0.53h n_warm 0 mem 30.5G
+[11-14 01:23:03] step 3880 loss 0.1873 psnr 12.78 lr 1.72e-04 0.50s/step elapsed 0.54h n_warm 0 mem 30.5G
+[11-14 01:23:13] step 3900 loss 0.1828 psnr 12.96 lr 1.72e-04 0.50s/step elapsed 0.54h n_warm 0 mem 30.5G
+[11-14 01:23:23] step 3920 loss 0.1880 psnr 12.93 lr 1.71e-04 0.50s/step elapsed 0.54h n_warm 0 mem 30.5G
+[11-14 01:23:33] step 3940 loss 0.1851 psnr 12.95 lr 1.71e-04 0.50s/step elapsed 0.55h n_warm 0 mem 30.5G
+[11-14 01:23:42] step 3960 loss 0.1855 psnr 12.69 lr 1.71e-04 0.50s/step elapsed 0.55h n_warm 0 mem 30.5G
+[11-14 01:23:52] step 3980 loss 0.1781 psnr 13.05 lr 1.70e-04 0.50s/step elapsed 0.55h n_warm 0 mem 30.5G
+[11-14 01:24:02] step 4000 loss 0.1899 psnr 12.86 lr 1.70e-04 0.50s/step elapsed 0.55h n_warm 0 mem 30.5G
+[11-14 01:24:03] VAL cold=10.932 rec=10.932 warm=10.932
+[11-14 01:24:13] step 4020 loss 0.1843 psnr 12.90 lr 1.70e-04 0.50s/step elapsed 0.56h n_warm 0 mem 30.5G
+[11-14 01:24:23] step 4040 loss 0.1906 psnr 12.65 lr 1.70e-04 0.50s/step elapsed 0.56h n_warm 0 mem 30.5G
+[11-14 01:24:32] step 4060 loss 0.1849 psnr 12.87 lr 1.69e-04 0.50s/step elapsed 0.56h n_warm 0 mem 30.5G
+[11-14 01:24:42] step 4080 loss 0.1810 psnr 13.15 lr 1.69e-04 0.50s/step elapsed 0.56h n_warm 0 mem 30.5G
+[11-14 01:24:52] step 4100 loss 0.1901 psnr 12.59 lr 1.69e-04 0.50s/step elapsed 0.57h n_warm 0 mem 30.5G
+[11-14 01:25:01] step 4120 loss 0.1871 psnr 12.86 lr 1.68e-04 0.50s/step elapsed 0.57h n_warm 0 mem 30.5G
+[11-14 01:25:11] step 4140 loss 0.1902 psnr 12.72 lr 1.68e-04 0.50s/step elapsed 0.57h n_warm 0 mem 30.5G
+[11-14 01:25:21] step 4160 loss 0.1847 psnr 13.26 lr 1.68e-04 0.50s/step elapsed 0.58h n_warm 0 mem 30.5G
+[11-14 01:25:31] step 4180 loss 0.1850 psnr 13.02 lr 1.67e-04 0.50s/step elapsed 0.58h n_warm 0 mem 30.5G
+[11-14 01:25:40] step 4200 loss 0.1834 psnr 12.99 lr 1.67e-04 0.50s/step elapsed 0.58h n_warm 0 mem 30.5G
+[11-14 01:25:46] save ckpt step 4200 -> last.pt step4200.pt
+[11-14 01:25:46] prune step3600.pt
+[11-14 01:25:56] step 4220 loss 0.1837 psnr 12.92 lr 1.67e-04 0.50s/step elapsed 0.59h n_warm 0 mem 30.5G
+[11-14 01:26:06] step 4240 loss 0.1846 psnr 12.77 lr 1.66e-04 0.50s/step elapsed 0.59h n_warm 0 mem 30.5G
+[11-14 01:26:16] step 4260 loss 0.1858 psnr 13.06 lr 1.66e-04 0.50s/step elapsed 0.59h n_warm 0 mem 30.5G
+[11-14 01:26:25] step 4280 loss 0.1918 psnr 12.27 lr 1.66e-04 0.50s/step elapsed 0.59h n_warm 0 mem 30.5G
+[11-14 01:26:35] step 4300 loss 0.1814 psnr 12.91 lr 1.66e-04 0.50s/step elapsed 0.60h n_warm 0 mem 30.5G
+[11-14 01:26:45] step 4320 loss 0.1986 psnr 12.09 lr 1.65e-04 0.50s/step elapsed 0.60h n_warm 0 mem 30.5G
+[11-14 01:26:55] step 4340 loss 0.1828 psnr 12.89 lr 1.65e-04 0.50s/step elapsed 0.60h n_warm 0 mem 30.5G
+[11-14 01:27:04] step 4360 loss 0.1797 psnr 13.12 lr 1.65e-04 0.50s/step elapsed 0.60h n_warm 0 mem 30.5G
+[11-14 01:27:14] step 4380 loss 0.1896 psnr 12.47 lr 1.64e-04 0.50s/step elapsed 0.61h n_warm 0 mem 30.5G
+[11-14 01:27:24] step 4400 loss 0.1834 psnr 12.87 lr 1.64e-04 0.50s/step elapsed 0.61h n_warm 0 mem 30.5G
+[11-14 01:27:33] step 4420 loss 0.1734 psnr 13.44 lr 1.64e-04 0.50s/step elapsed 0.61h n_warm 0 mem 30.5G
+[11-14 01:27:43] step 4440 loss 0.1861 psnr 12.80 lr 1.63e-04 0.50s/step elapsed 0.62h n_warm 0 mem 30.5G
+[11-14 01:27:53] step 4460 loss 0.1766 psnr 13.85 lr 1.63e-04 0.50s/step elapsed 0.62h n_warm 0 mem 30.5G
+[11-14 01:28:03] step 4480 loss 0.1832 psnr 12.90 lr 1.63e-04 0.50s/step elapsed 0.62h n_warm 0 mem 30.5G
+[11-14 01:28:12] step 4500 loss 0.1959 psnr 12.34 lr 1.62e-04 0.50s/step elapsed 0.62h n_warm 0 mem 30.5G
+[11-14 01:28:14] VAL cold=10.903 rec=10.904 warm=10.904
+[11-14 01:28:23] step 4520 loss 0.1837 psnr 13.08 lr 1.62e-04 0.50s/step elapsed 0.63h n_warm 0 mem 30.5G
+[11-14 01:28:33] step 4540 loss 0.1782 psnr 13.69 lr 1.62e-04 0.50s/step elapsed 0.63h n_warm 0 mem 30.5G
+[11-14 01:28:43] step 4560 loss 0.1680 psnr 13.78 lr 1.61e-04 0.50s/step elapsed 0.63h n_warm 0 mem 30.5G
+[11-14 01:28:53] step 4580 loss 0.1809 psnr 13.60 lr 1.61e-04 0.50s/step elapsed 0.63h n_warm 0 mem 30.5G
+[11-14 01:29:02] step 4600 loss 0.1714 psnr 13.45 lr 1.61e-04 0.50s/step elapsed 0.64h n_warm 0 mem 30.5G
+[11-14 01:29:12] step 4620 loss 0.1729 psnr 13.41 lr 1.60e-04 0.50s/step elapsed 0.64h n_warm 0 mem 30.5G
+[11-14 01:29:22] step 4640 loss 0.1840 psnr 12.95 lr 1.60e-04 0.50s/step elapsed 0.64h n_warm 0 mem 30.5G
+[11-14 01:29:31] step 4660 loss 0.1825 psnr 12.98 lr 1.60e-04 0.50s/step elapsed 0.65h n_warm 0 mem 30.5G
+[11-14 01:29:41] step 4680 loss 0.1726 psnr 13.31 lr 1.59e-04 0.50s/step elapsed 0.65h n_warm 0 mem 30.5G
+[11-14 01:29:51] step 4700 loss 0.1902 psnr 12.54 lr 1.59e-04 0.50s/step elapsed 0.65h n_warm 0 mem 30.5G
+[11-14 01:30:01] step 4720 loss 0.1782 psnr 13.01 lr 1.59e-04 0.50s/step elapsed 0.65h n_warm 0 mem 30.5G
+[11-14 01:30:10] step 4740 loss 0.1858 psnr 12.84 lr 1.58e-04 0.50s/step elapsed 0.66h n_warm 0 mem 30.5G
+[11-14 01:30:20] step 4760 loss 0.1759 psnr 13.15 lr 1.58e-04 0.50s/step elapsed 0.66h n_warm 0 mem 30.5G
+[11-14 01:30:30] step 4780 loss 0.1944 psnr 12.42 lr 1.58e-04 0.50s/step elapsed 0.66h n_warm 0 mem 30.5G
+[11-14 01:30:39] step 4800 loss 0.1905 psnr 12.69 lr 1.57e-04 0.50s/step elapsed 0.66h n_warm 0 mem 30.5G
+[11-14 01:30:50] save ckpt step 4800 -> last.pt step4800.pt
+[11-14 01:30:50] prune step4200.pt
+[11-14 01:31:00] step 4820 loss 0.1821 psnr 13.20 lr 1.57e-04 0.50s/step elapsed 0.67h n_warm 0 mem 30.5G
+[11-14 01:31:09] step 4840 loss 0.1942 psnr 12.29 lr 1.57e-04 0.50s/step elapsed 0.67h n_warm 0 mem 30.5G
+[11-14 01:31:19] step 4860 loss 0.1919 psnr 12.62 lr 1.56e-04 0.50s/step elapsed 0.68h n_warm 0 mem 30.5G
+[11-14 01:31:29] step 4880 loss 0.1861 psnr 12.78 lr 1.56e-04 0.50s/step elapsed 0.68h n_warm 0 mem 30.5G
+[11-14 01:31:38] step 4900 loss 0.1854 psnr 12.78 lr 1.56e-04 0.50s/step elapsed 0.68h n_warm 0 mem 30.5G
+[11-14 01:31:48] step 4920 loss 0.1695 psnr 13.74 lr 1.55e-04 0.50s/step elapsed 0.68h n_warm 0 mem 30.5G
+[11-14 01:31:58] step 4940 loss 0.1945 psnr 12.37 lr 1.55e-04 0.50s/step elapsed 0.69h n_warm 0 mem 30.5G
+[11-14 01:32:08] step 4960 loss 0.1833 psnr 12.98 lr 1.55e-04 0.50s/step elapsed 0.69h n_warm 0 mem 30.5G
+[11-14 01:32:17] step 4980 loss 0.1790 psnr 13.03 lr 1.54e-04 0.50s/step elapsed 0.69h n_warm 0 mem 30.5G
+[11-14 01:32:27] step 5000 loss 0.1805 psnr 12.99 lr 1.54e-04 0.50s/step elapsed 0.69h n_warm 0 mem 30.5G
+[11-14 01:32:29] VAL cold=10.942 rec=10.942 warm=10.942
+[11-14 01:32:38] step 5020 loss 0.1905 psnr 12.82 lr 1.54e-04 0.50s/step elapsed 0.70h n_warm 0 mem 30.5G
+[11-14 01:32:48] step 5040 loss 0.1880 psnr 12.87 lr 1.53e-04 0.50s/step elapsed 0.70h n_warm 0 mem 30.5G
+[11-14 01:32:58] step 5060 loss 0.1821 psnr 12.92 lr 1.53e-04 0.50s/step elapsed 0.70h n_warm 0 mem 30.5G
+[11-14 01:33:07] step 5080 loss 0.1772 psnr 13.29 lr 1.53e-04 0.50s/step elapsed 0.71h n_warm 0 mem 30.5G
+[11-14 01:33:17] step 5100 loss 0.1885 psnr 12.64 lr 1.52e-04 0.50s/step elapsed 0.71h n_warm 0 mem 30.5G
+[11-14 01:33:27] step 5120 loss 0.1834 psnr 12.98 lr 1.52e-04 0.50s/step elapsed 0.71h n_warm 0 mem 30.5G
+[11-14 01:33:36] step 5140 loss 0.1854 psnr 12.89 lr 1.52e-04 0.50s/step elapsed 0.71h n_warm 0 mem 30.5G
+[11-14 01:33:46] step 5160 loss 0.1849 psnr 12.88 lr 1.51e-04 0.50s/step elapsed 0.72h n_warm 0 mem 30.5G
+[11-14 01:33:56] step 5180 loss 0.1749 psnr 13.22 lr 1.51e-04 0.50s/step elapsed 0.72h n_warm 0 mem 30.5G
+[11-14 01:34:06] step 5200 loss 0.1785 psnr 12.97 lr 1.51e-04 0.50s/step elapsed 0.72h n_warm 0 mem 30.5G
+[11-14 01:34:15] step 5220 loss 0.1839 psnr 12.66 lr 1.50e-04 0.50s/step elapsed 0.72h n_warm 0 mem 30.5G
+[11-14 01:34:25] step 5240 loss 0.1822 psnr 13.08 lr 1.50e-04 0.50s/step elapsed 0.73h n_warm 0 mem 30.5G
+[11-14 01:34:35] step 5260 loss 0.1866 psnr 12.56 lr 1.50e-04 0.50s/step elapsed 0.73h n_warm 0 mem 30.5G
+[11-14 01:34:44] step 5280 loss 0.1707 psnr 13.25 lr 1.49e-04 0.50s/step elapsed 0.73h n_warm 0 mem 30.5G
+[11-14 01:34:54] step 5300 loss 0.1824 psnr 13.00 lr 1.49e-04 0.50s/step elapsed 0.73h n_warm 0 mem 30.5G
+[11-14 01:35:04] step 5320 loss 0.1866 psnr 13.03 lr 1.48e-04 0.50s/step elapsed 0.74h n_warm 0 mem 30.5G
+[11-14 01:35:13] step 5340 loss 0.1820 psnr 13.59 lr 1.48e-04 0.50s/step elapsed 0.74h n_warm 0 mem 30.5G
+[11-14 01:35:23] step 5360 loss 0.1921 psnr 12.70 lr 1.48e-04 0.50s/step elapsed 0.74h n_warm 0 mem 30.5G
+[11-14 01:35:33] step 5380 loss 0.1645 psnr 13.85 lr 1.47e-04 0.50s/step elapsed 0.75h n_warm 0 mem 30.5G
+[11-14 01:35:43] step 5400 loss 0.1827 psnr 12.94 lr 1.47e-04 0.50s/step elapsed 0.75h n_warm 0 mem 30.5G
+[11-14 01:35:52] save ckpt step 5400 -> last.pt step5400.pt
+[11-14 01:35:53] prune step4800.pt
+[11-14 01:36:02] step 5420 loss 0.1854 psnr 12.98 lr 1.47e-04 0.50s/step elapsed 0.75h n_warm 0 mem 30.5G
+[11-14 01:36:12] step 5440 loss 0.1781 psnr 13.29 lr 1.46e-04 0.50s/step elapsed 0.76h n_warm 0 mem 30.5G
+[11-14 01:36:22] step 5460 loss 0.1956 psnr 12.22 lr 1.46e-04 0.50s/step elapsed 0.76h n_warm 0 mem 30.5G
+[11-14 01:36:31] step 5480 loss 0.1893 psnr 12.71 lr 1.46e-04 0.50s/step elapsed 0.76h n_warm 0 mem 30.5G
+[11-14 01:36:41] step 5500 loss 0.1828 psnr 13.25 lr 1.45e-04 0.50s/step elapsed 0.76h n_warm 0 mem 30.5G
+[11-14 01:36:43] VAL cold=10.682 rec=10.682 warm=10.682
+[11-14 01:36:52] step 5520 loss 0.1796 psnr 13.77 lr 1.45e-04 0.50s/step elapsed 0.77h n_warm 0 mem 30.5G
+[11-14 01:37:02] step 5540 loss 0.1744 psnr 13.24 lr 1.44e-04 0.50s/step elapsed 0.77h n_warm 0 mem 30.5G
+[11-14 01:37:12] step 5560 loss 0.1843 psnr 13.01 lr 1.44e-04 0.50s/step elapsed 0.77h n_warm 0 mem 30.5G
+[11-14 01:37:22] step 5580 loss 0.1864 psnr 12.81 lr 1.44e-04 0.50s/step elapsed 0.78h n_warm 0 mem 30.5G
+[11-14 01:37:31] step 5600 loss 0.1901 psnr 12.46 lr 1.43e-04 0.50s/step elapsed 0.78h n_warm 0 mem 30.5G
+[11-14 01:37:41] step 5620 loss 0.1868 psnr 12.67 lr 1.43e-04 0.50s/step elapsed 0.78h n_warm 0 mem 30.5G
+[11-14 01:37:51] step 5640 loss 0.1840 psnr 12.72 lr 1.43e-04 0.50s/step elapsed 0.78h n_warm 0 mem 30.5G
+[11-14 01:38:00] step 5660 loss 0.1756 psnr 13.48 lr 1.42e-04 0.50s/step elapsed 0.79h n_warm 0 mem 30.5G
+[11-14 01:38:10] step 5680 loss 0.1834 psnr 13.14 lr 1.42e-04 0.50s/step elapsed 0.79h n_warm 0 mem 30.5G
+[11-14 01:38:20] step 5700 loss 0.1802 psnr 13.03 lr 1.42e-04 0.50s/step elapsed 0.79h n_warm 0 mem 30.5G
+[11-14 01:38:30] step 5720 loss 0.1932 psnr 12.49 lr 1.41e-04 0.50s/step elapsed 0.79h n_warm 0 mem 30.5G
+[11-14 01:38:39] step 5740 loss 0.1822 psnr 13.08 lr 1.41e-04 0.50s/step elapsed 0.80h n_warm 0 mem 30.5G
+[11-14 01:38:49] step 5760 loss 0.1833 psnr 13.05 lr 1.40e-04 0.50s/step elapsed 0.80h n_warm 0 mem 30.5G
+[11-14 01:38:59] step 5780 loss 0.1839 psnr 12.78 lr 1.40e-04 0.50s/step elapsed 0.80h n_warm 0 mem 30.5G
+[11-14 01:39:08] step 5800 loss 0.1968 psnr 12.63 lr 1.40e-04 0.50s/step elapsed 0.81h n_warm 0 mem 30.5G
+[11-14 01:39:18] step 5820 loss 0.1811 psnr 12.93 lr 1.39e-04 0.50s/step elapsed 0.81h n_warm 0 mem 30.5G
+[11-14 01:39:28] step 5840 loss 0.1872 psnr 12.93 lr 1.39e-04 0.50s/step elapsed 0.81h n_warm 0 mem 30.5G
+[11-14 01:39:37] step 5860 loss 0.1918 psnr 12.28 lr 1.39e-04 0.50s/step elapsed 0.81h n_warm 0 mem 30.5G
+[11-14 01:39:47] step 5880 loss 0.1720 psnr 13.42 lr 1.38e-04 0.50s/step elapsed 0.82h n_warm 0 mem 30.5G
+[11-14 01:39:57] step 5900 loss 0.1784 psnr 14.05 lr 1.38e-04 0.50s/step elapsed 0.82h n_warm 0 mem 30.5G
+[11-14 01:40:07] step 5920 loss 0.1891 psnr 12.66 lr 1.37e-04 0.50s/step elapsed 0.82h n_warm 0 mem 30.5G
+[11-14 01:40:16] step 5940 loss 0.1837 psnr 12.74 lr 1.37e-04 0.50s/step elapsed 0.82h n_warm 0 mem 30.5G
+[11-14 01:40:26] step 5960 loss 0.1847 psnr 12.83 lr 1.37e-04 0.50s/step elapsed 0.83h n_warm 0 mem 30.5G
+[11-14 01:40:36] step 5980 loss 0.1888 psnr 12.57 lr 1.36e-04 0.50s/step elapsed 0.83h n_warm 0 mem 30.5G
+[11-14 01:40:45] step 6000 loss 0.1949 psnr 12.59 lr 1.36e-04 0.50s/step elapsed 0.83h n_warm 0 mem 30.5G
+[11-14 01:40:47] VAL cold=10.966 rec=10.966 warm=10.966
+[11-14 01:40:52] save ckpt step 6000 -> last.pt step6000.pt
+[11-14 01:40:53] prune step5400.pt
+[11-14 01:41:02] step 6020 loss 0.1735 psnr 13.28 lr 1.35e-04 0.50s/step elapsed 0.84h n_warm 0 mem 30.5G
+[11-14 01:41:12] step 6040 loss 0.1846 psnr 12.81 lr 1.35e-04 0.50s/step elapsed 0.84h n_warm 0 mem 30.5G
+[11-14 01:41:22] step 6060 loss 0.1865 psnr 12.84 lr 1.35e-04 0.50s/step elapsed 0.84h n_warm 0 mem 30.5G
+[11-14 01:41:31] step 6080 loss 0.1970 psnr 12.56 lr 1.34e-04 0.50s/step elapsed 0.85h n_warm 0 mem 30.5G
+[11-14 01:41:41] step 6100 loss 0.1847 psnr 12.83 lr 1.34e-04 0.50s/step elapsed 0.85h n_warm 0 mem 30.5G
+[11-14 01:41:51] step 6120 loss 0.1838 psnr 12.82 lr 1.34e-04 0.50s/step elapsed 0.85h n_warm 0 mem 30.5G
+[11-14 01:42:00] step 6140 loss 0.1802 psnr 13.02 lr 1.33e-04 0.50s/step elapsed 0.85h n_warm 0 mem 30.5G
+[11-14 01:42:10] step 6160 loss 0.1824 psnr 13.00 lr 1.33e-04 0.50s/step elapsed 0.86h n_warm 0 mem 30.5G
+[11-14 01:42:20] step 6180 loss 0.1789 psnr 13.15 lr 1.32e-04 0.50s/step elapsed 0.86h n_warm 0 mem 30.5G
+[11-14 01:42:29] step 6200 loss 0.1944 psnr 12.44 lr 1.32e-04 0.50s/step elapsed 0.86h n_warm 0 mem 30.5G
+[11-14 01:42:39] step 6220 loss 0.1933 psnr 12.34 lr 1.32e-04 0.50s/step elapsed 0.86h n_warm 0 mem 30.5G
+[11-14 01:42:49] step 6240 loss 0.1759 psnr 13.23 lr 1.31e-04 0.50s/step elapsed 0.87h n_warm 0 mem 30.5G
+[11-14 01:42:58] step 6260 loss 0.1831 psnr 12.93 lr 1.31e-04 0.50s/step elapsed 0.87h n_warm 0 mem 30.5G
+[11-14 01:43:08] step 6280 loss 0.1828 psnr 12.93 lr 1.30e-04 0.50s/step elapsed 0.87h n_warm 0 mem 30.5G
+[11-14 01:43:18] step 6300 loss 0.1777 psnr 13.18 lr 1.30e-04 0.50s/step elapsed 0.87h n_warm 0 mem 30.5G
+[11-14 01:43:28] step 6320 loss 0.1761 psnr 13.24 lr 1.30e-04 0.50s/step elapsed 0.88h n_warm 0 mem 30.5G
+[11-14 01:43:37] step 6340 loss 0.1853 psnr 12.88 lr 1.29e-04 0.50s/step elapsed 0.88h n_warm 0 mem 30.5G
+[11-14 01:43:47] step 6360 loss 0.1886 psnr 12.82 lr 1.29e-04 0.50s/step elapsed 0.88h n_warm 0 mem 30.5G
+[11-14 01:43:57] step 6380 loss 0.1840 psnr 12.99 lr 1.29e-04 0.50s/step elapsed 0.89h n_warm 0 mem 30.5G
+[11-14 01:44:06] step 6400 loss 0.1838 psnr 12.84 lr 1.28e-04 0.50s/step elapsed 0.89h n_warm 0 mem 30.5G
+[11-14 01:44:16] step 6420 loss 0.1890 psnr 12.77 lr 1.28e-04 0.50s/step elapsed 0.89h n_warm 0 mem 30.5G
+[11-14 01:44:26] step 6440 loss 0.1809 psnr 13.03 lr 1.27e-04 0.50s/step elapsed 0.89h n_warm 0 mem 30.5G
+[11-14 01:44:35] step 6460 loss 0.1873 psnr 12.43 lr 1.27e-04 0.50s/step elapsed 0.90h n_warm 0 mem 30.5G
+[11-14 01:44:45] step 6480 loss 0.1734 psnr 13.39 lr 1.27e-04 0.50s/step elapsed 0.90h n_warm 0 mem 30.5G
+[11-14 01:44:55] step 6500 loss 0.1683 psnr 13.64 lr 1.26e-04 0.50s/step elapsed 0.90h n_warm 0 mem 30.5G
+[11-14 01:44:56] VAL cold=10.890 rec=10.889 warm=10.889
+[11-14 01:45:06] step 6520 loss 0.1709 psnr 13.44 lr 1.26e-04 0.50s/step elapsed 0.90h n_warm 0 mem 30.5G
+[11-14 01:45:16] step 6540 loss 0.1764 psnr 13.38 lr 1.25e-04 0.50s/step elapsed 0.91h n_warm 0 mem 30.5G
+[11-14 01:45:25] step 6560 loss 0.1867 psnr 13.09 lr 1.25e-04 0.50s/step elapsed 0.91h n_warm 0 mem 30.5G
+[11-14 01:45:35] step 6580 loss 0.1835 psnr 13.06 lr 1.25e-04 0.50s/step elapsed 0.91h n_warm 0 mem 30.5G
+[11-14 01:45:45] step 6600 loss 0.1891 psnr 12.90 lr 1.24e-04 0.50s/step elapsed 0.92h n_warm 0 mem 30.5G
+[11-14 01:45:55] save ckpt step 6600 -> last.pt step6600.pt
+[11-14 01:45:55] prune step6000.pt
+[11-14 01:46:05] step 6620 loss 0.1768 psnr 13.38 lr 1.24e-04 0.50s/step elapsed 0.92h n_warm 0 mem 30.5G
+[11-14 01:46:14] step 6640 loss 0.1936 psnr 12.68 lr 1.23e-04 0.50s/step elapsed 0.92h n_warm 0 mem 30.5G
+[11-14 01:46:24] step 6660 loss 0.1769 psnr 13.08 lr 1.23e-04 0.50s/step elapsed 0.93h n_warm 0 mem 30.5G
+[11-14 01:46:34] step 6680 loss 0.1800 psnr 13.17 lr 1.23e-04 0.50s/step elapsed 0.93h n_warm 0 mem 30.5G
+[11-14 01:46:44] step 6700 loss 0.1775 psnr 13.27 lr 1.22e-04 0.50s/step elapsed 0.93h n_warm 0 mem 30.5G
+[11-14 01:46:53] step 6720 loss 0.1922 psnr 13.30 lr 1.22e-04 0.50s/step elapsed 0.93h n_warm 0 mem 30.5G
+[11-14 01:47:03] step 6740 loss 0.1828 psnr 13.12 lr 1.21e-04 0.50s/step elapsed 0.94h n_warm 0 mem 30.5G
+[11-14 01:47:13] step 6760 loss 0.1835 psnr 12.91 lr 1.21e-04 0.50s/step elapsed 0.94h n_warm 0 mem 30.5G
+[11-14 01:47:22] step 6780 loss 0.1907 psnr 12.54 lr 1.21e-04 0.50s/step elapsed 0.94h n_warm 0 mem 30.5G
+[11-14 01:47:32] step 6800 loss 0.1913 psnr 12.70 lr 1.20e-04 0.50s/step elapsed 0.95h n_warm 0 mem 30.5G
+[11-14 01:47:42] step 6820 loss 0.1912 psnr 12.73 lr 1.20e-04 0.50s/step elapsed 0.95h n_warm 0 mem 30.5G
+[11-14 01:47:51] step 6840 loss 0.1854 psnr 13.05 lr 1.19e-04 0.50s/step elapsed 0.95h n_warm 0 mem 30.5G
+[11-14 01:48:01] step 6860 loss 0.1780 psnr 13.35 lr 1.19e-04 0.50s/step elapsed 0.95h n_warm 0 mem 30.5G
+[11-14 01:48:11] step 6880 loss 0.1743 psnr 13.27 lr 1.19e-04 0.50s/step elapsed 0.96h n_warm 0 mem 30.5G
+[11-14 01:48:21] step 6900 loss 0.1834 psnr 12.87 lr 1.18e-04 0.50s/step elapsed 0.96h n_warm 0 mem 30.5G
+[11-14 01:48:30] step 6920 loss 0.1789 psnr 13.30 lr 1.18e-04 0.50s/step elapsed 0.96h n_warm 0 mem 30.5G
+[11-14 01:48:40] step 6940 loss 0.1795 psnr 13.12 lr 1.17e-04 0.50s/step elapsed 0.96h n_warm 0 mem 30.5G
+[11-14 01:48:50] step 6960 loss 0.1860 psnr 12.89 lr 1.17e-04 0.50s/step elapsed 0.97h n_warm 0 mem 30.5G
+[11-14 01:48:59] step 6980 loss 0.1901 psnr 12.49 lr 1.17e-04 0.50s/step elapsed 0.97h n_warm 0 mem 30.5G
+[11-14 01:49:09] step 7000 loss 0.1854 psnr 12.84 lr 1.16e-04 0.50s/step elapsed 0.97h n_warm 0 mem 30.5G
+[11-14 01:49:10] VAL cold=10.982 rec=10.983 warm=10.983
+[11-14 01:49:20] step 7020 loss 0.1799 psnr 13.14 lr 1.16e-04 0.50s/step elapsed 0.98h n_warm 0 mem 30.5G
+[11-14 01:49:30] step 7040 loss 0.1842 psnr 12.95 lr 1.15e-04 0.50s/step elapsed 0.98h n_warm 0 mem 30.5G
+[11-14 01:49:39] step 7060 loss 0.1698 psnr 13.93 lr 1.15e-04 0.50s/step elapsed 0.98h n_warm 0 mem 30.5G
+[11-14 01:49:49] step 7080 loss 0.1822 psnr 13.28 lr 1.15e-04 0.50s/step elapsed 0.98h n_warm 0 mem 30.5G
+[11-14 01:49:59] step 7100 loss 0.1882 psnr 13.25 lr 1.14e-04 0.50s/step elapsed 0.99h n_warm 0 mem 30.5G
+[11-14 01:50:08] step 7120 loss 0.1771 psnr 13.32 lr 1.14e-04 0.50s/step elapsed 0.99h n_warm 0 mem 30.5G
+[11-14 01:50:18] step 7140 loss 0.1821 psnr 12.94 lr 1.13e-04 0.50s/step elapsed 0.99h n_warm 0 mem 30.5G
+[11-14 01:50:28] step 7160 loss 0.1797 psnr 13.40 lr 1.13e-04 0.50s/step elapsed 0.99h n_warm 0 mem 30.5G
+[11-14 01:50:37] step 7180 loss 0.1776 psnr 13.26 lr 1.13e-04 0.50s/step elapsed 1.00h n_warm 0 mem 30.5G
+[11-14 01:50:47] step 7200 loss 0.1821 psnr 13.50 lr 1.12e-04 0.50s/step elapsed 1.00h n_warm 0 mem 30.5G
+[11-14 01:50:53] save ckpt step 7200 -> last.pt step7200.pt
+[11-14 01:50:53] prune step6600.pt
+[11-14 01:51:03] step 7220 loss 0.1872 psnr 12.82 lr 1.12e-04 0.50s/step elapsed 1.00h n_warm 0 mem 30.5G
+[11-14 01:51:12] step 7240 loss 0.1711 psnr 14.01 lr 1.11e-04 0.50s/step elapsed 1.01h n_warm 0 mem 30.5G
+[11-14 01:51:22] step 7260 loss 0.1883 psnr 12.92 lr 1.11e-04 0.50s/step elapsed 1.01h n_warm 0 mem 30.5G
+[11-14 01:51:32] step 7280 loss 0.1864 psnr 13.11 lr 1.11e-04 0.50s/step elapsed 1.01h n_warm 0 mem 30.5G
+[11-14 01:51:41] step 7300 loss 0.1733 psnr 13.41 lr 1.10e-04 0.50s/step elapsed 1.01h n_warm 0 mem 30.5G
+[11-14 01:51:51] step 7320 loss 0.1796 psnr 12.94 lr 1.10e-04 0.50s/step elapsed 1.02h n_warm 0 mem 30.5G
+[11-14 01:52:01] step 7340 loss 0.1761 psnr 13.55 lr 1.09e-04 0.50s/step elapsed 1.02h n_warm 0 mem 30.5G
+[11-14 01:52:11] step 7360 loss 0.1889 psnr 12.73 lr 1.09e-04 0.50s/step elapsed 1.02h n_warm 0 mem 30.5G
+[11-14 01:52:20] step 7380 loss 0.1960 psnr 12.62 lr 1.09e-04 0.50s/step elapsed 1.03h n_warm 0 mem 30.5G
+[11-14 01:52:30] step 7400 loss 0.1957 psnr 12.59 lr 1.08e-04 0.50s/step elapsed 1.03h n_warm 0 mem 30.5G
+[11-14 01:52:40] step 7420 loss 0.1966 psnr 12.46 lr 1.08e-04 0.50s/step elapsed 1.03h n_warm 0 mem 30.5G
+[11-14 01:52:49] step 7440 loss 0.1893 psnr 12.51 lr 1.07e-04 0.50s/step elapsed 1.03h n_warm 0 mem 30.5G
+[11-14 01:52:59] step 7460 loss 0.1846 psnr 12.89 lr 1.07e-04 0.50s/step elapsed 1.04h n_warm 0 mem 30.5G
+[11-14 01:53:09] step 7480 loss 0.1818 psnr 13.04 lr 1.07e-04 0.50s/step elapsed 1.04h n_warm 0 mem 30.5G
+[11-14 01:53:18] step 7500 loss 0.1735 psnr 13.31 lr 1.06e-04 0.50s/step elapsed 1.04h n_warm 0 mem 30.5G
+[11-14 01:53:20] VAL cold=10.931 rec=10.931 warm=10.931
+[11-14 01:53:29] step 7520 loss 0.1778 psnr 13.45 lr 1.06e-04 0.50s/step elapsed 1.04h n_warm 0 mem 30.5G
+[11-14 01:53:39] step 7540 loss 0.1873 psnr 13.00 lr 1.05e-04 0.50s/step elapsed 1.05h n_warm 0 mem 30.5G
+[11-14 01:53:49] step 7560 loss 0.1856 psnr 13.36 lr 1.05e-04 0.50s/step elapsed 1.05h n_warm 0 mem 30.5G
+[11-14 01:53:58] step 7580 loss 0.1869 psnr 12.69 lr 1.05e-04 0.50s/step elapsed 1.05h n_warm 0 mem 30.5G
+[11-14 01:54:08] step 7600 loss 0.1805 psnr 13.19 lr 1.04e-04 0.50s/step elapsed 1.06h n_warm 0 mem 30.5G
+[11-14 01:54:18] step 7620 loss 0.1805 psnr 13.11 lr 1.04e-04 0.50s/step elapsed 1.06h n_warm 0 mem 30.5G
+[11-14 01:54:28] step 7640 loss 0.1818 psnr 12.85 lr 1.03e-04 0.50s/step elapsed 1.06h n_warm 0 mem 30.5G
+[11-14 01:54:37] step 7660 loss 0.1826 psnr 12.68 lr 1.03e-04 0.50s/step elapsed 1.06h n_warm 0 mem 30.5G
+[11-14 01:54:47] step 7680 loss 0.1818 psnr 13.97 lr 1.03e-04 0.50s/step elapsed 1.07h n_warm 0 mem 30.5G
+[11-14 01:54:57] step 7700 loss 0.1730 psnr 13.48 lr 1.02e-04 0.50s/step elapsed 1.07h n_warm 0 mem 30.5G
+[11-14 01:55:06] step 7720 loss 0.1810 psnr 12.99 lr 1.02e-04 0.50s/step elapsed 1.07h n_warm 0 mem 30.5G
+[11-14 01:55:16] step 7740 loss 0.1879 psnr 12.57 lr 1.01e-04 0.50s/step elapsed 1.07h n_warm 0 mem 30.5G
+[11-14 01:55:26] step 7760 loss 0.1803 psnr 13.34 lr 1.01e-04 0.50s/step elapsed 1.08h n_warm 0 mem 30.5G
+[11-14 01:55:35] step 7780 loss 0.1882 psnr 12.86 lr 1.01e-04 0.50s/step elapsed 1.08h n_warm 0 mem 30.5G
+[11-14 01:55:45] step 7800 loss 0.1831 psnr 13.03 lr 1.00e-04 0.50s/step elapsed 1.08h n_warm 0 mem 30.5G
+[11-14 01:55:51] save ckpt step 7800 -> last.pt step7800.pt
+[11-14 01:55:51] prune step7200.pt
+[11-14 01:56:01] step 7820 loss 0.1802 psnr 12.86 lr 9.98e-05 0.50s/step elapsed 1.09h n_warm 0 mem 30.5G
+[11-14 01:56:10] step 7840 loss 0.1853 psnr 12.84 lr 9.94e-05 0.50s/step elapsed 1.09h n_warm 0 mem 30.5G
+[11-14 01:56:20] step 7860 loss 0.1839 psnr 13.22 lr 9.90e-05 0.50s/step elapsed 1.09h n_warm 0 mem 30.5G
+[11-14 01:56:30] step 7880 loss 0.1805 psnr 13.23 lr 9.86e-05 0.50s/step elapsed 1.09h n_warm 0 mem 30.5G
+[11-14 01:56:39] step 7900 loss 0.1703 psnr 13.75 lr 9.82e-05 0.50s/step elapsed 1.10h n_warm 0 mem 30.5G
+[11-14 01:56:49] step 7920 loss 0.1769 psnr 13.23 lr 9.78e-05 0.50s/step elapsed 1.10h n_warm 0 mem 30.5G
+[11-14 01:56:59] step 7940 loss 0.1823 psnr 13.03 lr 9.74e-05 0.50s/step elapsed 1.10h n_warm 0 mem 30.5G
+[11-14 01:57:09] step 7960 loss 0.1962 psnr 12.38 lr 9.70e-05 0.50s/step elapsed 1.11h n_warm 0 mem 30.5G
+[11-14 01:57:18] step 7980 loss 0.1835 psnr 13.34 lr 9.66e-05 0.50s/step elapsed 1.11h n_warm 0 mem 30.5G
+[11-14 01:57:28] step 8000 loss 0.1788 psnr 13.44 lr 9.62e-05 0.50s/step elapsed 1.11h n_warm 0 mem 30.5G
+[11-14 01:57:29] VAL cold=10.757 rec=10.747 warm=10.747
+[11-14 01:57:39] step 8020 loss 0.1795 psnr 13.00 lr 9.58e-05 0.50s/step elapsed 1.11h n_warm 0 mem 30.5G
+[11-14 01:57:49] step 8040 loss 0.1640 psnr 14.47 lr 9.54e-05 0.50s/step elapsed 1.12h n_warm 0 mem 30.5G
+[11-14 01:57:58] step 8060 loss 0.1838 psnr 12.96 lr 9.50e-05 0.50s/step elapsed 1.12h n_warm 0 mem 30.5G
+[11-14 01:58:08] step 8080 loss 0.1796 psnr 12.93 lr 9.46e-05 0.50s/step elapsed 1.12h n_warm 0 mem 30.5G
+[11-14 01:58:18] step 8100 loss 0.1951 psnr 12.52 lr 9.42e-05 0.50s/step elapsed 1.12h n_warm 0 mem 30.5G
+[11-14 01:58:27] step 8120 loss 0.1812 psnr 12.98 lr 9.38e-05 0.50s/step elapsed 1.13h n_warm 0 mem 30.5G
+[11-14 01:58:37] step 8140 loss 0.1914 psnr 12.61 lr 9.34e-05 0.50s/step elapsed 1.13h n_warm 0 mem 30.5G
+[11-14 01:58:47] step 8160 loss 0.1823 psnr 13.43 lr 9.30e-05 0.50s/step elapsed 1.13h n_warm 0 mem 30.5G
+[11-14 01:58:56] step 8180 loss 0.1694 psnr 13.53 lr 9.26e-05 0.50s/step elapsed 1.14h n_warm 0 mem 30.5G
+[11-14 01:59:06] step 8200 loss 0.1730 psnr 13.40 lr 9.22e-05 0.50s/step elapsed 1.14h n_warm 0 mem 30.5G
+[11-14 01:59:16] step 8220 loss 0.1839 psnr 13.46 lr 9.18e-05 0.50s/step elapsed 1.14h n_warm 0 mem 30.5G
+[11-14 01:59:25] step 8240 loss 0.1717 psnr 13.64 lr 9.14e-05 0.50s/step elapsed 1.14h n_warm 0 mem 30.5G
+[11-14 01:59:35] step 8260 loss 0.1799 psnr 13.07 lr 9.10e-05 0.50s/step elapsed 1.15h n_warm 0 mem 30.5G
+[11-14 01:59:45] step 8280 loss 0.1862 psnr 13.01 lr 9.06e-05 0.50s/step elapsed 1.15h n_warm 0 mem 30.5G
+[11-14 01:59:54] step 8300 loss 0.1793 psnr 13.16 lr 9.02e-05 0.50s/step elapsed 1.15h n_warm 0 mem 30.5G
+[11-14 02:00:04] step 8320 loss 0.1861 psnr 12.81 lr 8.98e-05 0.50s/step elapsed 1.15h n_warm 0 mem 30.5G
+[11-14 02:00:14] step 8340 loss 0.1793 psnr 13.12 lr 8.94e-05 0.50s/step elapsed 1.16h n_warm 0 mem 30.5G
+[11-14 02:00:23] step 8360 loss 0.1853 psnr 13.00 lr 8.90e-05 0.50s/step elapsed 1.16h n_warm 0 mem 30.5G
+[11-14 02:00:33] step 8380 loss 0.1707 psnr 13.62 lr 8.86e-05 0.50s/step elapsed 1.16h n_warm 0 mem 30.5G
+[11-14 02:00:43] step 8400 loss 0.1655 psnr 13.45 lr 8.82e-05 0.50s/step elapsed 1.17h n_warm 0 mem 30.5G
+[11-14 02:00:49] save ckpt step 8400 -> last.pt step8400.pt
+[11-14 02:00:49] prune step7800.pt
+[11-14 02:00:58] step 8420 loss 0.1842 psnr 12.95 lr 8.78e-05 0.50s/step elapsed 1.17h n_warm 0 mem 30.5G
+[11-14 02:01:08] step 8440 loss 0.1780 psnr 12.94 lr 8.74e-05 0.50s/step elapsed 1.17h n_warm 0 mem 30.5G
+[11-14 02:01:18] step 8460 loss 0.1712 psnr 13.55 lr 8.70e-05 0.50s/step elapsed 1.17h n_warm 0 mem 30.5G
+[11-14 02:01:27] step 8480 loss 0.1777 psnr 13.04 lr 8.66e-05 0.50s/step elapsed 1.18h n_warm 0 mem 30.5G
+[11-14 02:01:37] step 8500 loss 0.1850 psnr 12.86 lr 8.62e-05 0.50s/step elapsed 1.18h n_warm 0 mem 30.5G
+[11-14 02:01:38] VAL cold=10.860 rec=10.865 warm=10.865
+[11-14 02:01:48] step 8520 loss 0.1795 psnr 13.12 lr 8.58e-05 0.50s/step elapsed 1.18h n_warm 0 mem 30.5G
+[11-14 02:01:58] step 8540 loss 0.1792 psnr 13.03 lr 8.54e-05 0.50s/step elapsed 1.19h n_warm 0 mem 30.5G
+[11-14 02:02:07] step 8560 loss 0.1846 psnr 12.89 lr 8.50e-05 0.50s/step elapsed 1.19h n_warm 0 mem 30.5G
+[11-14 02:02:17] step 8580 loss 0.1829 psnr 12.88 lr 8.46e-05 0.50s/step elapsed 1.19h n_warm 0 mem 30.5G
+[11-14 02:02:27] step 8600 loss 0.1828 psnr 12.87 lr 8.42e-05 0.50s/step elapsed 1.19h n_warm 0 mem 30.5G
+[11-14 02:02:37] step 8620 loss 0.1684 psnr 13.71 lr 8.39e-05 0.50s/step elapsed 1.20h n_warm 0 mem 30.5G
+[11-14 02:02:46] step 8640 loss 0.1789 psnr 13.28 lr 8.35e-05 0.50s/step elapsed 1.20h n_warm 0 mem 30.5G
+[11-14 02:02:56] step 8660 loss 0.1829 psnr 13.03 lr 8.31e-05 0.50s/step elapsed 1.20h n_warm 0 mem 30.5G
+[11-14 02:03:06] step 8680 loss 0.1900 psnr 12.84 lr 8.27e-05 0.50s/step elapsed 1.20h n_warm 0 mem 30.5G
+[11-14 02:03:15] step 8700 loss 0.1740 psnr 13.17 lr 8.23e-05 0.50s/step elapsed 1.21h n_warm 0 mem 30.5G
+[11-14 02:03:25] step 8720 loss 0.1833 psnr 12.91 lr 8.19e-05 0.50s/step elapsed 1.21h n_warm 0 mem 30.5G
+[11-14 02:03:35] step 8740 loss 0.1922 psnr 12.58 lr 8.15e-05 0.50s/step elapsed 1.21h n_warm 0 mem 30.5G
+[11-14 02:03:44] step 8760 loss 0.1808 psnr 12.95 lr 8.11e-05 0.50s/step elapsed 1.22h n_warm 0 mem 30.5G
+[11-14 02:03:54] step 8780 loss 0.1704 psnr 13.64 lr 8.07e-05 0.50s/step elapsed 1.22h n_warm 0 mem 30.5G
+[11-14 02:04:04] step 8800 loss 0.1997 psnr 12.70 lr 8.03e-05 0.50s/step elapsed 1.22h n_warm 0 mem 30.5G
+[11-14 02:04:13] step 8820 loss 0.1883 psnr 12.64 lr 7.99e-05 0.50s/step elapsed 1.22h n_warm 0 mem 30.5G
+[11-14 02:04:23] step 8840 loss 0.1725 psnr 13.26 lr 7.96e-05 0.50s/step elapsed 1.23h n_warm 0 mem 30.5G
+[11-14 02:04:33] step 8860 loss 0.1748 psnr 13.13 lr 7.92e-05 0.50s/step elapsed 1.23h n_warm 0 mem 30.5G
+[11-14 02:04:43] step 8880 loss 0.1782 psnr 13.27 lr 7.88e-05 0.50s/step elapsed 1.23h n_warm 0 mem 30.5G
+[11-14 02:04:52] step 8900 loss 0.1823 psnr 13.45 lr 7.84e-05 0.50s/step elapsed 1.23h n_warm 0 mem 30.5G
+[11-14 02:05:02] step 8920 loss 0.1734 psnr 13.28 lr 7.80e-05 0.50s/step elapsed 1.24h n_warm 0 mem 30.5G
+[11-14 02:05:12] step 8940 loss 0.1776 psnr 13.69 lr 7.76e-05 0.50s/step elapsed 1.24h n_warm 0 mem 30.5G
+[11-14 02:05:21] step 8960 loss 0.1843 psnr 13.22 lr 7.72e-05 0.50s/step elapsed 1.24h n_warm 0 mem 30.5G
+[11-14 02:05:31] step 8980 loss 0.1820 psnr 13.25 lr 7.69e-05 0.50s/step elapsed 1.25h n_warm 0 mem 30.5G
+[11-14 02:05:41] step 9000 loss 0.1815 psnr 13.02 lr 7.65e-05 0.50s/step elapsed 1.25h n_warm 0 mem 30.5G
+[11-14 02:05:42] VAL cold=10.874 rec=10.884 warm=10.884
+[11-14 02:05:48] save ckpt step 9000 -> last.pt step9000.pt
+[11-14 02:05:48] prune step8400.pt
+[11-14 02:05:58] step 9020 loss 0.1761 psnr 13.19 lr 7.61e-05 0.50s/step elapsed 1.25h n_warm 0 mem 30.5G
+[11-14 02:06:08] step 9040 loss 0.1779 psnr 13.11 lr 7.57e-05 0.50s/step elapsed 1.26h n_warm 0 mem 30.5G
+[11-14 02:06:17] step 9060 loss 0.1702 psnr 14.16 lr 7.53e-05 0.50s/step elapsed 1.26h n_warm 0 mem 30.5G
+[11-14 02:06:27] step 9080 loss 0.1633 psnr 13.80 lr 7.49e-05 0.50s/step elapsed 1.26h n_warm 0 mem 30.5G
+[11-14 02:06:37] step 9100 loss 0.1825 psnr 13.83 lr 7.46e-05 0.50s/step elapsed 1.26h n_warm 0 mem 30.5G
+[11-14 02:06:46] step 9120 loss 0.1749 psnr 13.23 lr 7.42e-05 0.50s/step elapsed 1.27h n_warm 0 mem 30.5G
+[11-14 02:06:56] step 9140 loss 0.1763 psnr 12.98 lr 7.38e-05 0.50s/step elapsed 1.27h n_warm 0 mem 30.5G
+[11-14 02:07:06] step 9160 loss 0.1795 psnr 13.08 lr 7.34e-05 0.50s/step elapsed 1.27h n_warm 0 mem 30.5G
+[11-14 02:07:15] step 9180 loss 0.1680 psnr 13.48 lr 7.30e-05 0.50s/step elapsed 1.27h n_warm 0 mem 30.5G
+[11-14 02:07:25] step 9200 loss 0.1839 psnr 12.83 lr 7.27e-05 0.50s/step elapsed 1.28h n_warm 0 mem 30.5G
+[11-14 02:07:35] step 9220 loss 0.1813 psnr 13.14 lr 7.23e-05 0.50s/step elapsed 1.28h n_warm 0 mem 30.5G
+[11-14 02:07:44] step 9240 loss 0.1786 psnr 13.10 lr 7.19e-05 0.50s/step elapsed 1.28h n_warm 0 mem 30.5G
+[11-14 02:07:54] step 9260 loss 0.1747 psnr 13.53 lr 7.15e-05 0.50s/step elapsed 1.28h n_warm 0 mem 30.5G
+[11-14 02:08:04] step 9280 loss 0.1742 psnr 13.21 lr 7.11e-05 0.50s/step elapsed 1.29h n_warm 0 mem 30.5G
+[11-14 02:08:14] step 9300 loss 0.1766 psnr 13.28 lr 7.08e-05 0.50s/step elapsed 1.29h n_warm 0 mem 30.5G
+[11-14 02:08:23] step 9320 loss 0.1681 psnr 13.62 lr 7.04e-05 0.50s/step elapsed 1.29h n_warm 0 mem 30.5G
+[11-14 02:08:33] step 9340 loss 0.1840 psnr 12.99 lr 7.00e-05 0.50s/step elapsed 1.30h n_warm 0 mem 30.5G
+[11-14 02:08:43] step 9360 loss 0.1707 psnr 13.41 lr 6.96e-05 0.50s/step elapsed 1.30h n_warm 0 mem 30.5G
+[11-14 02:08:52] step 9380 loss 0.1887 psnr 12.65 lr 6.93e-05 0.50s/step elapsed 1.30h n_warm 0 mem 30.5G
+[11-14 02:09:02] step 9400 loss 0.1778 psnr 13.22 lr 6.89e-05 0.50s/step elapsed 1.30h n_warm 0 mem 30.5G
+[11-14 02:09:12] step 9420 loss 0.1797 psnr 13.00 lr 6.85e-05 0.50s/step elapsed 1.31h n_warm 0 mem 30.5G
+[11-14 02:09:21] step 9440 loss 0.1820 psnr 12.95 lr 6.82e-05 0.50s/step elapsed 1.31h n_warm 0 mem 30.5G
+[11-14 02:09:31] step 9460 loss 0.1734 psnr 13.49 lr 6.78e-05 0.50s/step elapsed 1.31h n_warm 0 mem 30.5G
+[11-14 02:09:41] step 9480 loss 0.1712 psnr 13.60 lr 6.74e-05 0.50s/step elapsed 1.31h n_warm 0 mem 30.5G
+[11-14 02:09:50] step 9500 loss 0.1885 psnr 12.82 lr 6.70e-05 0.50s/step elapsed 1.32h n_warm 0 mem 30.5G
+[11-14 02:09:52] VAL cold=10.836 rec=10.843 warm=10.843
+[11-14 02:10:02] step 9520 loss 0.1762 psnr 13.08 lr 6.67e-05 0.50s/step elapsed 1.32h n_warm 0 mem 30.5G
+[11-14 02:10:11] step 9540 loss 0.1799 psnr 13.13 lr 6.63e-05 0.50s/step elapsed 1.32h n_warm 0 mem 30.5G
+[11-14 02:10:21] step 9560 loss 0.1771 psnr 13.02 lr 6.59e-05 0.50s/step elapsed 1.33h n_warm 0 mem 30.5G
+[11-14 02:10:31] step 9580 loss 0.1745 psnr 13.21 lr 6.56e-05 0.50s/step elapsed 1.33h n_warm 0 mem 30.5G
+[11-14 02:10:40] step 9600 loss 0.1772 psnr 13.19 lr 6.52e-05 0.50s/step elapsed 1.33h n_warm 0 mem 30.5G
+[11-14 02:10:50] save ckpt step 9600 -> last.pt step9600.pt
+[11-14 02:10:50] prune step9000.pt
+[11-14 02:11:00] step 9620 loss 0.1703 psnr 13.90 lr 6.48e-05 0.50s/step elapsed 1.34h n_warm 0 mem 30.5G
+[11-14 02:11:10] step 9640 loss 0.1880 psnr 12.70 lr 6.45e-05 0.50s/step elapsed 1.34h n_warm 0 mem 30.5G
+[11-14 02:11:20] step 9660 loss 0.1732 psnr 13.17 lr 6.41e-05 0.50s/step elapsed 1.34h n_warm 0 mem 30.5G
+[11-14 02:11:29] step 9680 loss 0.1762 psnr 13.13 lr 6.37e-05 0.50s/step elapsed 1.34h n_warm 0 mem 30.5G
+[11-14 02:11:39] step 9700 loss 0.1785 psnr 13.00 lr 6.34e-05 0.50s/step elapsed 1.35h n_warm 0 mem 30.5G
+[11-14 02:11:49] step 9720 loss 0.1829 psnr 12.85 lr 6.30e-05 0.50s/step elapsed 1.35h n_warm 0 mem 30.5G
+[11-14 02:11:58] step 9740 loss 0.1844 psnr 12.68 lr 6.27e-05 0.50s/step elapsed 1.35h n_warm 0 mem 30.5G
+[11-14 02:12:08] step 9760 loss 0.1705 psnr 13.58 lr 6.23e-05 0.50s/step elapsed 1.36h n_warm 0 mem 30.5G
+[11-14 02:12:18] step 9780 loss 0.1753 psnr 13.29 lr 6.19e-05 0.50s/step elapsed 1.36h n_warm 0 mem 30.5G
+[11-14 02:12:27] step 9800 loss 0.1638 psnr 14.81 lr 6.16e-05 0.50s/step elapsed 1.36h n_warm 0 mem 30.5G
+[11-14 02:12:37] step 9820 loss 0.1723 psnr 13.31 lr 6.12e-05 0.50s/step elapsed 1.36h n_warm 0 mem 30.5G
+[11-14 02:12:47] step 9840 loss 0.1745 psnr 13.38 lr 6.09e-05 0.50s/step elapsed 1.37h n_warm 0 mem 30.5G
+[11-14 02:12:56] step 9860 loss 0.1748 psnr 13.34 lr 6.05e-05 0.50s/step elapsed 1.37h n_warm 0 mem 30.5G
+[11-14 02:13:06] step 9880 loss 0.1775 psnr 12.99 lr 6.02e-05 0.50s/step elapsed 1.37h n_warm 0 mem 30.5G
+[11-14 02:13:16] step 9900 loss 0.1691 psnr 13.48 lr 5.98e-05 0.50s/step elapsed 1.37h n_warm 0 mem 30.5G
+[11-14 02:13:25] step 9920 loss 0.1728 psnr 13.38 lr 5.94e-05 0.50s/step elapsed 1.38h n_warm 0 mem 30.5G
+[11-14 02:13:35] step 9940 loss 0.1747 psnr 13.31 lr 5.91e-05 0.50s/step elapsed 1.38h n_warm 0 mem 30.5G
+[11-14 02:13:45] step 9960 loss 0.1886 psnr 12.99 lr 5.87e-05 0.50s/step elapsed 1.38h n_warm 0 mem 30.5G
+[11-14 02:13:55] step 9980 loss 0.1698 psnr 13.39 lr 5.84e-05 0.50s/step elapsed 1.39h n_warm 0 mem 30.5G
+[11-14 02:14:04] step 10000 loss 0.1696 psnr 13.57 lr 5.80e-05 0.50s/step elapsed 1.39h n_warm 0 mem 30.5G
+[11-14 02:14:06] VAL cold=10.829 rec=10.841 warm=10.841
+[11-14 02:14:15] step 10020 loss 0.1679 psnr 13.74 lr 5.77e-05 0.50s/step elapsed 1.39h n_warm 0 mem 30.5G
+[11-14 02:14:25] step 10040 loss 0.1696 psnr 13.42 lr 5.73e-05 0.50s/step elapsed 1.39h n_warm 0 mem 30.5G
+[11-14 02:14:35] step 10060 loss 0.1738 psnr 13.26 lr 5.70e-05 0.50s/step elapsed 1.40h n_warm 0 mem 30.5G
+[11-14 02:14:45] step 10080 loss 0.1791 psnr 13.08 lr 5.66e-05 0.50s/step elapsed 1.40h n_warm 0 mem 30.5G
+[11-14 02:14:54] step 10100 loss 0.1749 psnr 13.19 lr 5.63e-05 0.50s/step elapsed 1.40h n_warm 0 mem 30.5G
+[11-14 02:15:04] step 10120 loss 0.1775 psnr 13.13 lr 5.60e-05 0.50s/step elapsed 1.40h n_warm 0 mem 30.5G
+[11-14 02:15:14] step 10140 loss 0.1842 psnr 12.95 lr 5.56e-05 0.50s/step elapsed 1.41h n_warm 0 mem 30.5G
+[11-14 02:15:23] step 10160 loss 0.1811 psnr 12.99 lr 5.53e-05 0.50s/step elapsed 1.41h n_warm 0 mem 30.5G
+[11-14 02:15:33] step 10180 loss 0.1828 psnr 12.84 lr 5.49e-05 0.50s/step elapsed 1.41h n_warm 0 mem 30.5G
+[11-14 02:15:43] step 10200 loss 0.1612 psnr 14.05 lr 5.46e-05 0.50s/step elapsed 1.42h n_warm 0 mem 30.5G
+[11-14 02:15:53] save ckpt step 10200 -> last.pt step10200.pt
+[11-14 02:15:53] prune step9600.pt
+[11-14 02:16:02] step 10220 loss 0.1774 psnr 13.14 lr 5.42e-05 0.50s/step elapsed 1.42h n_warm 0 mem 30.5G
+[11-14 02:16:12] step 10240 loss 0.1808 psnr 12.80 lr 5.39e-05 0.50s/step elapsed 1.42h n_warm 0 mem 30.5G
+[11-14 02:16:22] step 10260 loss 0.1571 psnr 15.19 lr 5.36e-05 0.50s/step elapsed 1.43h n_warm 0 mem 30.5G
+[11-14 02:16:32] step 10280 loss 0.1755 psnr 14.08 lr 5.32e-05 0.50s/step elapsed 1.43h n_warm 0 mem 30.5G
+[11-14 02:16:41] step 10300 loss 0.1782 psnr 13.15 lr 5.29e-05 0.50s/step elapsed 1.43h n_warm 0 mem 30.5G
+[11-14 02:16:51] step 10320 loss 0.1800 psnr 13.11 lr 5.26e-05 0.50s/step elapsed 1.43h n_warm 0 mem 30.5G
+[11-14 02:17:01] step 10340 loss 0.1807 psnr 12.90 lr 5.22e-05 0.50s/step elapsed 1.44h n_warm 0 mem 30.5G
+[11-14 02:17:10] step 10360 loss 0.1655 psnr 13.74 lr 5.19e-05 0.50s/step elapsed 1.44h n_warm 0 mem 30.5G
+[11-14 02:17:20] step 10380 loss 0.1899 psnr 12.67 lr 5.15e-05 0.50s/step elapsed 1.44h n_warm 0 mem 30.5G
+[11-14 02:17:30] step 10400 loss 0.1756 psnr 13.08 lr 5.12e-05 0.50s/step elapsed 1.44h n_warm 0 mem 30.5G
+[11-14 02:17:39] step 10420 loss 0.1725 psnr 13.27 lr 5.09e-05 0.50s/step elapsed 1.45h n_warm 0 mem 30.5G
+[11-14 02:17:49] step 10440 loss 0.1795 psnr 13.33 lr 5.06e-05 0.50s/step elapsed 1.45h n_warm 0 mem 30.5G
+[11-14 02:17:59] step 10460 loss 0.1720 psnr 13.13 lr 5.02e-05 0.50s/step elapsed 1.45h n_warm 0 mem 30.5G
+[11-14 02:18:08] step 10480 loss 0.1730 psnr 13.45 lr 4.99e-05 0.50s/step elapsed 1.46h n_warm 0 mem 30.5G
+[11-14 02:18:18] step 10500 loss 0.1677 psnr 13.52 lr 4.96e-05 0.50s/step elapsed 1.46h n_warm 0 mem 30.5G
+[11-14 02:18:20] VAL cold=10.802 rec=10.833 warm=10.833
+[11-14 02:18:29] step 10520 loss 0.1798 psnr 13.47 lr 4.92e-05 0.50s/step elapsed 1.46h n_warm 0 mem 30.5G
+[11-14 02:18:39] step 10540 loss 0.1665 psnr 13.67 lr 4.89e-05 0.50s/step elapsed 1.46h n_warm 0 mem 30.5G
+[11-14 02:18:49] step 10560 loss 0.1696 psnr 13.33 lr 4.86e-05 0.50s/step elapsed 1.47h n_warm 0 mem 30.5G
+[11-14 02:18:58] step 10580 loss 0.1780 psnr 13.16 lr 4.83e-05 0.50s/step elapsed 1.47h n_warm 0 mem 30.5G
+[11-14 02:19:08] step 10600 loss 0.1754 psnr 13.19 lr 4.79e-05 0.50s/step elapsed 1.47h n_warm 0 mem 30.5G
+[11-14 02:19:18] step 10620 loss 0.1674 psnr 13.59 lr 4.76e-05 0.50s/step elapsed 1.47h n_warm 0 mem 30.5G
+[11-14 02:19:27] step 10640 loss 0.1738 psnr 13.37 lr 4.73e-05 0.50s/step elapsed 1.48h n_warm 0 mem 30.5G
+[11-14 02:19:37] step 10660 loss 0.1809 psnr 12.80 lr 4.70e-05 0.50s/step elapsed 1.48h n_warm 0 mem 30.5G
+[11-14 02:19:47] step 10680 loss 0.1570 psnr 14.19 lr 4.67e-05 0.50s/step elapsed 1.48h n_warm 0 mem 30.5G
+[11-14 02:19:56] step 10700 loss 0.1709 psnr 13.51 lr 4.63e-05 0.50s/step elapsed 1.49h n_warm 0 mem 30.5G
+[11-14 02:20:06] step 10720 loss 0.1680 psnr 13.71 lr 4.60e-05 0.50s/step elapsed 1.49h n_warm 0 mem 30.5G
+[11-14 02:20:16] step 10740 loss 0.1799 psnr 12.98 lr 4.57e-05 0.50s/step elapsed 1.49h n_warm 0 mem 30.5G
+[11-14 02:20:26] step 10760 loss 0.1726 psnr 13.39 lr 4.54e-05 0.50s/step elapsed 1.49h n_warm 0 mem 30.5G
+[11-14 02:20:35] step 10780 loss 0.1712 psnr 13.56 lr 4.51e-05 0.50s/step elapsed 1.50h n_warm 0 mem 30.5G
+[11-14 02:20:45] step 10800 loss 0.1831 psnr 12.88 lr 4.48e-05 0.50s/step elapsed 1.50h n_warm 0 mem 30.5G
+[11-14 02:20:51] save ckpt step 10800 -> last.pt step10800.pt
+[11-14 02:20:51] prune step10200.pt
+[11-14 02:21:00] step 10820 loss 0.1608 psnr 14.19 lr 4.45e-05 0.50s/step elapsed 1.50h n_warm 0 mem 30.5G
+[11-14 02:21:10] step 10840 loss 0.1795 psnr 13.22 lr 4.42e-05 0.50s/step elapsed 1.51h n_warm 0 mem 30.5G
+[11-14 02:21:20] step 10860 loss 0.1806 psnr 12.95 lr 4.38e-05 0.50s/step elapsed 1.51h n_warm 0 mem 30.5G
+[11-14 02:21:29] step 10880 loss 0.1758 psnr 13.03 lr 4.35e-05 0.50s/step elapsed 1.51h n_warm 0 mem 30.5G
+[11-14 02:21:39] step 10900 loss 0.1630 psnr 13.58 lr 4.32e-05 0.50s/step elapsed 1.51h n_warm 0 mem 30.5G
+[11-14 02:21:49] step 10920 loss 0.1729 psnr 13.24 lr 4.29e-05 0.50s/step elapsed 1.52h n_warm 0 mem 30.5G
+[11-14 02:21:58] step 10940 loss 0.1684 psnr 13.60 lr 4.26e-05 0.50s/step elapsed 1.52h n_warm 0 mem 30.5G
+[11-14 02:22:08] step 10960 loss 0.1741 psnr 13.32 lr 4.23e-05 0.50s/step elapsed 1.52h n_warm 0 mem 30.5G
+[11-14 02:22:18] step 10980 loss 0.1729 psnr 13.29 lr 4.20e-05 0.50s/step elapsed 1.52h n_warm 0 mem 30.5G
+[11-14 02:22:28] step 11000 loss 0.1723 psnr 13.56 lr 4.17e-05 0.50s/step elapsed 1.53h n_warm 0 mem 30.5G
+[11-14 02:22:29] VAL cold=10.664 rec=10.664 warm=10.664
+[11-14 02:22:39] step 11020 loss 0.1733 psnr 13.24 lr 4.14e-05 0.50s/step elapsed 1.53h n_warm 0 mem 30.5G
+[11-14 02:22:48] step 11040 loss 0.1725 psnr 13.22 lr 4.11e-05 0.50s/step elapsed 1.53h n_warm 0 mem 30.5G
+[11-14 02:22:58] step 11060 loss 0.1796 psnr 13.00 lr 4.08e-05 0.50s/step elapsed 1.54h n_warm 0 mem 30.5G
+[11-14 02:23:08] step 11080 loss 0.1763 psnr 13.30 lr 4.05e-05 0.50s/step elapsed 1.54h n_warm 0 mem 30.5G
+[11-14 02:23:17] step 11100 loss 0.1709 psnr 13.64 lr 4.02e-05 0.50s/step elapsed 1.54h n_warm 0 mem 30.5G
+[11-14 02:23:27] step 11120 loss 0.1716 psnr 13.39 lr 3.99e-05 0.50s/step elapsed 1.54h n_warm 0 mem 30.5G
+[11-14 02:23:37] step 11140 loss 0.1881 psnr 13.31 lr 3.96e-05 0.50s/step elapsed 1.55h n_warm 0 mem 30.5G
+[11-14 02:23:46] step 11160 loss 0.1810 psnr 12.91 lr 3.94e-05 0.50s/step elapsed 1.55h n_warm 0 mem 30.5G
+[11-14 02:23:56] step 11180 loss 0.1772 psnr 13.12 lr 3.91e-05 0.50s/step elapsed 1.55h n_warm 0 mem 30.5G
+[11-14 02:24:06] step 11200 loss 0.1786 psnr 13.05 lr 3.88e-05 0.50s/step elapsed 1.55h n_warm 0 mem 30.5G
+[11-14 02:24:16] step 11220 loss 0.1770 psnr 13.18 lr 3.85e-05 0.50s/step elapsed 1.56h n_warm 0 mem 30.5G
+[11-14 02:24:25] step 11240 loss 0.1648 psnr 14.31 lr 3.82e-05 0.50s/step elapsed 1.56h n_warm 0 mem 30.5G
+[11-14 02:24:35] step 11260 loss 0.1715 psnr 13.37 lr 3.79e-05 0.50s/step elapsed 1.56h n_warm 0 mem 30.5G
+[11-14 02:24:45] step 11280 loss 0.1760 psnr 13.45 lr 3.76e-05 0.50s/step elapsed 1.57h n_warm 0 mem 30.5G
+[11-14 02:24:54] step 11300 loss 0.1668 psnr 13.45 lr 3.73e-05 0.50s/step elapsed 1.57h n_warm 0 mem 30.5G
+[11-14 02:25:04] step 11320 loss 0.1818 psnr 12.82 lr 3.71e-05 0.50s/step elapsed 1.57h n_warm 0 mem 30.5G
+[11-14 02:25:14] step 11340 loss 0.1702 psnr 13.52 lr 3.68e-05 0.50s/step elapsed 1.57h n_warm 0 mem 30.5G
+[11-14 02:25:24] step 11360 loss 0.1792 psnr 12.98 lr 3.65e-05 0.50s/step elapsed 1.58h n_warm 0 mem 30.5G
+[11-14 02:25:33] step 11380 loss 0.1677 psnr 14.97 lr 3.62e-05 0.50s/step elapsed 1.58h n_warm 0 mem 30.5G
+[11-14 02:25:43] step 11400 loss 0.1744 psnr 13.25 lr 3.59e-05 0.50s/step elapsed 1.58h n_warm 0 mem 30.5G
+[11-14 02:25:49] save ckpt step 11400 -> last.pt step11400.pt
+[11-14 02:25:49] prune step10800.pt
+[11-14 02:25:59] step 11420 loss 0.1700 psnr 13.52 lr 3.57e-05 0.50s/step elapsed 1.59h n_warm 0 mem 30.5G
+[11-14 02:26:08] step 11440 loss 0.1773 psnr 13.16 lr 3.54e-05 0.50s/step elapsed 1.59h n_warm 0 mem 30.5G
+[11-14 02:26:18] step 11460 loss 0.1757 psnr 13.43 lr 3.51e-05 0.50s/step elapsed 1.59h n_warm 0 mem 30.5G
+[11-14 02:26:28] step 11480 loss 0.1697 psnr 13.60 lr 3.48e-05 0.50s/step elapsed 1.59h n_warm 0 mem 30.5G
+[11-14 02:26:37] step 11500 loss 0.1716 psnr 13.29 lr 3.46e-05 0.50s/step elapsed 1.60h n_warm 0 mem 30.5G
+[11-14 02:26:39] VAL cold=10.877 rec=10.838 warm=10.838
+[11-14 02:26:49] step 11520 loss 0.1698 psnr 13.37 lr 3.43e-05 0.50s/step elapsed 1.60h n_warm 0 mem 30.5G
+[11-14 02:26:58] step 11540 loss 0.1762 psnr 13.21 lr 3.40e-05 0.50s/step elapsed 1.60h n_warm 0 mem 30.5G
+[11-14 02:27:08] step 11560 loss 0.1685 psnr 13.56 lr 3.38e-05 0.50s/step elapsed 1.61h n_warm 0 mem 30.5G
+[11-14 02:27:18] step 11580 loss 0.1703 psnr 13.78 lr 3.35e-05 0.50s/step elapsed 1.61h n_warm 0 mem 30.5G
+[11-14 02:27:27] step 11600 loss 0.1817 psnr 13.03 lr 3.32e-05 0.50s/step elapsed 1.61h n_warm 0 mem 30.5G
+[11-14 02:27:37] step 11620 loss 0.1765 psnr 12.97 lr 3.30e-05 0.50s/step elapsed 1.61h n_warm 0 mem 30.5G
+[11-14 02:27:47] step 11640 loss 0.1786 psnr 12.98 lr 3.27e-05 0.50s/step elapsed 1.62h n_warm 0 mem 30.5G
+[11-14 02:27:56] step 11660 loss 0.1711 psnr 13.48 lr 3.25e-05 0.50s/step elapsed 1.62h n_warm 0 mem 30.5G
+[11-14 02:28:06] step 11680 loss 0.1808 psnr 13.00 lr 3.22e-05 0.50s/step elapsed 1.62h n_warm 0 mem 30.5G
+[11-14 02:28:16] step 11700 loss 0.1799 psnr 12.95 lr 3.19e-05 0.50s/step elapsed 1.62h n_warm 0 mem 30.5G
+[11-14 02:28:26] step 11720 loss 0.1697 psnr 13.52 lr 3.17e-05 0.50s/step elapsed 1.63h n_warm 0 mem 30.5G
+[11-14 02:28:35] step 11740 loss 0.1698 psnr 13.31 lr 3.14e-05 0.50s/step elapsed 1.63h n_warm 0 mem 30.5G
+[11-14 02:28:45] step 11760 loss 0.1648 psnr 13.61 lr 3.12e-05 0.50s/step elapsed 1.63h n_warm 0 mem 30.5G
+[11-14 02:28:55] step 11780 loss 0.1732 psnr 13.34 lr 3.09e-05 0.50s/step elapsed 1.64h n_warm 0 mem 30.5G
+[11-14 02:29:05] step 11800 loss 0.1820 psnr 13.04 lr 3.07e-05 0.50s/step elapsed 1.64h n_warm 0 mem 30.5G
+[11-14 02:29:14] step 11820 loss 0.1681 psnr 13.42 lr 3.04e-05 0.50s/step elapsed 1.64h n_warm 0 mem 30.5G
+[11-14 02:29:24] step 11840 loss 0.1581 psnr 13.84 lr 3.02e-05 0.50s/step elapsed 1.64h n_warm 0 mem 30.5G
+[11-14 02:29:34] step 11860 loss 0.1634 psnr 13.88 lr 2.99e-05 0.50s/step elapsed 1.65h n_warm 0 mem 30.5G
+[11-14 02:29:43] step 11880 loss 0.1779 psnr 13.05 lr 2.97e-05 0.50s/step elapsed 1.65h n_warm 0 mem 30.5G
+[11-14 02:29:53] step 11900 loss 0.1674 psnr 13.36 lr 2.94e-05 0.50s/step elapsed 1.65h n_warm 0 mem 30.5G
+[11-14 02:30:03] step 11920 loss 0.1773 psnr 13.32 lr 2.92e-05 0.50s/step elapsed 1.65h n_warm 0 mem 30.5G
+[11-14 02:30:12] step 11940 loss 0.1648 psnr 14.31 lr 2.89e-05 0.50s/step elapsed 1.66h n_warm 0 mem 30.5G
+[11-14 02:30:22] step 11960 loss 0.1791 psnr 13.98 lr 2.87e-05 0.50s/step elapsed 1.66h n_warm 0 mem 30.5G
+[11-14 02:30:32] step 11980 loss 0.1737 psnr 13.43 lr 2.85e-05 0.50s/step elapsed 1.66h n_warm 0 mem 30.5G
+[11-14 02:30:41] step 12000 loss 0.1678 psnr 13.72 lr 2.82e-05 0.50s/step elapsed 1.66h n_warm 0 mem 30.5G
+[11-14 02:30:43] VAL cold=10.777 rec=10.781 warm=10.781
+[11-14 02:30:49] save ckpt step 12000 -> last.pt step12000.pt
+[11-14 02:30:49] prune step11400.pt
+[11-14 02:30:58] step 12020 loss 0.1700 psnr 13.52 lr 2.80e-05 0.50s/step elapsed 1.67h n_warm 0 mem 30.5G
+[11-14 02:31:08] step 12040 loss 0.1695 psnr 13.44 lr 2.78e-05 0.50s/step elapsed 1.67h n_warm 0 mem 30.5G
+[11-14 02:31:18] step 12060 loss 0.1669 psnr 13.65 lr 2.75e-05 0.50s/step elapsed 1.67h n_warm 0 mem 30.5G
+[11-14 02:31:28] step 12080 loss 0.1789 psnr 13.19 lr 2.73e-05 0.50s/step elapsed 1.68h n_warm 0 mem 30.5G
+[11-14 02:31:37] step 12100 loss 0.1711 psnr 13.48 lr 2.71e-05 0.50s/step elapsed 1.68h n_warm 0 mem 30.5G
+[11-14 02:31:47] step 12120 loss 0.1639 psnr 13.93 lr 2.68e-05 0.50s/step elapsed 1.68h n_warm 0 mem 30.5G
+[11-14 02:31:57] step 12140 loss 0.1649 psnr 13.79 lr 2.66e-05 0.50s/step elapsed 1.69h n_warm 0 mem 30.5G
+[11-14 02:32:06] step 12160 loss 0.1762 psnr 13.14 lr 2.64e-05 0.50s/step elapsed 1.69h n_warm 0 mem 30.5G
+[11-14 02:32:16] step 12180 loss 0.1764 psnr 13.16 lr 2.61e-05 0.50s/step elapsed 1.69h n_warm 0 mem 30.5G
+[11-14 02:32:26] step 12200 loss 0.1843 psnr 12.99 lr 2.59e-05 0.50s/step elapsed 1.69h n_warm 0 mem 30.5G
+[11-14 02:32:35] step 12220 loss 0.1717 psnr 13.23 lr 2.57e-05 0.50s/step elapsed 1.70h n_warm 0 mem 30.5G
+[11-14 02:32:45] step 12240 loss 0.1601 psnr 13.97 lr 2.55e-05 0.50s/step elapsed 1.70h n_warm 0 mem 30.5G
+[11-14 02:32:55] step 12260 loss 0.1624 psnr 13.60 lr 2.53e-05 0.50s/step elapsed 1.70h n_warm 0 mem 30.5G
+[11-14 02:33:05] step 12280 loss 0.1803 psnr 13.06 lr 2.50e-05 0.50s/step elapsed 1.70h n_warm 0 mem 30.5G
+[11-14 02:33:14] step 12300 loss 0.1687 psnr 13.42 lr 2.48e-05 0.50s/step elapsed 1.71h n_warm 0 mem 30.5G
+[11-14 02:33:24] step 12320 loss 0.1682 psnr 13.75 lr 2.46e-05 0.50s/step elapsed 1.71h n_warm 0 mem 30.5G
+[11-14 02:33:34] step 12340 loss 0.1704 psnr 13.52 lr 2.44e-05 0.50s/step elapsed 1.71h n_warm 0 mem 30.5G
+[11-14 02:33:43] step 12360 loss 0.1740 psnr 13.20 lr 2.42e-05 0.50s/step elapsed 1.72h n_warm 0 mem 30.5G
+[11-14 02:33:53] step 12380 loss 0.1676 psnr 13.48 lr 2.40e-05 0.50s/step elapsed 1.72h n_warm 0 mem 30.5G
+[11-14 02:34:03] step 12400 loss 0.1747 psnr 13.19 lr 2.38e-05 0.50s/step elapsed 1.72h n_warm 0 mem 30.5G
+[11-14 02:34:12] step 12420 loss 0.1764 psnr 13.15 lr 2.36e-05 0.50s/step elapsed 1.72h n_warm 0 mem 30.5G
+[11-14 02:34:22] step 12440 loss 0.1669 psnr 13.66 lr 2.33e-05 0.50s/step elapsed 1.73h n_warm 0 mem 30.5G
+[11-14 02:34:32] step 12460 loss 0.1719 psnr 13.43 lr 2.31e-05 0.50s/step elapsed 1.73h n_warm 0 mem 30.5G
+[11-14 02:34:41] step 12480 loss 0.1746 psnr 13.22 lr 2.29e-05 0.50s/step elapsed 1.73h n_warm 0 mem 30.5G
+[11-14 02:34:51] step 12500 loss 0.1650 psnr 13.74 lr 2.27e-05 0.50s/step elapsed 1.73h n_warm 0 mem 30.5G
+[11-14 02:34:53] VAL cold=10.897 rec=10.870 warm=10.870
+[11-14 02:35:02] step 12520 loss 0.1784 psnr 13.11 lr 2.25e-05 0.50s/step elapsed 1.74h n_warm 0 mem 30.5G
+[11-14 02:35:12] step 12540 loss 0.1687 psnr 13.47 lr 2.23e-05 0.50s/step elapsed 1.74h n_warm 0 mem 30.5G
+[11-14 02:35:22] step 12560 loss 0.1755 psnr 13.71 lr 2.21e-05 0.50s/step elapsed 1.74h n_warm 0 mem 30.5G
+[11-14 02:35:31] step 12580 loss 0.1737 psnr 13.25 lr 2.19e-05 0.50s/step elapsed 1.75h n_warm 0 mem 30.5G
+[11-14 02:35:41] step 12600 loss 0.1691 psnr 13.40 lr 2.17e-05 0.50s/step elapsed 1.75h n_warm 0 mem 30.5G
+[11-14 02:35:47] save ckpt step 12600 -> last.pt step12600.pt
+[11-14 02:35:47] prune step12000.pt
+[11-14 02:35:57] step 12620 loss 0.1731 psnr 13.07 lr 2.16e-05 0.50s/step elapsed 1.75h n_warm 0 mem 30.5G
+[11-14 02:36:06] step 12640 loss 0.1726 psnr 13.02 lr 2.14e-05 0.50s/step elapsed 1.76h n_warm 0 mem 30.5G
+[11-14 02:36:16] step 12660 loss 0.1600 psnr 13.85 lr 2.12e-05 0.50s/step elapsed 1.76h n_warm 0 mem 30.5G
+[11-14 02:36:26] step 12680 loss 0.1597 psnr 14.39 lr 2.10e-05 0.50s/step elapsed 1.76h n_warm 0 mem 30.5G
+[11-14 02:36:36] step 12700 loss 0.1740 psnr 13.16 lr 2.08e-05 0.50s/step elapsed 1.76h n_warm 0 mem 30.5G
+[11-14 02:36:45] step 12720 loss 0.1603 psnr 14.08 lr 2.06e-05 0.50s/step elapsed 1.77h n_warm 0 mem 30.5G
+[11-14 02:36:55] step 12740 loss 0.1704 psnr 13.67 lr 2.04e-05 0.50s/step elapsed 1.77h n_warm 0 mem 30.5G
+[11-14 02:37:05] step 12760 loss 0.1671 psnr 13.64 lr 2.02e-05 0.50s/step elapsed 1.77h n_warm 0 mem 30.5G
+[11-14 02:37:14] step 12780 loss 0.1648 psnr 13.78 lr 2.01e-05 0.50s/step elapsed 1.77h n_warm 0 mem 30.5G
+[11-14 02:37:24] step 12800 loss 0.1620 psnr 14.24 lr 1.99e-05 0.50s/step elapsed 1.78h n_warm 0 mem 30.5G
+[11-14 02:37:34] step 12820 loss 0.1672 psnr 13.72 lr 1.97e-05 0.50s/step elapsed 1.78h n_warm 0 mem 30.5G
+[11-14 02:37:43] step 12840 loss 0.1808 psnr 13.17 lr 1.95e-05 0.50s/step elapsed 1.78h n_warm 0 mem 30.5G
+[11-14 02:37:53] step 12860 loss 0.1712 psnr 13.42 lr 1.94e-05 0.50s/step elapsed 1.78h n_warm 0 mem 30.5G
+[11-14 02:38:03] step 12880 loss 0.1641 psnr 13.90 lr 1.92e-05 0.50s/step elapsed 1.79h n_warm 0 mem 30.5G
+[11-14 02:38:13] step 12900 loss 0.1587 psnr 14.01 lr 1.90e-05 0.50s/step elapsed 1.79h n_warm 0 mem 30.5G
+[11-14 02:38:22] step 12920 loss 0.1723 psnr 13.44 lr 1.88e-05 0.50s/step elapsed 1.79h n_warm 0 mem 30.5G
+[11-14 02:38:32] step 12940 loss 0.1653 psnr 13.61 lr 1.87e-05 0.50s/step elapsed 1.80h n_warm 0 mem 30.5G
+[11-14 02:38:42] step 12960 loss 0.1653 psnr 13.70 lr 1.85e-05 0.50s/step elapsed 1.80h n_warm 0 mem 30.5G
+[11-14 02:38:51] step 12980 loss 0.1756 psnr 13.24 lr 1.83e-05 0.50s/step elapsed 1.80h n_warm 0 mem 30.5G
+[11-14 02:39:01] step 13000 loss 0.1712 psnr 13.25 lr 1.82e-05 0.50s/step elapsed 1.80h n_warm 0 mem 30.5G
+[11-14 02:39:02] VAL cold=10.910 rec=10.898 warm=10.898
+[11-14 02:39:12] step 13020 loss 0.1668 psnr 14.00 lr 1.80e-05 0.50s/step elapsed 1.81h n_warm 0 mem 30.5G
+[11-14 02:39:22] step 13040 loss 0.1727 psnr 13.29 lr 1.78e-05 0.50s/step elapsed 1.81h n_warm 0 mem 30.5G
+[11-14 02:39:32] step 13060 loss 0.1756 psnr 13.21 lr 1.77e-05 0.50s/step elapsed 1.81h n_warm 0 mem 30.5G
+[11-14 02:39:41] step 13080 loss 0.1558 psnr 14.22 lr 1.75e-05 0.50s/step elapsed 1.81h n_warm 0 mem 30.5G
+[11-14 02:39:51] step 13100 loss 0.1754 psnr 13.27 lr 1.74e-05 0.50s/step elapsed 1.82h n_warm 0 mem 30.5G
+[11-14 02:40:01] step 13120 loss 0.1672 psnr 13.73 lr 1.72e-05 0.50s/step elapsed 1.82h n_warm 0 mem 30.5G
+[11-14 02:40:10] step 13140 loss 0.1677 psnr 13.53 lr 1.71e-05 0.50s/step elapsed 1.82h n_warm 0 mem 30.5G
+[11-14 02:40:20] step 13160 loss 0.1652 psnr 13.92 lr 1.69e-05 0.50s/step elapsed 1.83h n_warm 0 mem 30.5G
+[11-14 02:40:30] step 13180 loss 0.1722 psnr 13.50 lr 1.68e-05 0.50s/step elapsed 1.83h n_warm 0 mem 30.5G
+[11-14 02:40:39] step 13200 loss 0.1651 psnr 13.98 lr 1.66e-05 0.50s/step elapsed 1.83h n_warm 0 mem 30.5G
+[11-14 02:40:45] save ckpt step 13200 -> last.pt step13200.pt
+[11-14 02:40:45] prune step12600.pt
+[11-14 02:40:55] step 13220 loss 0.1663 psnr 13.60 lr 1.65e-05 0.50s/step elapsed 1.84h n_warm 0 mem 30.5G
+[11-14 02:41:05] step 13240 loss 0.1694 psnr 14.41 lr 1.63e-05 0.50s/step elapsed 1.84h n_warm 0 mem 30.5G
+[11-14 02:41:14] step 13260 loss 0.1714 psnr 13.52 lr 1.62e-05 0.50s/step elapsed 1.84h n_warm 0 mem 30.5G
+[11-14 02:41:24] step 13280 loss 0.1671 psnr 13.72 lr 1.60e-05 0.50s/step elapsed 1.84h n_warm 0 mem 30.5G
+[11-14 02:41:34] step 13300 loss 0.1720 psnr 13.41 lr 1.59e-05 0.50s/step elapsed 1.85h n_warm 0 mem 30.5G
+[11-14 02:41:43] step 13320 loss 0.1661 psnr 13.72 lr 1.58e-05 0.50s/step elapsed 1.85h n_warm 0 mem 30.5G
+[11-14 02:41:53] step 13340 loss 0.1706 psnr 13.75 lr 1.56e-05 0.50s/step elapsed 1.85h n_warm 0 mem 30.5G
+[11-14 02:42:03] step 13360 loss 0.1594 psnr 14.05 lr 1.55e-05 0.50s/step elapsed 1.85h n_warm 0 mem 30.5G
+[11-14 02:42:12] step 13380 loss 0.1647 psnr 13.98 lr 1.54e-05 0.50s/step elapsed 1.86h n_warm 0 mem 30.5G
+[11-14 02:42:22] step 13400 loss 0.1745 psnr 13.21 lr 1.52e-05 0.50s/step elapsed 1.86h n_warm 0 mem 30.5G
+[11-14 02:42:32] step 13420 loss 0.1777 psnr 13.04 lr 1.51e-05 0.50s/step elapsed 1.86h n_warm 0 mem 30.5G
+[11-14 02:42:42] step 13440 loss 0.1606 psnr 13.85 lr 1.50e-05 0.50s/step elapsed 1.86h n_warm 0 mem 30.5G
+[11-14 02:42:51] step 13460 loss 0.1602 psnr 13.82 lr 1.48e-05 0.50s/step elapsed 1.87h n_warm 0 mem 30.5G
+[11-14 02:43:01] step 13480 loss 0.1634 psnr 13.71 lr 1.47e-05 0.50s/step elapsed 1.87h n_warm 0 mem 30.5G
+[11-14 02:43:11] step 13500 loss 0.1721 psnr 13.38 lr 1.46e-05 0.50s/step elapsed 1.87h n_warm 0 mem 30.5G
+[11-14 02:43:12] VAL cold=10.494 rec=10.471 warm=10.471
+[11-14 02:43:22] step 13520 loss 0.1732 psnr 13.39 lr 1.45e-05 0.50s/step elapsed 1.88h n_warm 0 mem 30.5G
+[11-14 02:43:31] step 13540 loss 0.1567 psnr 14.30 lr 1.43e-05 0.50s/step elapsed 1.88h n_warm 0 mem 30.5G
+[11-14 02:43:41] step 13560 loss 0.1888 psnr 12.70 lr 1.42e-05 0.50s/step elapsed 1.88h n_warm 0 mem 30.5G
+[11-14 02:43:51] step 13580 loss 0.1610 psnr 13.81 lr 1.41e-05 0.50s/step elapsed 1.88h n_warm 0 mem 30.5G
+[11-14 02:44:00] step 13600 loss 0.1631 psnr 13.65 lr 1.40e-05 0.50s/step elapsed 1.89h n_warm 0 mem 30.5G
+[11-14 02:44:10] step 13620 loss 0.1664 psnr 13.63 lr 1.39e-05 0.50s/step elapsed 1.89h n_warm 0 mem 30.5G
+[11-14 02:44:20] step 13640 loss 0.1661 psnr 13.42 lr 1.38e-05 0.50s/step elapsed 1.89h n_warm 0 mem 30.5G
+[11-14 02:44:30] step 13660 loss 0.1763 psnr 13.31 lr 1.36e-05 0.50s/step elapsed 1.89h n_warm 0 mem 30.5G
+[11-14 02:44:39] step 13680 loss 0.1650 psnr 14.34 lr 1.35e-05 0.50s/step elapsed 1.90h n_warm 0 mem 30.5G
+[11-14 02:44:49] step 13700 loss 0.1744 psnr 12.98 lr 1.34e-05 0.50s/step elapsed 1.90h n_warm 0 mem 30.5G
+[11-14 02:44:59] step 13720 loss 0.1854 psnr 12.61 lr 1.33e-05 0.50s/step elapsed 1.90h n_warm 0 mem 30.5G
+[11-14 02:45:08] step 13740 loss 0.1710 psnr 13.55 lr 1.32e-05 0.50s/step elapsed 1.91h n_warm 0 mem 30.5G
+[11-14 02:45:18] step 13760 loss 0.1645 psnr 13.73 lr 1.31e-05 0.50s/step elapsed 1.91h n_warm 0 mem 30.5G
+[11-14 02:45:28] step 13780 loss 0.1761 psnr 13.29 lr 1.30e-05 0.50s/step elapsed 1.91h n_warm 0 mem 30.5G
+[11-14 02:45:37] step 13800 loss 0.1596 psnr 13.97 lr 1.29e-05 0.50s/step elapsed 1.91h n_warm 0 mem 30.5G
+[11-14 02:45:43] save ckpt step 13800 -> last.pt step13800.pt
+[11-14 02:45:43] prune step13200.pt
+[11-14 02:45:53] step 13820 loss 0.1744 psnr 13.47 lr 1.28e-05 0.50s/step elapsed 1.92h n_warm 0 mem 30.5G
+[11-14 02:46:03] step 13840 loss 0.1715 psnr 13.56 lr 1.27e-05 0.50s/step elapsed 1.92h n_warm 0 mem 30.5G
+[11-14 02:46:12] step 13860 loss 0.1766 psnr 13.27 lr 1.26e-05 0.50s/step elapsed 1.92h n_warm 0 mem 30.5G
+[11-14 02:46:22] step 13880 loss 0.1737 psnr 13.28 lr 1.25e-05 0.50s/step elapsed 1.93h n_warm 0 mem 30.5G
+[11-14 02:46:32] step 13900 loss 0.1763 psnr 13.10 lr 1.24e-05 0.50s/step elapsed 1.93h n_warm 0 mem 30.5G
+[11-14 02:46:41] step 13920 loss 0.1687 psnr 13.43 lr 1.23e-05 0.50s/step elapsed 1.93h n_warm 0 mem 30.5G
+[11-14 02:46:51] step 13940 loss 0.1639 psnr 14.24 lr 1.23e-05 0.50s/step elapsed 1.93h n_warm 0 mem 30.5G
+[11-14 02:47:01] step 13960 loss 0.1686 psnr 13.51 lr 1.22e-05 0.50s/step elapsed 1.94h n_warm 0 mem 30.5G
+[11-14 02:47:11] step 13980 loss 0.1643 psnr 13.56 lr 1.21e-05 0.50s/step elapsed 1.94h n_warm 0 mem 30.5G
+[11-14 02:47:20] step 14000 loss 0.1719 psnr 13.53 lr 1.20e-05 0.50s/step elapsed 1.94h n_warm 0 mem 30.5G
+[11-14 02:47:22] VAL cold=10.674 rec=10.653 warm=10.653
+[11-14 02:47:31] step 14020 loss 0.1671 psnr 13.91 lr 1.19e-05 0.50s/step elapsed 1.95h n_warm 0 mem 30.5G
+[11-14 02:47:41] step 14040 loss 0.1712 psnr 13.46 lr 1.18e-05 0.50s/step elapsed 1.95h n_warm 0 mem 30.5G
+[11-14 02:47:51] step 14060 loss 0.1665 psnr 13.29 lr 1.18e-05 0.50s/step elapsed 1.95h n_warm 0 mem 30.5G
+[11-14 02:48:00] step 14080 loss 0.1635 psnr 14.71 lr 1.17e-05 0.50s/step elapsed 1.95h n_warm 0 mem 30.5G
+[11-14 02:48:10] step 14100 loss 0.1659 psnr 13.86 lr 1.16e-05 0.50s/step elapsed 1.96h n_warm 0 mem 30.5G
+[11-14 02:48:20] step 14120 loss 0.1659 psnr 13.78 lr 1.15e-05 0.50s/step elapsed 1.96h n_warm 0 mem 30.5G
+[11-14 02:48:29] step 14140 loss 0.1695 psnr 13.55 lr 1.15e-05 0.50s/step elapsed 1.96h n_warm 0 mem 30.5G
+[11-14 02:48:39] step 14160 loss 0.1646 psnr 13.66 lr 1.14e-05 0.50s/step elapsed 1.96h n_warm 0 mem 30.5G
+[11-14 02:48:49] step 14180 loss 0.1715 psnr 13.26 lr 1.13e-05 0.50s/step elapsed 1.97h n_warm 0 mem 30.5G
+[11-14 02:48:59] step 14200 loss 0.1661 psnr 13.42 lr 1.13e-05 0.50s/step elapsed 1.97h n_warm 0 mem 30.5G
+[11-14 02:49:08] step 14220 loss 0.1669 psnr 13.51 lr 1.12e-05 0.50s/step elapsed 1.97h n_warm 0 mem 30.5G
+[11-14 02:49:18] step 14240 loss 0.1808 psnr 13.00 lr 1.11e-05 0.50s/step elapsed 1.97h n_warm 0 mem 30.5G
+[11-14 02:49:28] step 14260 loss 0.1721 psnr 13.43 lr 1.11e-05 0.50s/step elapsed 1.98h n_warm 0 mem 30.5G
+[11-14 02:49:37] step 14280 loss 0.1631 psnr 13.80 lr 1.10e-05 0.50s/step elapsed 1.98h n_warm 0 mem 30.5G
+[11-14 02:49:47] step 14300 loss 0.1636 psnr 13.75 lr 1.10e-05 0.50s/step elapsed 1.98h n_warm 0 mem 30.5G
+[11-14 02:49:57] step 14320 loss 0.1602 psnr 13.99 lr 1.09e-05 0.50s/step elapsed 1.99h n_warm 0 mem 30.5G
+[11-14 02:50:07] step 14340 loss 0.1699 psnr 13.45 lr 1.08e-05 0.50s/step elapsed 1.99h n_warm 0 mem 30.5G
+[11-14 02:50:16] step 14360 loss 0.1715 psnr 13.37 lr 1.08e-05 0.50s/step elapsed 1.99h n_warm 0 mem 30.5G
+[11-14 02:50:26] step 14380 loss 0.1645 psnr 13.61 lr 1.07e-05 0.50s/step elapsed 1.99h n_warm 0 mem 30.5G
+[11-14 02:50:36] step 14400 loss 0.1661 psnr 13.58 lr 1.07e-05 0.50s/step elapsed 2.00h n_warm 0 mem 30.5G
+[11-14 02:50:41] save ckpt step 14400 -> last.pt step14400.pt
+[11-14 02:50:42] prune step13800.pt
+[11-14 02:50:48] 时间到 (2.0h)，停止于 step 14414
+[11-14 02:50:59] DONE step 14414 -> /root/autodl-tmp/video_recon/run_v9_img/last.pt

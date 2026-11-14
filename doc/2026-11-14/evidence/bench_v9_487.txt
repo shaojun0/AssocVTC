@@ -1,0 +1,12 @@
+[v8  seq +conv] params   487.0M (dec  120.9M) bs=2 F=16 nw=8 |    3.56 s/step |   222.5 ms/监督帧 |  388.4k 帧/天 | peak  17.4 GB
+[v9  par +conv] OOM bs=2 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=2 F=16 nw=8 |    0.80 s/step |    50.0 ms/监督帧 | 1728.2k 帧/天 | peak  32.3 GB
+[v8  seq +conv] params   487.0M (dec  120.9M) bs=4 F=16 nw=8 |    6.36 s/step |   198.7 ms/监督帧 |  434.8k 帧/天 | peak  27.7 GB
+[v9  par +conv] OOM bs=4 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=4 F=16 nw=8 |    1.21 s/step |    37.9 ms/监督帧 | 2280.4k 帧/天 | peak  57.6 GB
+[v8  seq +conv] params   487.0M (dec  120.9M) bs=6 F=16 nw=8 |    9.33 s/step |   194.4 ms/监督帧 |  444.4k 帧/天 | peak  38.0 GB
+[v9  par +conv] OOM bs=6 F=16
+[v9  par +mlp ] OOM bs=6 F=16
+[v8  seq +conv] params   487.0M (dec  120.9M) bs=8 F=16 nw=8 |   12.04 s/step |   188.2 ms/监督帧 |  459.1k 帧/天 | peak  48.3 GB
+[v9  par +conv] OOM bs=8 F=16
+[v9  par +mlp ] OOM bs=8 F=16

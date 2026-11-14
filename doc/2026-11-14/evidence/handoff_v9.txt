@@ -1,0 +1,34 @@
+[11-13 23:28:19] in100 结束 | gpu: 0 MiB, 0 %
+[11-13 23:29:49] == 487M v9 测速开始 ==
+[11-13 23:30:15] bench bs=2 done
+[11-13 23:30:51] bench bs=4 done
+[11-13 23:31:37] bench bs=6 done
+[11-13 23:32:28] bench bs=8 done
+[v9  par +conv] OOM bs=2 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=2 F=16 nw=8 |    0.80 s/step |    50.0 ms/监督帧 | 1728.2k 帧/天 | peak  32.3 GB
+[v9  par +conv] OOM bs=4 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=4 F=16 nw=8 |    1.21 s/step |    37.9 ms/监督帧 | 2280.4k 帧/天 | peak  57.6 GB
+[v9  par +conv] OOM bs=6 F=16
+[v9  par +mlp ] OOM bs=6 F=16
+[v9  par +conv] OOM bs=8 F=16
+[v9  par +mlp ] OOM bs=8 F=16
+[11-13 23:32:28] 选定 VID_BS=4 | 4 见 /root/autodl-tmp/logs/bench_v9_487.log
+[11-13 23:32:28] == 冒烟 image ==
+[11-13 23:32:32] !! 图像冒烟失败，见 /root/autodl-tmp/logs/smoke_v9_img.log
+[11-13 23:50:11] in100 结束 | gpu: 0 MiB, 0 %
+[11-13 23:51:41] == 已有 487M 测速结果，跳过测速 ==
+[v9  par +conv] OOM bs=2 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=2 F=16 nw=8 |    0.80 s/step |    50.0 ms/监督帧 | 1728.2k 帧/天 | peak  32.3 GB
+[v9  par +conv] OOM bs=4 F=16
+[v9  par +mlp ] params   492.1M (dec  126.0M) bs=4 F=16 nw=8 |    1.21 s/step |    37.9 ms/监督帧 | 2280.4k 帧/天 | peak  57.6 GB
+[v9  par +conv] OOM bs=6 F=16
+[v9  par +mlp ] OOM bs=6 F=16
+[v9  par +conv] OOM bs=8 F=16
+[v9  par +mlp ] OOM bs=8 F=16
+[11-13 23:51:41] 选定 VID_BS=4 | 4 见 /root/autodl-tmp/logs/bench_v9_487.log
+[11-13 23:51:42] == 冒烟 image ==
+[11-13 23:52:01] 图像冒烟 OK | [11-13 23:51:54] step 8 loss 0.2085 psnr 12.58 lr 1.69e-06 0.54s/step elapsed 0.00h n_warm 0 mem 30.5G
+[11-13 23:52:01] == 冒烟 video ==
+[11-13 23:52:32] 视频冒烟 OK | [11-13 23:52:23] step 10 loss 0.2342 psnr 11.31 lr 4.37e-06 1.40s/step elapsed 0.00h n_warm 4 mem 53.7G
+[11-13 23:52:33] == 启动正式训练：IMG_HOURS=2 VID_HOURS=24 VID_BS=4 IMG_BS=16 ==
+[11-13 23:52:38] 已启动，marker=/root/autodl-tmp/logs/v9_launched
