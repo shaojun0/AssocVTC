@@ -8,6 +8,15 @@
 > 远端机器目录（`/root/autodl-tmp/srdiff_*`、`/data/srdiff-20260926/…`）、模块名 `srdiff_runtime.py`、环境变量 `SRDIFF_*`、
 > 看板变量 `SRDASH_ROOT`（改它们会断代码与在跑的实验，且会篡改历史证据）。
 
+## 目录速查（2026-11-16 更新）
+
+| 入口 | 说明 |
+|---|---|
+| `model_v10.py` | **v10 全片段循环读出视频模型**（每步读一组 z、重出整段 120 帧；率 7,168 值/帧、目标全量 token）。自检 `python model_v10.py` |
+| `train_v10.py` / `data_v10.py` | v10 训练脚本 / 120 帧（15 s @8 fps, 448²）片段数据集 |
+| `doc/2026-11-16/DESIGN_v10_video_whole_clip.md` | v10 设计定稿：决策记录、形状与值数、为什么"率 < 目标"、编码器重训方案、诚实边界 |
+| `model_v2_linattn.py` / `train_linattn.py` | 图像分词器（论文三阶段 A/B/S3），v10 冻结的上游；含并行读出 `--dec_parallel` 与 `--stop_at_step` |
+
 ## 0. 项目目标与核心思路
 
 **项目目标（权威版）**: 通过 **token 压缩**训练编码器的**联想能力**（把图像信息压进少量 special token z_s），训练完成后冻结编码器做 **Phase 2 NLP**（Qwen 生成工地描述/隐患）。像素重建是 Phase 1 的训练脚手架 + "信息保持"直接探针，**不是最终目标**；唯一验收 = Phase 2 文字生成质量。目标的完整定义见 **[`doc/2026-08-28/GOAL_compression_for_nlp.md`](doc/2026-08-28/GOAL_compression_for_nlp.md)**（讨论架构/评估/下一步前**必须先读**）。
