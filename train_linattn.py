@@ -214,6 +214,13 @@ def parse_args():
                     help="enc_attn=std 时的 QK-Norm（默认 0 = 普通 transformer 原貌）")
     ap.add_argument("--dec_recurrent", type=int, default=0,
                     help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
+    ap.add_argument("--dec_parallel", type=int, default=0,
+                    help="1 = 并行读出（v9 口径: T 步折进 batch 一次前向, 无 carry, "
+                         "每步只读前缀 memory, mask 控可见性; 须 dec_attn=std）")
+    ap.add_argument("--dec_parallel_read", default="prefix",
+                    choices=["prefix", "block"],
+                    help="dec_parallel=1 的可见性: prefix=mem[0..hi]（z_cls+前 hi 个 "
+                         "z_s, 默认）; block=只读本步块（无 carry 的严格对照臂）")
     ap.add_argument("--dec_steps", default="",
                     help="逗号分隔采样步; 空 = square_block_starts(K)（K=64 → 8 步）")
     ap.add_argument("--step_plan", default="square",
@@ -299,6 +306,9 @@ def parse_args():
     ap.add_argument("--save_every_epochs", type=int, default=1)
     # 控制
     ap.add_argument("--max_steps", type=int, default=0, help=">0 时提前停（冒烟）")
+    ap.add_argument("--stop_at_step", type=int, default=0,
+                    help=">0 时在第 N 步停**但保持 total_steps/lr 调度不变** "
+                         "（受控对照用: 让两臂走过完全相同的优化步数/学习率）")
     ap.add_argument("--limit", type=int, default=0, help=">0 时限制训练集大小（冒烟）")
     ap.add_argument("--time_budget_h", type=float, default=0.0, help=">0 时到点保存退出")
     ap.add_argument("--save_opt", type=int, default=1,
@@ -324,6 +334,8 @@ def build_cfg(args) -> LinAttnConfig:
         enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
         enc_std_qk_norm=bool(args.enc_std_qk_norm),
         dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
+        dec_parallel=bool(getattr(args, "dec_parallel", 0)),
+        dec_parallel_read=str(getattr(args, "dec_parallel_read", "prefix")),
         dec_step_plan=args.step_plan, dec_block=int(args.block),
         allow_k_gt_n=bool(args.allow_k_gt_n),
         dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
@@ -482,8 +494,12 @@ def main():
     pc = model.count_params()
     n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
     _p(f"[decode] recurrent={getattr(model,'recurrent',False)} "
+          f"parallel={getattr(model,'parallel',False)} "
           f"dec_attn={cfg.dec_attn} → {type(model.decoder).__name__} T={n_steps}"
-          + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else ""),
+          + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else "")
+          + (f" read={getattr(model.decoder,'read_mode','')} "
+             f"limits={getattr(model.decoder,'limits','')}"
+             if getattr(model,'parallel',False) else ""),
           flush=True)
     _p(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
           f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
@@ -636,6 +652,11 @@ def main():
             else:
                 opt.step()
             step += 1
+            if args.stop_at_step > 0 and step >= args.stop_at_step:
+                _p(f"[stop] 达到 stop_at_step={args.stop_at_step}"
+                      f"（total_steps/lr 调度保持 {total_steps} 不变）", flush=True)
+                stop = True
+                break
             run_imgs += x.shape[0] * accum * world   # DDP: ×world = 全局吞吐（单卡恒等）
             loss_avg = loss_sum / accum
             rec_avg = rec_sum / accum

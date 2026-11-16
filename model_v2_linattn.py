@@ -899,6 +899,82 @@ class RecurrentOutputQueryDecoder(nn.Module):
         return self.pixel_head(self.norm_out(Ys))           # (B,T,N,patch_px)
 
 
+# ═══ 读出方式对照臂: **并行读出**（v9 口径: 无 carry, T 步一次前向）═══
+#   2026-11-16 用户要求「在 in100 上与循环重建谁优谁劣」。两者共用同一份 encoder /
+#   解码器层 / 像素头 / 初始化（参数逐 key 同名同形, 只多 (T,dim) 的 step_emb）,
+#   唯一差别是**怎么读 memory**:
+#     · 循环版 `RecurrentOutputQueryDecoder`: 逐步调 stack T 次, 第 t 步只读自己那块
+#       z_s[lo:hi], 查询由上一步 carry（Y ← query_base + Y, BPTT 不 detach）。
+#     · 并行版 `ParallelOutputQueryDecoder`: 把 T 步的查询折进 batch 维 (B·T, N, d),
+#       **一次** stack 前向; 第 t 步的可见 key 由 `memory_key_padding_mask` 控制
+#       （默认"前缀" = mem 行 0..hi（z_cls + 前 hi 个 z_s）, 另可选 "block"=只读本步块）, 步身份由
+#       零初始化 `step_emb` 提供（初始 = 恒等, 不改变查询基行语义）。无 carry ⇒
+#       无顺序依赖, 前向/反向都完全并行。
+#   输出口径完全一致: (B,T,N,patch_px), 每步直接预测整图, 损失 = 平权逐步像素 L1。
+
+class ParallelOutputQueryDecoder(RecurrentOutputQueryDecoder):
+    """并行读出解码器: 与循环版同参数/同接口, 无 carry、所有步一次前向。
+
+    参数对齐: 与 `RecurrentOutputQueryDecoder` 的 state_dict **逐 key 同名同形**
+    （mem_proj/mem_norm/query_base/query_pos/stack/norm_out/pixel_head/mem_pos 全同），
+    只多一个零初始化的 `step_emb`(1,T,1,dim) ⇒ 可 `load_state_dict(..., strict=False)`
+    互换, 做"同一初始化、只换读出方式"的受控对照。`_key_pad` 是派生 buffer
+    (persistent=False), 不进 state_dict。
+    """
+
+    def __init__(self, *args, read_mode: str = "prefix", **kwargs):
+        super().__init__(*args, **kwargs)
+        assert read_mode in ("prefix", "block"), \
+            f"未知 read_mode={read_mode!r}; 合法值: ['prefix', 'block']"
+        self.read_mode = str(read_mode)
+        T = len(self.windows)
+        assert T >= 1
+        self.T = T
+        S = self.num_specials + 1
+        # 每步可见的 mem 行集合（行 0 = z_cls; 行 r≥1 ↔ z_s[r-1]；window 也是 mem 坐标）
+        if self.read_mode == "prefix":
+            # 无 carry 的自然对应: 可见 = 累计到本步窗口 hi 的**前缀** mem[0..hi]
+            #   = z_cls + z_s[0 : hi]（= v9 的 limits = 1+hi 口径）
+            visible = [set(range(0, hi + 1)) for (_lo, hi) in self.windows]
+        else:
+            # "block": z_cls 恒可见 + **只**本步那块 mem[lo..hi]（无 carry 的严格对照）
+            visible = [({0} | set(range(lo, hi + 1))) for (lo, hi) in self.windows]
+        self.limits = [max(rows) + 1 for rows in visible]      # 可见 mem 行数
+        assert max(self.limits) <= S, (self.limits, S)
+        assert all(lo <= hi for lo, hi in self.windows)
+        self.step_emb = nn.Parameter(torch.zeros(1, T, 1, self.dim))
+        pad = torch.ones(T, S, dtype=torch.bool)              # True = 屏蔽
+        for t, rows in enumerate(visible):
+            pad[t, sorted(rows)] = False
+        self.register_buffer("_key_pad", pad, persistent=False)
+
+    def forward(self, z_cls: Tensor, z_s: Tensor, mem_extra: Optional[Tensor] = None,
+                extra_per_step: int = 0, halt_target: Optional[Tensor] = None,
+                halt_quantile: float = 0.5) -> Tensor:
+        assert mem_extra is None, \
+            "并行读出暂不支持 E-B3 生长 token（mem_extra）⇒ 请关掉 refiner"
+        assert halt_target is None, \
+            "并行读出暂不支持 E-B2 臂 4 的 halt stop-gradient（dh_mode=3）"
+        assert z_cls.dim() == 3 and z_s.dim() == 3, "z_cls/z_s 须为 (B,·,D)"
+        assert z_cls.shape[1] == 1 and z_s.shape[1] == self.num_specials, \
+            f"z_cls 应 1 列 / z_s 应 {self.num_specials} 列, got " \
+            f"{tuple(z_cls.shape)}/{tuple(z_s.shape)}"
+        B = z_s.shape[0]
+        T, N, d = self.T, self.num_patches, self.dim
+        mem = torch.cat([z_cls, z_s], dim=1)                  # (B,1+K,D_enc)
+        mem = self.mem_norm(self.mem_proj(mem)) + self.mem_pos
+        S = mem.shape[1]
+        assert S == self.num_specials + 1, S
+        # 所有步的查询一次折进 batch 维: (B·T, N, d)
+        q = (self.query_base + self.query_pos).unsqueeze(0).unsqueeze(0) + self.step_emb
+        q = q.expand(B, T, N, d).reshape(B * T, N, d)
+        memx = mem.unsqueeze(1).expand(B, T, S, d).reshape(B * T, S, d)
+        pad = self._key_pad.unsqueeze(0).expand(B, T, S).reshape(B * T, S)
+        Y = self.stack(q, memx, memory_key_padding_mask=pad)   # (B·T, N, dim)
+        Y = Y.reshape(B, T, N, d)
+        return self.pixel_head(self.norm_out(Y))               # (B,T,N,patch_px)
+
+
 # ═══ 消融臂: **全线性** 解码器（编码器 + 解码器都用线性注意力, 配 BPTT）═══
 #   2026-10-16 用户要求: 「BPTT 编码解码全线性」。上面已把**编码器**做成可切换的
 #   线性/普通注意力; 本节把**解码器**也做成可切换的 —— 自注意力与交叉注意力都由
@@ -1145,6 +1221,15 @@ class LinAttnConfig:
     enc_std_qk_norm: bool = False  # "std" 编码器的 QK-Norm（默认关 = 普通 transformer 原貌）
     # ── 解码器（普通 softmax 注意力; dec_recurrent=True 时走循环读出）──
     dec_recurrent: bool = False   # 循环读出（主线口径; 单步版 = False）
+    # 2026-11-16 并行读出（v9 口径移植）: T 步折进 batch 维**一次**前向, 无 carry,
+    # 每步的可见 memory 用 key padding mask 控住（不再逐步调 stack T 次）。
+    # 参数与 `RecurrentOutputQueryDecoder` 逐 key 同名同形, 只多 (T,dim) 的 step_emb
+    # ⇒ 可 load_state_dict(strict=False) 互换, 做"同一初始化、只换读出方式"的对照。
+    # dec_parallel=True 时 dec_attn 必须为 "std"（线性注意力版未移植）。
+    dec_parallel: bool = False
+    # dec_parallel 的可见性口径: "prefix"=z_cls + 前 hi 个 z_s（v9 read_plan="prefix",
+    # 默认）; "block"=z_cls 恒可见 + 本步块 z_s[lo:hi+1]（无 carry 的严格对照臂）。
+    dec_parallel_read: str = "prefix"
     dec_steps: str = ""           # 逗号分隔采样步; 空 = square_block_starts(K)
     # ── 固定步数 × token 预算消融（2026-10-19 K-sweep; 默认 square/0 = 原有行为）──
     #   dec_step_plan = "square"(默认) | "fixed" | "cumulative"
@@ -1267,6 +1352,12 @@ class SRPhase1LinAttn(nn.Module):
             num_patches=self.num_patches, num_specials=cfg.num_specials,
             pixel_hidden=cfg.pixel_hidden, dropout=cfg.dropout)
         self.recurrent = bool(cfg.dec_recurrent)
+        self.parallel = bool(cfg.dec_parallel)
+        if self.parallel:
+            # 并行读出也是 **T 步语义**（每步直接预测整图、F_hat = 末步、损失 = 平权
+            # 逐步 L1）⇒ 日志/损失/评测与循环版走同一条路径, 只把 decoder 换类。
+            # 这里把 recurrent 置 True 只是复用"T 步"分支; 类型仍由 self.parallel 区分。
+            self.recurrent = True
         self.dec_attn = str(cfg.dec_attn).lower()
         _steps = [int(x) for x in str(cfg.dec_steps).split(",") if x.strip()]
         _plan, _block = str(cfg.dec_step_plan), int(cfg.dec_block)
@@ -1274,12 +1365,18 @@ class SRPhase1LinAttn(nn.Module):
             assert _steps, \
                 "dec_step_plan='cumulative' 必须显式给 --dec_steps（每步累计 z_s 数）"
         if self.dec_attn == "std":
-            if self.recurrent:
+            if self.parallel:
+                self.decoder = ParallelOutputQueryDecoder(
+                    steps=_steps or None, step_plan=_plan, block=_block,
+                    read_mode=str(cfg.dec_parallel_read), **_dec_kw)
+            elif self.recurrent:
                 self.decoder = RecurrentOutputQueryDecoder(
                     steps=_steps or None, step_plan=_plan, block=_block, **_dec_kw)
             else:
                 self.decoder = StandardAttentionDecoder(**_dec_kw)
         elif self.dec_attn == "linear":
+            assert not self.parallel, \
+                "dec_parallel 只支持 dec_attn='std'（线性注意力版尚未移植并行读出）"
             _lin_kw = dict(qk_norm=bool(cfg.dec_linear_qk_norm),
                            grad_ckpt=bool(cfg.dec_grad_ckpt))
             if self.recurrent:
@@ -2186,6 +2283,83 @@ if __name__ == "__main__":
     assert m_def11.count_params()["refiner"] == 0
     print(f"    refiner 关→开载入: unexpected=0, missing={len(missing2)} 全部 'refiner.*' "
           f"OK; 新开关均不进 state_dict OK; 默认全关 OK")
+
+    # 12. 并行读出（v9 口径移植）: 参数对齐 + visible-key mask 正确（"不该看见的看不见"）
+    print("[12] 并行读出解码器: 与循环版参数逐 key 对齐 + memory 可见性 mask 正确")
+    rdec12 = RecurrentOutputQueryDecoder(num_specials=64)
+    pdec12 = ParallelOutputQueryDecoder(num_specials=64)
+    kr, kp = set(rdec12.state_dict()), set(pdec12.state_dict())
+    assert kp - kr == {"step_emb"}, f"并行版多出的 key={kp - kr}"
+    assert not (kr - kp), f"并行版缺 key={kr - kp}"
+    for k in kr:
+        assert rdec12.state_dict()[k].shape == pdec12.state_dict()[k].shape, k
+    print(f"    共享 {len(kr)} 个 key 且形状全同（可直接 load_state_dict strict=False 互换）; "
+          f"仅多 step_emb {tuple(pdec12.step_emb.shape)} = "
+          f"{pdec12.step_emb.numel()} 参数（零初始化）; limits={pdec12.limits}")
+
+    # mask 语义: 第 t 步对**不可见** z_s 行加噪声, 该步输出须逐位不变;
+    # 对可见行加噪声, 输出须变 ⇒ 同时排除"mask 写反/全屏蔽"两类静默错误。
+    torch.manual_seed(0)
+    zc12, zs12 = torch.randn(2, 1, 128), torch.randn(2, 64, 128)
+    for rm in ("prefix", "block"):
+        pd = ParallelOutputQueryDecoder(
+            enc_dim=128, dim=128, depth=2, heads=4, num_specials=64,
+            pixel_hidden=128, read_mode=rm).eval()
+        with torch.no_grad():
+            y0 = pd(zc12, zs12)
+            y0b = pd(zc12, zs12)
+        assert y0.shape == (2, 8, 196, 768), y0.shape
+        assert torch.equal(y0, y0b), f"{rm}: 确定性前向不逐位一致"
+        for t, (lo, hi) in enumerate(pd.windows):
+            rows = (set(range(0, hi + 1)) if rm == "prefix"
+                    else ({0} | set(range(lo, hi + 1))))
+            vis = [r - 1 for r in sorted(rows) if r >= 1]      # 可见 z_s 下标
+            hid = [i for i in range(64) if (i + 1) not in rows]
+            if hid:
+                z2 = zs12.clone()
+                z2[:, hid] += torch.randn(2, len(hid), 128) * 10.0
+                with torch.no_grad():
+                    y2 = pd(zc12, z2)
+                dh = float((y2[:, t] - y0[:, t]).abs().max())
+                assert dh == 0.0, \
+                    f"{rm} 步{t}: 不可见 z_s 影响了输出 (max|d|={dh:.2e})"
+            if vis:
+                z3 = zs12.clone()
+                z3[:, vis] += torch.randn(2, len(vis), 128) * 10.0
+                with torch.no_grad():
+                    y3 = pd(zc12, z3)
+                dv = float((y3[:, t] - y0[:, t]).abs().max())
+                assert dv > 1e-6, f"{rm} 步{t}: 可见 z_s 扰动后输出不变（mask 反了）"
+        print(f"    {rm}: 8 步输出 (2,8,196,768); 每步只受自己可见 z_s 影响 OK "
+              f"(limits={pd.limits})")
+
+    # 整模型默认路径回归 + 并行臂端到端（小配置, CPU）
+    cfg12 = LinAttnConfig(img_size=64, patch=16, num_specials=8, enc_dim=64,
+                          enc_depth=2, enc_heads=4, dec_dim=64, dec_depth=2,
+                          dec_heads=4, pixel_hidden=128)
+    m_def12 = SRPhase1LinAttn(cfg12)
+    assert type(m_def12.decoder).__name__ == "StandardAttentionDecoder", \
+        type(m_def12.decoder).__name__
+    assert not m_def12.parallel
+    _base12 = {k: v for k, v in cfg12.to_dict().items()
+               if k in LinAttnConfig.__dataclass_fields__}
+    m_par12 = SRPhase1LinAttn(LinAttnConfig(**{**_base12,
+                                              "dec_recurrent": True,
+                                              "dec_parallel": True}))
+    assert type(m_par12.decoder).__name__ == "ParallelOutputQueryDecoder", \
+        type(m_par12.decoder).__name__
+    assert m_par12.recurrent and m_par12.parallel
+    m_par12.train()
+    o12 = m_par12(torch.randn(2, 3, 64, 64))
+    T12 = len(square_block_starts(8))
+    assert o12["Y_pix"].shape == (2, T12, 16, 768), o12["Y_pix"].shape
+    assert torch.isfinite(o12["loss"])
+    o12["loss"].backward()
+    bad12 = [k for k, p in m_par12.named_parameters()
+             if p.requires_grad and (p.grad is None or not torch.isfinite(p.grad).all())]
+    assert not bad12, f"并行臂有参数无梯度/非有限: {bad12[:5]}"
+    print(f"    默认回归 → StandardAttentionDecoder OK; 并行臂端到端 T={T12} "
+          f"Y_pix{tuple(o12['Y_pix'].shape)} 前向+反向+全参数有限梯度 OK")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")
