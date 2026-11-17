@@ -152,6 +152,47 @@ torchrun --nproc_per_node=2 train_v10.py --tok_ckpt ... --out ... \
 所以**换率等于换结构、必须重训**；`rate_tokens` 还要能被 `chunk_tokens` 整除。
 更稳的做法：直接用 `rate_tokens=16` 一段训完，单步预热用 `n_steps=1` 前 1~2k 步。
 
+### 5.1 checkpoint 是自描述的（AutoModel + trust_remote_code）
+
+`V10Config` 是 `PretrainedConfig`、`VideoV10` 是 `PreTrainedModel`，两者都在模块
+末尾 `register_for_auto_class`，`config.auto_map` 指到 `model_v10`。于是
+`out/final/` 里除权重外还有 `config.json`（含 `auto_map`）和**模型代码本身**：
+
+```
+out/final/
+  model.safetensors        tokenizer.* + middle.* + readout.*（含冻结分词器）
+  config.json              V10Config.to_dict() + auto_map + architectures
+  model_v10.py             本文件（custom_object_save 拷进来的）
+  model_v2_linattn.py      相对导入的依赖，一起拷
+```
+
+```python
+from transformers import AutoModel
+m = AutoModel.from_pretrained("out/final", trust_remote_code=True)
+```
+
+三个为了这件事做的调整：
+
+1. **`tok_cfg` 存了分词器的完整结构**（`VideoV10.__init__` 里 `asdict(tokenizer.cfg)`
+   写回 config）。换台机器 `--tok_ckpt` 路径失效时，仍能按同样形状重建，
+   权重从 `model.safetensors` 里来 —— 不依赖原始 `.pt`。
+2. **`model_v10.py` 对 `model_v2_linattn` 做「相对导入 + sys.path 兜底」**：
+   HF 的动态模块会把 `.py` 拷到 `~/.cache/huggingface/modules/...` 后独立执行，
+   那里既不是包目录也不在 `sys.path` 上。相对导入同时让 `custom_object_save`
+   顺着正则把 `model_v2_linattn.py` 一起拷走。
+3. **`_init_weights` 是空操作**：子模块各自定义初始化（γ 零初始化、Q 随机）；
+   走默认 `normal_(0, init_std)` 会把它们全部覆盖。
+4. **`from_pretrained` 之后重新冻结分词器**：transformers 的加载路径用
+   `_load_parameter_into_model` 把每个浮点张量包成
+   `nn.Parameter(tensor, requires_grad=True)`（走 `setattr`，`load_state_dict`
+   的 post-hook 拦不到），所以 `AutoModel.from_pretrained` 出来的模型分词器是
+   **可训**的。`VideoV10.from_pretrained` 覆写后在末尾调一次
+   `freeze_tokenizer()`，实测 trainable 从 126K 回到 44K（= 去掉 82K 分词器）。
+
+注意磁盘：冻结分词器的权重也在 `model.safetensors` 里（默认 `1 份分词器 + 388M`
+可训练），所以每个 checkpoint 都是这个体量。这是自包含换来的代价；真要省，
+得让 `tok_ckpt` 成为硬依赖并跳过 `tokenizer.*` 的保存。
+
 ---
 
 ## 6. 参数量 / 算力（默认配置实测公式）

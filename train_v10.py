@@ -59,7 +59,6 @@ import argparse
 import json
 import os
 import random
-from dataclasses import asdict
 
 import numpy as np
 import torch
@@ -371,7 +370,7 @@ def main() -> None:
     if trainer.accelerator.is_main_process:
         with open(os.path.join(a.out, "run_args.json"), "w",
                   encoding="utf-8") as f:
-            json.dump(dict(vars(a), cfg=asdict(cfg)), f,
+            json.dump(dict(vars(a), cfg=cfg.to_dict()), f,
                       ensure_ascii=False, indent=2)
 
     if a.resume:
@@ -379,13 +378,17 @@ def main() -> None:
     train_result = trainer.train(resume_from_checkpoint=a.resume or None)
 
     # ── 收尾：Trainer 负责 gather / 主进程落盘
+    # 模型现在是 PreTrainedModel，trainer.save_model 走 save_pretrained：
+    # final/ 里有 model.safetensors + config.json（含 auto_map）+ 模型代码，
+    # 可以直接 AutoModel.from_pretrained(final_dir, trust_remote_code=True)。
     trainer.accelerator.wait_for_everyone()
     final_dir = os.path.join(a.out, "final")
     trainer.save_model(final_dir)
     if trainer.accelerator.is_main_process:
         trainer.save_state()
         trainer.save_metrics("train", train_result.metrics)
-        print(f"[done] best={trainer.state.best_metric} out={final_dir}",
+        print(f"[done] best={trainer.state.best_metric} out={final_dir}", flush=True)
+        print(f"[load] AutoModel.from_pretrained({final_dir!r}, trust_remote_code=True)",
               flush=True)
 
 

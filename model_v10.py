@@ -66,19 +66,53 @@ mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"投影到别的�
 step_gate       是否用零初始化门控 γ（默认关 = w≡1，carry 与 v2 一样等权相加）
 step_weights    逐步损失权重（"mean" 平权 | "lin" 线性加权到末步）
 
-自检：``python model_v10.py``（CPU 可跑，不需要 ckpt）
+HF 口径（AutoModel + trust_remote_code）
+----------------------------------------
+`V10Config` 是 `PretrainedConfig`、`VideoV10` 是 `PreTrainedModel`，两者都
+`register_for_auto_class`，`config.auto_map` 指向本文件，所以 checkpoint
+是**自描述**的（`config.json` + `model.safetensors` + 代码）：
+
+    m.save_pretrained(out)                 # 写 config.json / 权重 / 本文件+依赖
+    m = AutoModel.from_pretrained(out, trust_remote_code=True)
+
+`save_pretrained` 会把 `model_v10.py` 和它相对导入的 `model_v2_linattn.py`
+一起拷进 out/，所以在没有本仓库源码的机器上也能加载；`tok_cfg` 里存了分词器
+的完整结构，`tok_ckpt` 路径丢了也不影响重建（分词器权重本身就在权重文件里）。
+`model_v10.py` 顶部对 `model_v2_linattn` 做了「相对导入 + sys.path 兜底」，
+是为了让动态模块加载（文件被拷到 HF 缓存目录后独立执行）也能找到依赖。
+`VideoV10.from_pretrained` 额外重新冻结分词器 —— transformers 的加载路径会把
+所有浮点参数包成 requires_grad=True。
+
+自检：``python model_v10.py``（CPU 可跑，不需要 ckpt；含一次 save→AutoModel 往返）
 """
 from __future__ import annotations
 
+import copy
 import os
-from dataclasses import dataclass, field
+import sys
+from dataclasses import asdict
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+from transformers import PretrainedConfig, PreTrainedModel
 
-from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
+# 分词器实现与本文件同级。两种加载路径都要能走通：
+#   * 包内（`import pkg.model_v10`）/ transformers 的动态模块：相对导入；
+#     顺带让 `custom_object_save` 把 model_v2_linattn.py 一起拷进 checkpoint。
+#   * 平铺目录（`python model_v10.py`、以及文件被拷到 HF 缓存后独立执行）：
+#     此时没有 package，相对导入会报 "no known parent package"，退回绝对导入，
+#     并把本文件所在目录放进 sys.path（动态模块的目录不在默认搜索路径里）。
+try:
+    from .model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
+except ImportError as _e:                      # noqa: PERF203
+    if "attempted relative import" not in str(_e) and "parent package" not in str(_e):
+        raise                                  # 真的是依赖坏了，别吞掉
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
 __all__ = ["V10Config", "FrozenTokenizer", "TemporalMiddle",
            "WholeClipDecoder", "VideoV10", "patches_to_image", "psnr_from_l1"]
@@ -101,32 +135,70 @@ def psnr_from_l1(pred: Tensor, target: Tensor, eps: float = 1e-10) -> Tensor:
 
 
 # ═══════════════════════════════════════════════════════════ 配置
-@dataclass
-class V10Config:
-    # ── 冻结图像分词器（E + R 同一个 SRPhase1LinAttn ckpt）
-    tok_ckpt: str = ""
-    tok_cfg: Dict = field(default_factory=dict)   # 覆盖 ckpt["cfg"] 里的字段
-    # ── 视频
-    frames: int = 120          # 15 s @ 8 fps
-    group: int = 4             # z 步覆盖帧数（30 步）
-    # ── 率 / 目标（值数口径见模块 docstring）
-    rate_tokens: int = 16      # 每帧保留的 special token 数（前缀截断）
-    rate_dim: int = 448        # 单个 token 宽度（= 分词器 zs_dim）
-    target_tokens: int = 32    # 目标 special token 数（全量）
-    chunk_tokens: int = 4      # 一个可训练向量 = 几个 token 拼接（4×448 = 1792，不填充）
-    # ── 中间态（帧内 block 因果）
-    mid_dim: int = 0           # 0 = 自动取 width（1792），不允许填成别的宽度
-    mid_depth: int = 6
-    mid_heads: int = 16
-    mid_ratio: float = 4.0
-    # ── 读出（整片段循环）
-    dec_dim: int = 0           # 0 = 自动取 width（1792）
-    dec_depth: int = 4
-    dec_heads: int = 16
-    dec_ratio: float = 2.0
-    dec_drop: float = 0.0
-    step_gate: bool = False    # γ 门控（默认关：w≡1，与 v2 的 query_base + Y 一致）
-    step_weights: str = "mean"
+class V10Config(PretrainedConfig):
+    """v10 的超参，同时是 `transformers` 的 `PretrainedConfig`。
+
+    继承 `PretrainedConfig` 只为了一个目的：让 checkpoint 自描述 ——
+    `save_pretrained` 会把 `to_dict()` 写进 config.json，`AutoConfig /
+    AutoModel.from_pretrained(dir, trust_remote_code=True)` 据此重建。
+
+    `auto_map` 指到本文件；文件名改了要同步改这里（HF 按「模块名.类名」
+    在 checkpoint 目录里找 .py）。计算属性（width / rows_* / n_steps）不进
+    config.json —— 它们由下面的基本字段推出来，写进去反而会随口径漂移。
+    """
+
+    model_type = "v10"
+    auto_map = {
+        "AutoConfig": "model_v10.V10Config",
+        "AutoModel": "model_v10.VideoV10",
+    }
+
+    def __init__(
+        self,
+        tok_ckpt: str = "",
+        tok_cfg: Optional[Dict] = None,   # 分词器结构（VideoV10 建好后会写全量进来）
+        frames: int = 120,                # 15 s @ 8 fps
+        group: int = 4,                   # z 步覆盖帧数（30 步）
+        rate_tokens: int = 16,            # 每帧保留的 special token 数（前缀截断）
+        rate_dim: int = 448,              # 单个 token 宽度（= 分词器 zs_dim）
+        target_tokens: int = 32,          # 目标 special token 数（全量）
+        chunk_tokens: int = 4,            # 一个可训练向量 = 几个 token（4×448=1792）
+        mid_dim: int = 0,                 # 0 = 自动取 width，不允许填成别的宽度
+        mid_depth: int = 6,
+        mid_heads: int = 16,
+        mid_ratio: float = 4.0,
+        dec_dim: int = 0,                 # 0 = 自动取 width
+        dec_depth: int = 4,
+        dec_heads: int = 16,
+        dec_ratio: float = 2.0,
+        dec_drop: float = 0.0,
+        step_gate: bool = False,          # γ 门控（默认关：w≡1，= v2 的 query_base + Y）
+        step_weights: str = "mean",
+        **kwargs,
+    ):
+        # config.json 里带的 auto_map / architectures / dtype / _name_or_path
+        # 都走 kwargs 交给 PretrainedConfig；没带就补默认的 auto_map。
+        kwargs.setdefault("auto_map", dict(self.auto_map))
+        super().__init__(**kwargs)
+        self.tok_ckpt = str(tok_ckpt or "")
+        self.tok_cfg = dict(tok_cfg or {})
+        self.frames = int(frames)
+        self.group = int(group)
+        self.rate_tokens = int(rate_tokens)
+        self.rate_dim = int(rate_dim)
+        self.target_tokens = int(target_tokens)
+        self.chunk_tokens = int(chunk_tokens)
+        self.mid_dim = int(mid_dim)
+        self.mid_depth = int(mid_depth)
+        self.mid_heads = int(mid_heads)
+        self.mid_ratio = float(mid_ratio)
+        self.dec_dim = int(dec_dim)
+        self.dec_depth = int(dec_depth)
+        self.dec_heads = int(dec_heads)
+        self.dec_ratio = float(dec_ratio)
+        self.dec_drop = float(dec_drop)
+        self.step_gate = bool(step_gate)
+        self.step_weights = str(step_weights)
 
     @property
     def n_steps(self) -> int:
@@ -420,12 +492,23 @@ class WholeClipDecoder(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════ 总模型
-class VideoV10(nn.Module):
-    """冻结分词器 + 中间态 + 整片段循环读出。训练只更新中间态与读出侧。"""
+class VideoV10(PreTrainedModel):
+    """冻结分词器 + 中间态 + 整片段循环读出。训练只更新中间态与读出侧。
+
+    `PreTrainedModel` 的意义只在存取：`save_pretrained` 会连 `config.json`
+    （含 `auto_map`）和本文件代码一起落盘，于是
+    ``AutoModel.from_pretrained(dir, trust_remote_code=True)`` 能重建整个模型。
+    训练语义没变，`cfg` 仍是 `V10Config`（= `self.config` 的别名）。
+    """
+
+    config_class = V10Config
+    main_input_name = "x"
+    # device_map / FSDP 切分时不要把一层 Transformer 拆开
+    _no_split_modules = ["TransformerEncoderLayer", "TransformerDecoderLayer"]
 
     def __init__(self, cfg: V10Config):
-        super().__init__()
-        self.cfg = cfg
+        super().__init__(cfg)                       # PreTrainedModel: 存 self.config
+        self.cfg = cfg                              # 别名，老的调用点都读 .cfg
         self.tokenizer = FrozenTokenizer(cfg.tok_ckpt, cfg.tok_cfg)
         code = self.tokenizer.code_dim
         assert cfg.rate_dim in (0, code), (
@@ -446,12 +529,39 @@ class VideoV10(nn.Module):
         assert cfg.mid_dim == cfg.dec_dim == cfg.width, (
             f"mid_dim={cfg.mid_dim} dec_dim={cfg.dec_dim} 必须都等于 "
             f"chunk_tokens×rate_dim={cfg.width}；换宽度只会引入填充冗余")
-        self.cfg = cfg
+        # 把分词器的**完整结构**写回 config：换台机器 `tok_ckpt` 路径没了也能
+        # 按同样的形状重建（权重本身存在 checkpoint 里）。这是 auto_map 能
+        # 在别处加载的前提。
+        cfg.tok_cfg = asdict(self.tokenizer.cfg)
         self.middle = TemporalMiddle(
             in_dim=cfg.width, dim=cfg.width, depth=cfg.mid_depth,
             heads=cfg.mid_heads, ratio=cfg.mid_ratio,
             tokens_per_frame=cfg.rows_rate, frames=cfg.frames)
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
+        self.post_init()
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """什么都不做：每个子模块在自己的 `__init__` 里已经精确定义了初始化
+        （readout 的 γ 零初始化、Q 随机、LN 默认等）。走默认的
+        `normal_(0, initializer_range)` 会把它们全部覆盖掉。
+        """
+        return None
+
+    def freeze_tokenizer(self) -> None:
+        """冻结 E/R（幂等）。`__init__` 里已经冻过一次，这里再暴露成方法是因为
+        `from_pretrained` 会把每个浮点参数包成 `nn.Parameter(..., requires_grad=True)`
+        （transformers 的 `_load_parameter_into_model`，走 setattr 而不是
+        `load_state_dict`，所以 post-hook 也拦不到），加载完必须重新冻一次。
+        """
+        for p in self.tokenizer.parameters():
+            p.requires_grad_(False)
+        self.tokenizer.eval()
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        model = super().from_pretrained(*args, **kwargs)
+        model.freeze_tokenizer()            # 抵消加载路径把 requires_grad 归 True
+        return model
 
     # ── 目标：全量 special + z_cls（冻结编码器给）
     def target_latents(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
@@ -543,6 +653,14 @@ class VideoV10(nn.Module):
         return dict(middle=n(self.middle), readout=n(self.readout), total=n(self))
 
 
+# 注册到 auto classes：`save_pretrained` 见到 `_auto_class` 就会把本文件（以及
+# 它相对导入的 model_v2_linattn.py）拷进 checkpoint 目录，并把 auto_map 写进
+# config.json —— 这就是 `AutoModel.from_pretrained(dir, trust_remote_code=True)`
+# 的入口。缺了这两行，权重能存但加载时找不到类。
+V10Config.register_for_auto_class("AutoConfig")
+VideoV10.register_for_auto_class("AutoModel")
+
+
 # ═══════════════════════════════════════════════════════════ 自检
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -618,7 +736,9 @@ if __name__ == "__main__":
     print("[carry] w≡1（无门控、无额外 LN，= v2 的 query_base + Y）✓")
 
     # 显式打开 step_gate 时，γ 零初始化 ⇒ 第 0 步的读出与 Y 无关（起点=单步读出）
-    cfg_g = V10Config(**{**vars(cfg), "step_gate": True, "dec_dim": cfg.width})
+    # PretrainedConfig 不是 dataclass（不能 asdict/vars），用 deepcopy 派生
+    cfg_g = copy.deepcopy(cfg)
+    cfg_g.step_gate = True
     rd = WholeClipDecoder(cfg_g, code_dim=cfg.rate_dim,
                           num_specials=cfg.target_tokens)
     assert rd.gate is not None and float(rd.gate.abs().max()) == 0.0
@@ -644,4 +764,63 @@ if __name__ == "__main__":
     m.eval()
     ev = m.evaluate(xs[:1])
     print("[eval]", {k: round(v, 3) for k, v in ev.items()})
+
+    # ── HF 口径往返：save_pretrained 落盘 config.json + 代码 + 权重，然后在
+    #    **两个全新进程**里验证 AutoModel.from_pretrained(trust_remote_code=True)。
+    #    分两个进程是必须的：动态模块按路径缓存，同进程里会直接命中 sys.modules，
+    #    测不出"文件被拷到 HF 缓存后能不能独立执行"这件事（依赖导入就死在这）。
+    import json as _json
+    import subprocess
+    import tempfile
+
+    proj = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory() as td:
+        ckpt = os.path.join(td, "v10_tiny")
+        save_py = os.path.join(td, "do_save.py")
+        with open(save_py, "w", encoding="utf-8") as f:
+            f.write("import sys\n"
+                    f"sys.path.insert(0, {proj!r})\n"
+                    "import model_v10 as mv\n"
+                    f"cfg = mv.V10Config(tok_ckpt='', tok_cfg={cfg.tok_cfg!r},\n"
+                    "                    frames=8, group=4, rate_tokens=4, rate_dim=8,\n"
+                    "                    target_tokens=4, chunk_tokens=4,\n"
+                    "                    mid_depth=2, mid_heads=2, mid_ratio=2.0,\n"
+                    "                    dec_depth=2, dec_heads=2, dec_ratio=2.0)\n"
+                    f"mv.VideoV10(cfg).save_pretrained({ckpt!r})\n")
+        subprocess.run([sys.executable, save_py], check=True)
+
+        files = sorted(os.listdir(ckpt))
+        assert "config.json" in files, files
+        assert "model_v10.py" in files, files            # 模型代码被一起拷走
+        assert "model_v2_linattn.py" in files, files     # 相对导入的依赖也是
+        with open(os.path.join(ckpt, "config.json"), encoding="utf-8") as f:
+            saved = _json.load(f)
+        assert saved["auto_map"]["AutoModel"] == "model_v10.VideoV10", saved
+        assert saved["tok_cfg"]["num_specials"] == 4, saved["tok_cfg"]
+
+        load_py = os.path.join(td, "do_load.py")
+        with open(load_py, "w", encoding="utf-8") as f:
+            f.write("import json\n"
+                    "from transformers import AutoConfig, AutoModel\n"
+                    f"c = AutoConfig.from_pretrained({ckpt!r}, trust_remote_code=True)\n"
+                    f"m = AutoModel.from_pretrained({ckpt!r}, trust_remote_code=True)\n"
+                    "print('@@' + json.dumps(dict(\n"
+                    "    cls=type(m).__name__, q=list(m.readout.Q.shape),\n"
+                    "    n=sum(p.numel() for p in m.parameters()),\n"
+                    "    frames=c.frames, tok=c.tok_cfg['num_specials'],\n"
+                    "    frozen=all(not p.requires_grad for p in m.tokenizer.parameters()))))\n")
+        # 子进程的工作目录是临时目录，项目目录不在 sys.path 里 —— 模型代码只能
+        # 靠 checkpoint 里那份拷贝跑起来，这正是要验的隔离性。
+        res = subprocess.run([sys.executable, load_py], check=True,
+                             capture_output=True, text=True)
+        info = _json.loads([ln for ln in res.stdout.splitlines()
+                            if ln.startswith("@@")][-1][2:])
+        assert info["cls"] == "VideoV10", info
+        assert info["q"] == list(m.readout.Q.shape), info
+        assert info["n"] == sum(p.numel() for p in m.parameters()), (info, "参数量")
+        assert info["frames"] == cfg.frames and info["tok"] == 4, info
+        assert info["frozen"], f"加载后分词器必须仍然冻结: {info}"
+        print(f"[hf] save_pretrained → AutoModel(trust_remote_code=True) ✓ "
+              f"{info['cls']} {info['n'] / 1e3:.0f}K 参数，代码自包含")
+
     print("ALL CHECKS PASSED")
