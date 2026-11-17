@@ -237,3 +237,16 @@ D=78 的 fwd/bwd 分列误差、fp16==bf16 同错的关键论据、`SDPUtils.h` 
 所有测试均在 `MUSA_VISIBLE_DEVICES=0`、单进程、张量 ≤ 2×8×213×90（<10 MiB）、单次 <20 s 内完成；
 未 kill/暂停任何生产进程，未写 `/root/autodl-tmp/{video_recon,tok448_v2,AssocVTC_v10}`，
 未改动 `/root/AssocVTC_tok448`（只读代码 + 只读 args.json）。
+
+## 7. 上游提交（2026-11-17）
+
+- 渠道选择：`https://github.com/MooreThreads/torch_musa/issues`（仓库活跃；**无 issue 模板**；
+  已有同机同版本 meta-issue **#162**，其中第 6 条即 `MuDNNFlashSDPABwd fails in autocast training`；
+  维护者 `lijing-mt` 2026-11-13 回复 "we are currently analyzing it."）。
+  PyTorch 上游（pytorch/pytorch）**不适合**：PrivateUse1 后端的 `_fused_sdp_choice` 覆盖 +
+  闭源 muDNN kernel，PyTorch 侧代码未参与。AutoDL 仅适合作为"能否提供 post2/2.13 镜像"的升级诉求。
+- 已提交评论：https://github.com/MooreThreads/torch_musa/issues/162#issuecomment-6950049064
+  （2026-11-17 13:53:56Z，作者 `shaojun0`，5192 字符，含根因、head_dim 扫描表、最小复现、
+  `SDPUtils.h` 一行补丁建议、端到端 +8% 规避代价）。
+- 评论正文存档：`COMMENT_torch_musa_162.md`；可直接贴的完整 issue 草稿：`ISSUE_torch_musa_sdpa_bwd.md`。
+- 后续：若维护者要求单独 issue，可用 `ISSUE_torch_musa_sdpa_bwd.md` 直接开（`gh issue create`）。
