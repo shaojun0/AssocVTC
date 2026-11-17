@@ -1,0 +1,42 @@
+{
+ "ckpt": "/root/autodl-tmp/tok448_v2/s2/ckpt_best.pt",
+ "step": 2850,
+ "epoch": 3,
+ "K": 16,
+ "dec_step_plan": "square",
+ "override_dec_steps": "",
+ "override_step_plan": "",
+ "recurrent": false,
+ "T": 1,
+ "steps": [
+  null
+ ],
+ "windows": [
+  null
+ ],
+ "cum_z_s": [
+  16
+ ],
+ "n_images": 5000,
+ "L1_255": [
+  7.983485006713868
+ ],
+ "L1_01": [
+  0.031245115423202515
+ ],
+ "PSNR": [
+  27.324063189697267
+ ],
+ "PSNR_mean_mse": [
+  25.093422158139234
+ ],
+ "delta_L1_255": [],
+ "total_drop_255": 0.0,
+ "best_step": 0,
+ "delta1_share": null,
+ "n_positive_steps": 0,
+ "best_step_hist": [
+  5000
+ ],
+ "const_baseline_255": 51.436994024658205
+}
