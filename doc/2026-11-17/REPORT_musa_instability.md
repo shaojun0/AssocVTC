@@ -1,3 +1,11 @@
+> 🔴 **根因已于同日精确定位并更正**（详见 `REPORT_musa_sdpa_bwd.md`）：
+> 真正的触发条件不是 "bf16"，而是 **muDNN flash kernel 的反向在 `head_dim % 8 != 0` 时算错 dQ/dK**
+> （本仓 enc 1248/16=**78**、dec 1440/16=**90** 全部命中；bf16 与 fp16 错得一样 ⇒ 算法/索引 bug，
+> 与 dtype 无关；前向与 dV 正常）。下文"bf16 SDPA 反向"的描述是当时的近似归因，正确结论以
+> `REPORT_musa_sdpa_bwd.md` 为准；`SDPA_BACKEND=math` 依然是正确的规避手段（它换的是 kernel，
+> 不是精度）。另外实测端到端代价是 **+8%**（1.019 → 1.098 s/step），不是下文写的 +18%。
+> 上游渠道：https://github.com/MooreThreads/torch_musa/issues/162（同机同版本，维护者已回复"正在分析"）。
+
 # MUSA 训练崩溃根因：bf16 SDPA 反向数值坏（2026-11-17）
 
 ## 0. 一句话
@@ -8,7 +16,7 @@
 （梯度尺度和激活变大）这种坏梯度被触发，一次更新就把权重打进高曲率区，随后
 `--skip_grad` 大量跳步、val 一路下滑。
 
-**修复**：训练时把 SDPA 后端钉到 math —— 新加环境变量 `SDPA_BACKEND=math`
+**规避**：训练时把 SDPA 后端钉到 math —— 新加环境变量 `SDPA_BACKEND=math`
 （`train_linattn.py` 启动时设置 `torch.backends.cuda.enable_{flash,mem_efficient}_sdp(False)`
 + `enable_math_sdp(True)`）。224² CUDA 参照配置在 MUSA 上由「ep2 崩」变成完全复现 CUDA。
 
