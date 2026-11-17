@@ -25,8 +25,15 @@ from typing import List, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
+try:                                  # 真 torchvision（CUDA 机器口径不变）
+    from torchvision import transforms
+    from torchvision.transforms import InterpolationMode
+    _ = transforms.Compose            # 空壳 torchvision: 能 import 但没有 Compose
+except (ImportError, AttributeError):
+    # MUSA 训练机（connect.sha1）上的 torchvision 是空壳（__version__='0.0.0',
+    # transforms 里没有 Compose）⇒ 用纯 PIL/torch 的等价替身。
+    import tvmini as transforms
+    from tvmini import InterpolationMode
 from PIL import Image
 
 from model_v2_linattn import IMAGENET_MEAN, IMAGENET_STD

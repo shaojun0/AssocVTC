@@ -40,13 +40,168 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from torchvision.utils import make_grid, save_image
+try:                                  # 真 torchvision（CUDA 机器口径不变）
+    from torchvision.utils import make_grid, save_image
+    _ = make_grid                     # 空壳 torchvision: 能 import 但没有 make_grid
+except (ImportError, AttributeError):
+    # MUSA 训练机（connect.sha1）上的 torchvision 是空壳 ⇒ 纯 PIL/torch 替身
+    from tvmini import make_grid, save_image
 
 from data_linattn import build_loaders
 from metrics_linattn import psnr, ssim, per_patch_dc_baseline
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
                               SRPhase1LinAttn, patches_to_image,
                               parse_loss_weights)
+
+
+# ─────────────────────── 设备适配（MUSA / CUDA） ───────────────────────
+# MUSA 训练机（4×MTT S4000, torch_musa）实测: `torch.cuda` 是 MUSA 的别名
+# （`.to("cuda")`、无参 `.cuda()`、`autocast("cuda")` 都可用），但
+#   * `Tensor.cuda(device)` / `.cuda(non_blocking=True)` / `nn.Module.cuda()`
+#     会报 "takes 1 positional argument"（torch_musa 的 Tensor.cuda 只收 self）
+#   * 集合通信后端是 MCCL（启动脚本里 DDP_BACKEND=mccl）
+# ⇒ 全程改用 `.to(_DEVICE, ...)`；单卡/ DDP 都把 _DEVICE 钉到本 rank 的卡。
+_DEVICE = torch.device("cuda", 0)
+
+
+def _set_device(index: int = 0) -> None:
+    """把 `_DEVICE` 钉到 `cuda:index`（MUSA 下即 musa:index）；CUDA 上等价。"""
+    global _DEVICE
+    _DEVICE = torch.device("cuda", int(index))
+    try:
+        torch.cuda.set_device(int(index))
+    except Exception:
+        pass
+
+
+def _patch_ddp_pre_forward_musa(ddp_model) -> None:
+    """绕开 MUSA 上 DDP 的 c10d logger timer 崩溃（保留 DDP 的 bucket 重叠）。
+
+    torch 2.11 + torch_musa 的 `DDP._pre_forward` 在第二次 forward 调
+    `self.logger.set_runtime_stats_and_log()` → C++ `reducer_->timer_` 空指针
+    assert（timer 只用于日志统计）。`dist.Logger` 是 pybind 类、无法在 Python
+    侧改它的方法，所以这里**逐行照抄 torch 2.11 的 `_pre_forward`**、只删掉那
+    一行 logger 调用；其余（lazy init / bucket rebuild / buffer sync / join /
+    输入搬移 / mixed-precision cast）保持原样。这样 allreduce 仍在 backward
+    里按 bucket 异步执行，通信可与反传重叠。
+    """
+    import types
+    from torch.distributed.algorithms.join import Join
+    from torch.nn.parallel.distributed import _to_kwargs, _cast_forward_inputs
+
+    def _pre_forward(self, *inputs, **kwargs):
+        if self._use_python_reducer:
+            return inputs, kwargs
+        if not self._lazy_init_ran and not torch.compiler.is_compiling():
+            self._lazy_init()
+        if self._delay_all_reduce_all_params:
+            return inputs, kwargs
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            # 原实现: self.logger.set_runtime_stats_and_log()  ← MUSA timer 崩
+            self.reducer.prepare_for_forward()
+        work = Join.notify_join_context(self)
+        if work:
+            self.reducer._set_forward_pass_work_handle(
+                work, self._divide_by_initial_world_size)
+        if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+            self._has_rebuilt_buckets = True
+        if self._check_sync_bufs_pre_fwd():
+            self._sync_buffers()
+        if self._join_config.enable:
+            self._check_global_requires_backward_grad_sync(is_joined_rank=False)
+        if self.device_ids:
+            moved_inputs, moved_kwargs = _to_kwargs(
+                inputs, kwargs,
+                torch.device(self.device_type, self.device_ids[0]),
+                self.use_side_stream_for_tensor_copies)
+            args, kwargs = moved_inputs[0], moved_kwargs[0]
+            if self.mixed_precision is not None:
+                args, kwargs = _cast_forward_inputs(
+                    self.mixed_precision.param_dtype, *args, **kwargs)
+            return args, kwargs
+        if self.mixed_precision is not None:
+            inputs, kwargs = _cast_forward_inputs(
+                self.mixed_precision.param_dtype, *inputs, **kwargs)
+        return inputs, kwargs
+
+    ddp_model._pre_forward = types.MethodType(_pre_forward, ddp_model)
+
+
+class ManualDDP(nn.Module):
+    """DDP 的极简替代（MUSA 上用）：backward 后显式 all_reduce 梯度。
+
+    为什么需要：torch 2.11 + torch_musa 的 DDP 在第二次 forward 触发
+    `reducer_->timer_ INTERNAL ASSERT FAILED`（c10d logger 的 C++ timer 空指针，
+    该 timer 只用于日志统计，不参与梯度同步；`dist.Logger` 是 pybind 类，
+    Python 侧无法 monkeypatch 它的 `set_runtime_stats_and_log`）。
+    这里不复用 DDP，直接用 MCCL 的 `dist.all_reduce` 做梯度平均：
+        * 初始化后从 rank0 广播一遍参数（各 rank seed 相同本已一致，广播只为保险）;
+        * 每个优化步的最后一次 micro-batch 之后对全部 `p.grad` 做 SUM 再 /world;
+        * `no_sync()` 期间只累积本地梯度（等价 DDP 的 no_sync）。
+    语义与 `DistributedDataParallel`（默认 allreduce、梯度取均值）一致；
+    少了 bucket/通信-反传重叠，本模型 486M 参数、单步通信量 ~1.95GB，实测可接受。
+    """
+
+    def __init__(self, module: nn.Module, world: int):
+        super().__init__()
+        self.module = module
+        self.world = int(world)
+        self._require_sync = True
+
+    def forward(self, *a, **kw):
+        return self.module(*a, **kw)
+
+    @contextlib.contextmanager
+    def no_sync(self):
+        old = self._require_sync
+        self._require_sync = False
+        try:
+            yield
+        finally:
+            self._require_sync = old
+
+    def allreduce_gradients(self) -> None:
+        if not self._require_sync or self.world <= 1:
+            return
+        for prm in self.module.parameters():
+            if prm.grad is None:
+                continue
+            dist.all_reduce(prm.grad, op=dist.ReduceOp.SUM)
+            prm.grad.div_(self.world)
+
+
+_DIAG_GRAD = os.environ.get("DIAG_GRAD", "0") == "1"
+
+
+def _grad_group_norms(model) -> dict:
+    """按模块分组统计梯度范数（诊断用; 只有 DIAG_GRAD=1 才调用）。
+
+    用途: 定位「训练后期 grad_norm 爆到几百」到底来自编码器、448 维瓶颈 FC、
+    解码器 memory 投影，还是解码器 stack 的某几层。
+    """
+    groups = {k: 0.0 for k in ("enc", "zs_fc", "dec_mem", "dec_stack0_2",
+                               "dec_stack3_4", "dec_stack5_6", "dec_head",
+                               "other")}
+    for n, prm in model.named_parameters():
+        if prm.grad is None:
+            continue
+        if n.startswith("encoder."):
+            k = "enc"
+        elif n.startswith(("zs_proj.", "zcls_proj.")):
+            k = "zs_fc"
+        elif n.startswith(("decoder.mem_proj.", "decoder.mem_norm.",
+                           "decoder.query_base", "decoder.query_pos")):
+            k = "dec_mem"
+        elif n.startswith("decoder.stack.layers."):
+            i = int(n.split(".")[3])
+            k = "dec_stack0_2" if i < 3 else ("dec_stack3_4" if i < 5
+                                              else "dec_stack5_6")
+        elif n.startswith(("decoder.norm_out.", "decoder.pixel_head.")):
+            k = "dec_head"
+        else:
+            k = "other"
+        groups[k] += float(prm.grad.detach().float().norm()) ** 2
+    return {k: round(v ** 0.5, 3) for k, v in groups.items() if v > 0}
 
 
 # ─────────────────────── 分布式（DDP）辅助 ───────────────────────
@@ -144,7 +299,7 @@ def evaluate(model, loader, patch: int, img_size: int, amp: bool,
     for bi, (x, _) in enumerate(loader):
         if max_batches and bi >= max_batches:
             break
-        x = x.cuda(non_blocking=True)
+        x = x.to(_DEVICE, non_blocking=True)
         if max_images and n_img >= max_images:
             break
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -267,6 +422,9 @@ def parse_args():
                     help="每步新增的生长 token 数（解码器读集合 = [z_s; L_1..L_it]）")
     ap.add_argument("--refiner_steps", type=int, default=0,
                     help="生长步数; 0 = 跟随解码器步数 T")
+    ap.add_argument("--zs_init", default="default", choices=["default", "ortho"],
+                    help="zs_dim 瓶颈初始化: default=nn.Linear 默认; ortho=随机正交"
+                         "子空间投影（从头训窄瓶颈时的稳定性修复, 见 _init_zs_bottleneck_ortho）")
     ap.add_argument("--zs_dim", type=int, default=0,
                     help="编码器末端 FC 瓶颈维数（2026-10-26; 0=关）。zs_dim=448 ⇒ "
                          "每个 z_s token 从 enc_dim 压到 448 维、每步 2×448=896 个数、"
@@ -352,6 +510,45 @@ def build_cfg(args) -> LinAttnConfig:
         refiner_mlp_ratio=float(args.refiner_mlp_ratio),
         refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps),
         zs_dim=int(getattr(args, "zs_dim", 0)))
+
+
+def _init_zs_bottleneck_ortho(model: nn.Module) -> None:
+    """`--zs_dim>0` 且**从头训练**时的瓶颈良态初始化（2026-11-17, MUSA 448 线）。
+
+    现象（实测, 448²/p32, K=16, zs_dim=448, lr 2e-4, warmup 8%）: 默认
+    `nn.Linear` 初始化把 `enc_dim→zs_dim` 的映射方差压得很小（输出 std ≈
+    0.5/√? 量级 ≪1），解码器看到的 z 信号偏弱；训练到 lr≈1.1e-4（epoch3）时
+    grad_norm 从 ~1 爆到 519/1210，42% 优化步被 `--skip_grad` 跳过，val 从
+    13.31 dB 退化到 12.32 dB。同配置 zs_dim=0 的对照则稳定（见 diag A3/B3）。
+
+    修法: 把「编码器末端 FC + 解码器 mem_proj」的**初始复合映射**设成一次
+    随机正交子空间投影，信号既不放大也不塌到噪声底：
+        · zs_proj/zcls_proj: 权重 = Q[:, :d]ᵀ（(d, enc) 行正交; Q 为 enc 维正交阵）
+        · decoder.mem_proj: 权重 = [I_d; 0]（d 维原样放进 dec_dim 的前 d 维）
+    其余层（encoder / decoder stack / pixel head）初始化不变；这些 FC 之后照常
+    参与端到端训练。
+    """
+    zs = getattr(model, "zs_proj", None)
+    if zs is None:
+        return
+    enc, d = int(zs.in_features), int(zs.out_features)
+    gen = torch.Generator(device="cpu").manual_seed(20261117)
+    q, _ = torch.linalg.qr(torch.randn(enc, enc, generator=gen))
+    W = q[:, :d].T.contiguous()                     # (d, enc) 行正交
+    mem = getattr(model.decoder, "mem_proj", None)
+    with torch.no_grad():
+        for m in (model.zs_proj, model.zcls_proj):
+            m.weight.copy_(W.to(m.weight.dtype))
+            m.bias.zero_()
+        if isinstance(mem, nn.Linear) and mem.in_features == d:
+            Wm = torch.zeros_like(mem.weight)
+            n = min(mem.out_features, d)
+            Wm[:n, :n] = torch.eye(n, dtype=Wm.dtype)
+            mem.weight.copy_(Wm)
+            mem.bias.zero_()
+    _p(f"[zs_init] ortho: zs_proj {tuple(W.shape)} 行正交, "
+       f"mem_proj {tuple(mem.weight.shape) if isinstance(mem, nn.Linear) else 'n/a'}",
+       flush=True)
 
 
 def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
@@ -458,7 +655,7 @@ def main():
         # 正常 2 卡: local_rank 即物理卡号。同卡多 rank 的 plumbing 测试
         # (CUDA_VISIBLE_DEVICES 只暴露 1 张卡) 时取模, 两个 rank 都落 device 0。
         dev = local_rank if local_rank < ndev else local_rank % max(1, ndev)
-        torch.cuda.set_device(dev)
+        _set_device(dev)                       # 单卡路径是 .cuda(); MUSA 只认 .to()
         local_rank = dev
         dist.init_process_group(backend=backend)
         assert dist.get_world_size() == world, \
@@ -468,6 +665,9 @@ def main():
               f"backend={backend} device=cuda:{dev}"
               + (" （⚠️ 多 rank 共卡调试: 仅 gloo 可跑, NCCL 会拒绝 Duplicate GPU）"
                  if ndev < world else ""), flush=True)
+
+    if not ddp:
+        _set_device(0)
 
     if _IS_MAIN:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -482,7 +682,9 @@ def main():
     torch.backends.cudnn.benchmark = True
 
     cfg = build_cfg(args)
-    model = SRPhase1LinAttn(cfg).cuda()
+    model = SRPhase1LinAttn(cfg).to(_DEVICE)
+    if args.zs_init == "ortho" and not args.init_from:
+        _init_zs_bottleneck_ortho(model)
     if args.init_from:
         load_init_from(model, args.init_from)
     if args.freeze_encoder:
@@ -515,9 +717,26 @@ def main():
     _p(f"[params] {pc}", flush=True)
 
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
+    use_manual_ddp = False
     if ddp:
-        model = DDP(raw_model, device_ids=[local_rank],
-                    find_unused_parameters=True)
+        impl = os.environ.get("DDP_IMPL", "auto").lower()
+        is_musa = hasattr(torch, "musa") and torch.musa.is_available()
+        if impl == "manual" or (impl == "auto" and is_musa):
+            # MUSA 默认走 ManualDDP（不依赖 DDP 的 c10d logger）；若想要
+            # DDP 的 bucket/通信-反传重叠，设 DDP_IMPL=patched 走下面的补丁路径。
+            if impl == "auto":
+                use_manual_ddp = True
+                model = ManualDDP(raw_model, world)
+                for prm in raw_model.parameters():
+                    dist.broadcast(prm.data, src=0)
+            else:
+                model = DDP(raw_model, device_ids=[local_rank],
+                            find_unused_parameters=True)
+        else:
+            model = DDP(raw_model, device_ids=[local_rank],
+                        find_unused_parameters=True)
+            if is_musa:
+                _patch_ddp_pre_forward_musa(model)
 
     accum = max(1, int(args.accum_steps))
     # ★ `--batch_size` 恒为**全局等效批量**: 每卡 micro = batch_size/(accum×world)。
@@ -619,7 +838,7 @@ def main():
             lr = lr_at(step, total_steps, warmup, args.lr, args.min_lr)
             for g in opt.param_groups:
                 g["lr"] = lr
-            x = x.cuda(non_blocking=True)
+            x = x.to(_DEVICE, non_blocking=True)
             if bi % accum == 0:
                 opt.zero_grad(set_to_none=True)
                 loss_sum, rec_sum = 0.0, 0.0
@@ -637,6 +856,11 @@ def main():
             rec_sum += float(out["recon"].item())
             if not last_micro:
                 continue                    # 累积未满 ⇒ 不做优化步
+            if use_manual_ddp:               # MUSA: 梯度平均（等价 DDP 的 allreduce）
+                model.allreduce_gradients()
+            if _DIAG_GRAD and _IS_MAIN:
+                _p(f"[gdiag] step {step} {_grad_group_norms(raw_model)}",
+                   flush=True)
             if args.grad_clip > 0:
                 gn = torch.nn.utils.clip_grad_norm_(
                     [prm for prm in raw_model.parameters() if prm.requires_grad],
