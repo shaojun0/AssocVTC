@@ -8,13 +8,14 @@
 > 远端机器目录（`/root/autodl-tmp/srdiff_*`、`/data/srdiff-20260926/…`）、模块名 `srdiff_runtime.py`、环境变量 `SRDIFF_*`、
 > 看板变量 `SRDASH_ROOT`（改它们会断代码与在跑的实验，且会篡改历史证据）。
 
-## 目录速查（2026-11-16 更新）
+## 目录速查（2026-11-17 更新）
 
 | 入口 | 说明 |
 |---|---|
 | `model_v10.py` | **v10 全片段循环读出视频模型**（唯一宽度 1792 = 4 token × 448，零填充；每步读一组 z、重出整段 120 帧；率 7,168 值/帧、目标全量 token）。`V10Config`/`VideoV10` 是 `PretrainedConfig`/`PreTrainedModel` 且带 `auto_map`，checkpoint 可直接 `AutoModel.from_pretrained(dir, trust_remote_code=True)`。自检 `python model_v10.py`（含一次 save→AutoModel 往返）；训练见 `train_v10.py`（HF Trainer，`--deepspeed ds_zero2_v10.json` 可多卡） |
 | `train_v10.py` / `data_v10.py` | v10 训练脚本 / 120 帧（15 s @8 fps, 448²）片段数据集 |
 | `doc/2026-11-16/DESIGN_v10_video_whole_clip.md` | v10 设计定稿：决策记录、形状与值数、为什么"率 < 目标"、编码器重训方案、诚实边界 |
+| `doc/2026-11-17/FEATURE_v10_stream_embodied.md` | **v10 流式化（具身组件）feature 提案**：把 `TemporalMiddle` 从"攒满 120 帧"改成"帧到即算"。帧级因果 ⇒ 历史 KV 可缓存 ⇒ 增量与全量**实测等价 7.2e-07**，P0 零训练；含 P1 时间偏置 / P2 有界记忆 / P3 动作条件与资源账。**设计稿，未实现** |
 | `model_v2_linattn.py` / `train_linattn.py` | 图像分词器（论文三阶段 A/B/S3），v10 冻结的上游；含并行读出 `--dec_parallel` 与 `--stop_at_step` |
 
 ## 0. 项目目标与核心思路
