@@ -172,6 +172,27 @@ class ManualDDP(nn.Module):
 
 _DIAG_GRAD = os.environ.get("DIAG_GRAD", "0") == "1"
 
+# ── SDPA 后端选择（2026-11-17: MUSA 上 bf16 的 flash/mem-efficient 反向数值不稳）──
+# 实测（doc/2026-11-17/REPORT_musa_instability.md）: 同一权重、同一 batch 下，
+# bf16-autocast 的编码器梯度可比 fp32 大 30–230 倍；换 math 后端后该差异基本消失。
+# SDPA_BACKEND=math|flash|mem_efficient（空 = 不干预，CUDA 机器默认行为不变）。
+_SDPA_BACKEND = os.environ.get("SDPA_BACKEND", "").strip().lower()
+if _SDPA_BACKEND:
+    try:
+        if _SDPA_BACKEND == "math":
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+        elif _SDPA_BACKEND == "flash":
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        elif _SDPA_BACKEND == "mem_efficient":
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+        print(f"[sdpa] backend={_SDPA_BACKEND}", flush=True)
+    except Exception as _e:            # CUDA 老版本无这些开关时静默降级
+        print(f"[sdpa] 设置 {_SDPA_BACKEND} 失败（忽略）: {_e}", flush=True)
+
 
 def _grad_group_norms(model) -> dict:
     """按模块分组统计梯度范数（诊断用; 只有 DIAG_GRAD=1 才调用）。
