@@ -112,6 +112,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dec_ratio", type=float, default=2.0)
     p.add_argument("--step_gate", type=int, default=1)
     p.add_argument("--step_weights", type=str, default="mean")
+    p.add_argument("--loss_read", type=int, default=0,
+                   help="1 = 第 t 步只在已读帧上算 loss（配合 --mem_mode prefix 去掉均值平凡解）")
+    p.add_argument("--copy_skip", type=int, default=1,
+                   help="1 = prefix 模式下已读帧 direct-copy 残差（默认开）")
+    p.add_argument("--mem_mode", type=str, default="step", choices=["step", "prefix"],
+                   help="读出侧 cross-attn 的 memory：step=只看当步 z_t（设计原版）；"
+                        "prefix=看已读前缀（每步重出全片时可把读过的帧直接抄过来）")
     # 优化（全部转发给 TrainingArguments）
     p.add_argument("--batch", type=int, default=2, help="每卡 micro-batch")
     p.add_argument("--accum_steps", type=int, default=2)
@@ -166,7 +173,9 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         mid_dim=a.mid_dim, mid_depth=a.mid_depth, mid_heads=a.mid_heads,
         mid_ratio=a.mid_ratio, dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
-        step_gate=bool(a.step_gate), step_weights=a.step_weights)
+        step_gate=bool(a.step_gate), step_weights=a.step_weights,
+        mem_mode=a.mem_mode, loss_read=bool(a.loss_read),
+        copy_skip=bool(a.copy_skip))
 
 
 def collate_clips(batch):

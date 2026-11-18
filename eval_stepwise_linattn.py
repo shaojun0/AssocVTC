@@ -47,6 +47,17 @@ from metrics_linattn import psnr
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
                               SRPhase1LinAttn, patches_to_image)
 
+# ── SDPA 后端（与训练同口径；MUSA 上 flash 反向在 head_dim%8!=0 时坏，
+#    前向虽正常，但为了数值与训练完全一致，评测同样钉 math。见
+#    doc/2026-11-17/REPORT_musa_sdpa_bwd.md）──
+_SDPA_BACKEND = os.environ.get("SDPA_BACKEND", "").strip().lower()
+if _SDPA_BACKEND == "math":
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+    print("[sdpa] backend=math", flush=True)
+
+
 MEAN_255 = tuple(v * 255.0 for v in IMAGENET_MEAN)
 STD_255 = tuple(v * 255.0 for v in IMAGENET_STD)
 

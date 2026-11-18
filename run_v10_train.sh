@@ -1,6 +1,7 @@
 #!/bin/bash
-# v10 正式训练：32k 片段 × 120 帧(15s@8fps) × 448²，率 16×448 = 7168 值/帧
+# v10 正式训练（2026-11-18）：32k 片段 × 120 帧(15s@8fps) × 448²，率 16×448 = 7168 值/帧
 # 4×MTT S4000，bf16，DDP(mccl)+SDPA math；输入是离线缓存的 (z_cls, z_s)。
+# 读出：prefix memory + 直抄残差 + 只在已读帧上算 loss（见 doc/2026-11-18/PLAN_v10_120f_video.md §1.1）
 set -u
 cd /root/AssocVTC_v10
 export SDPA_BACKEND=math
@@ -19,8 +20,9 @@ exec torchrun --nproc_per_node=4 --master_port=29553 train_v10.py \
   --mid_ratio 2 --mid_depth 6 --mid_heads 16 \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
   --step_gate 1 --step_weights mean \
-  --batch 2 --accum_steps 4 \
-  --lr 2e-4 --weight_decay 0.05 --warmup_frac 0.05 --grad_clip 1.0 \
-  --max_steps 6000 --amp 1 --log_every 20 \
-  --val_every 250 --val_batches 2 --psnr_eval 1 \
+  --mem_mode prefix --loss_read 1 --copy_skip 1 \
+  --batch 2 --accum_steps 2 \
+  --lr 8e-4 --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
+  --max_steps 4000 --amp 1 --log_every 20 \
+  --val_every 200 --val_batches 2 --psnr_eval 1 \
   --save_every 500 --save_total_limit 2 --num_workers 6

@@ -126,6 +126,10 @@ class V10Config:
     dec_drop: float = 0.0
     step_gate: bool = True     # γ 零初始化门控
     step_weights: str = "mean"
+    mem_mode: str = "step"     # "step" = 每步只看 z_t（设计原版）; "prefix" = 看已读前缀
+    loss_read: bool = False    # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
+    copy_skip: bool = True     # prefix 模式：已读帧的 rate 行直抄到输出（残差捷径）
+
 
     @property
     def n_steps(self) -> int:
@@ -344,7 +348,27 @@ class WholeClipDecoder(nn.Module):
         # 查询与状态（整片段一条序列）
         self.Q = nn.Parameter(torch.randn(1, L, self.d) * 0.02)
         self.step_emb = nn.Parameter(torch.randn(1, self.S, 1, self.d) * 0.02)
-        self.kv_pos = nn.Parameter(torch.randn(1, self.P, self.d) * 0.02)
+        self.mem_mode = str(getattr(cfg, "mem_mode", "step")).lower()
+        # prefix 模式下 kv_pos 用不到：不建它，否则 DDP 会因为「有参数不参与
+        # loss」在第二次迭代报 "Expected to have finished reduction"。
+        self.kv_pos = (nn.Parameter(torch.randn(1, self.P, self.d) * 0.02)
+                       if self.mem_mode != "prefix" else None)
+        if self.mem_mode == "prefix":
+            # 前缀读出（2026-11-18 诊断后新增）：第 t 步 cross-attn 的 key 是
+            # **已读过的前 (t+1) 组 z**（每组 group 帧 × rows_rate 行），并给
+            # key 与 query 都加「帧位置 + 行号」嵌入 ⇒ "把读过的帧抄到对应输出
+            # 位置" 变成一步可学的映射，不再依赖 30 步递推去搬运整段信息。
+            rr = int(self.P // int(cfg.group))                # 每帧 rows_rate 行
+            self.frame_emb = nn.Parameter(torch.randn(1, self.F, 1, self.d) * 0.02)
+            self.row_emb = nn.Parameter(torch.randn(1, 1, rr, self.d) * 0.02)
+            self.start_emb = nn.Parameter(torch.randn(1, 1, self.d) * 0.02)
+            qf = torch.arange(L, dtype=torch.long) // self.R - 1     # -1 = 起始槽
+            self.register_buffer("_qframe", qf, persistent=False)
+        # prefix 模式默认开「直抄残差」：输出行 0..rr-1 += 已读帧的 rate 行。
+        # 没有它时实测训练会塌到「与输入无关的模板」（middle 输出跨片段 std
+        # 从 0.29 崩到 0.015，pred 完全不吃 memory），因为均值解是局部极小。
+        self.copy_skip = bool(self.mem_mode == "prefix" and
+                              bool(getattr(cfg, "copy_skip", True)))
         self.gate = (nn.Parameter(torch.zeros(self.S)) if cfg.step_gate else None)
         self.n_in = nn.LayerNorm(self.d)
         layer = nn.TransformerDecoderLayer(
@@ -361,10 +385,18 @@ class WholeClipDecoder(nn.Module):
             ~allowed, float("-inf"))
         self.register_buffer("_mask", mask, persistent=False)
 
-    def _split(self, Y: Tensor) -> Tuple[Tensor, Tensor]:
-        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。"""
+    def _split(self, Y: Tensor, resid: Optional[Tensor] = None
+               ) -> Tuple[Tensor, Tensor]:
+        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。
+
+        `resid` (B,F,R,d) 是 prefix 模式的**直抄残差**：把已经读到的 rate 行
+        原样加到输出行上（第 r 行 = 该帧第 r 个 rate 行），写第一个 special
+        不需要任何学习；未读帧的残差为 0。
+        """
         B = Y.shape[0]
         Y = Y.view(B, self.F + 1, self.R, self.d)[:, 1:]    # 丢掉随机起始槽
+        if resid is not None:
+            Y = Y + resid
         spec = Y[:, :, :self.R - 1].reshape(B, self.F, self.K, self.code_dim)
         cls = self.cls_head(Y[:, :, self.R - 1]).unsqueeze(2)
         return spec, cls
@@ -376,19 +408,46 @@ class WholeClipDecoder(nn.Module):
         assert P == self.P, (P, self.P)
         n = self.S if n_steps is None else int(n_steps)
         assert 1 <= n <= S, (n, S)
-        kv_all = z + self.kv_pos                             # (B,S,P,d)，等宽投影
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
-        mask = self._mask.to(dtype=kv_all.dtype)
+        mask = self._mask.to(dtype=z.dtype)
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
+        prefix = (self.mem_mode == "prefix")
+        if prefix:
+            grp = int(self.cfg.group)
+            rr = int(self.P // grp)                          # 每帧 rows_rate 行
+            assert grp * rr == self.P and self.F * rr == self.S * self.P, (grp, rr)
+            zr = z.reshape(B, self.F, rr, self.d)            # (B,F,rows_rate,d)
+            fem = self.frame_emb.reshape(self.F, self.d)
+            qf = self._qframe
+            qe = fem[qf.clamp(min=0)]                        # (L,d)
+            qe = torch.where((qf >= 0).unsqueeze(-1), qe,
+                             self.start_emb.reshape(1, self.d).expand_as(qe))
+        else:
+            kv_all = z + self.kv_pos                         # (B,S,P,d)，等宽投影
         specs: List[Tensor] = []
         clss: List[Tensor] = []
         for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
             h = self.n_in(Q + w * Y) + self.step_emb[:, t]
-            Y = self.decoder(tgt=h, memory=kv_all[:, t], tgt_mask=mask)
-            spec, cls = self._split(self.norm_out(Y))
+            if prefix:
+                nf = min(self.F, (t + 1) * grp)              # 已读帧数
+                keys = (zr[:, :nf]
+                        + self.frame_emb[:, :nf].reshape(1, nf, 1, self.d)
+                        + self.row_emb)                       # (B,nf,rr,d)
+                keys = keys.reshape(B, nf * rr, self.d)
+                Y = self.decoder(tgt=h + qe, memory=keys, tgt_mask=mask)
+                # 直抄残差：已读帧的 rate 行原样回填到输出行（读到的帧立刻
+                # 精确可出，不需要模型"学会抄"；未读帧为 0，留给模型预测）
+                resid = None
+                if self.copy_skip:
+                    resid = z.new_zeros(B, self.F, self.R, self.d)
+                    resid[:, :nf, :rr] = zr[:, :nf]
+            else:
+                Y = self.decoder(tgt=h, memory=kv_all[:, t], tgt_mask=mask)
+                resid = None
+            spec, cls = self._split(self.norm_out(Y), resid)
             specs.append(spec)
             clss.append(cls)
         out = dict(pred=torch.cat([clss[-1], specs[-1]], dim=2),
@@ -492,7 +551,19 @@ class VideoV10(nn.Module):
         out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True)
         preds = out["preds"]                                     # (B,S',F,T,c)
         B, S1 = preds.shape[:2]
-        per_step = (preds - target.unsqueeze(1)).abs().mean(dim=(2, 3, 4))  # (B,S1)
+        err = (preds - target.unsqueeze(1)).abs()                # (B,S',F,T,c)
+        if self.cfg.loss_read:
+            # 只惩罚「第 t 步已经读到的帧」（前缀 t+1 组）。均值平凡解在已读帧
+            # 上不再是解：读到的帧必须被抄出来，梯度不再被"不可知的未来帧"淹没。
+            F = err.shape[2]
+            grp = int(self.cfg.group)
+            nf = (torch.arange(S1, device=err.device) + 1) * grp  # (S',) 已读帧数
+            frame = torch.arange(F, device=err.device)
+            m = (frame[None, :] < nf[:, None]).to(err.dtype)      # (S',F)
+            per_frame = err.mean(dim=(3, 4))                      # (B,S',F)
+            per_step = (per_frame * m).sum(-1) / m.sum(-1).clamp_min(1)
+        else:
+            per_step = err.mean(dim=(2, 3, 4))                   # (B,S1)
         w = self.step_weights(S1, self.cfg.step_weights, per_step.device)
         loss = (per_step.mean(dim=0) * w).sum()
         res = dict(loss=loss, l1=per_step.detach().mean(),
