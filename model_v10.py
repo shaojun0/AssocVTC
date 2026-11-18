@@ -42,12 +42,21 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
                  reshape → z (B,30,16,1792)（4 帧 × 4 行 = 每步 16 行）
     readout      Q（可学习，随机初始化）(1,1089,1792)；γ_0 = 0
                  for t in 0..29:
-                     h    = LN(Q + γ_t·Y_{t-1}) + step_emb[t]
+                     h    = Q + γ_t·Y_{t-1} + step_emb[t]   # carry 同 v2：无 LN
                      Y_t  = Decoder(h, z_t)     帧级因果 self-attn + cross-attn(16×1792)
                      pred = LN(Y_t) → 后 120 帧 × 9 行
                           8 行 reshape 成 32×448；第 9 行过 cls_head 成 z_cls
                  loss = mean_t L1(pred_t, 冻结编码器给的全量 33 token)
     R（冻结）    用 pred_30 的 (z_cls, 32 special) 还原像素，用于 PSNR
+
+2026-11-18 与 v2 对齐（远端 946226d 口径）
+------------------------------------------
+循环骨架与 `model_v2.OutputQueryDecoder` 保持一致：
+  * carry = `Q + Y_{t-1}`（**不加 LN**；默认也没有 γ 门控，即等权相加）；
+  * 读出侧 self-attn **全双向、无 tgt_mask**（streaming 由「第 t 步 memory 只有
+    前 t+1 组 z」保证，不靠 self-attn mask）；
+旧版（LN + γ + 帧级因果 mask，2026-11-16）可用 `--carry_ln 1 --step_gate 1
+--readout_mask 1` 显式打开，仅用于复现历史产物。
 
 为什么「率 < 目标」
 ------------------
@@ -62,7 +71,9 @@ chunk_tokens    一个向量拼几个 token（默认 4 ⇒ 宽度 1792，不允�
 target_tokens   目标 special 数；本版必须等于 num_specials（冻结 R 要全量）
 group           z 步覆盖帧数（4 → 30 步，2 fps 潜在帧）
 mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"投影到别的宽度"
-step_gate       是否用零初始化门控 γ（默认开：训练起点等价于单步读出）
+step_gate       是否用零初始化门控 γ（默认关 = w≡1，carry 与 v2 等权相加）
+carry_ln         carry 处是否加 LayerNorm（默认 0；v2 口径 = 不加）
+readout_mask     读出 self-attn 是否帧级因果（默认 0 = 全双向，同 v2）
 step_weights    逐步损失权重（"mean" 平权 | "lin" 线性加权到末步）
 
 自检：``python model_v10.py``（CPU 可跑，不需要 ckpt）
@@ -70,7 +81,7 @@ step_weights    逐步损失权重（"mean" 平权 | "lin" 线性加权到末步
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -124,7 +135,9 @@ class V10Config:
     dec_heads: int = 16
     dec_ratio: float = 2.0
     dec_drop: float = 0.0
-    step_gate: bool = True     # γ 零初始化门控
+    step_gate: bool = False    # γ 零初始化门控（默认关 = w≡1，同 v2 的 query_base + Y）
+    carry_ln: bool = False     # carry 处是否加 LayerNorm（默认关；v2 口径 = 不加）
+    readout_mask: bool = False # 读出 self-attn 是否用帧级因果 mask（默认关 = 全双向，同 v2）
     step_weights: str = "mean"
     mem_mode: str = "step"     # "step" = 每步只看 z_t（设计原版）; "prefix" = 看已读前缀
     loss_read: bool = False    # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
@@ -315,8 +328,8 @@ class WholeClipDecoder(nn.Module):
     """(frames+1) 行 × rows_pred 列的 1792 向量 + 30 步循环：每步读一组 z、重出整段。
 
     每步结构：
-        h      = LN(Q + γ_t·Y_{t-1}) + step_emb[t]   γ 零初始化 ⇒ 起点=单步
-        Y      = TransformerDecoder(h, z_t)          帧级因果 self-attn + cross-attn
+        h      = Q + γ_t·Y_{t-1} + step_emb[t]       carry 同 v2：无 LN、默认 w≡1
+        Y      = TransformerDecoder(h, z_t)          全双向 self-attn（无 tgt_mask）+ cross-attn
         pred_t = LN(Y) 拆成 8 个 chunk（32 个 special）+ 1 行 z_cls
 
     位置数 = 121 × 9 = 1089：120 帧 + 1 个随机初始化起始槽，每帧 9 行 1792
@@ -372,7 +385,9 @@ class WholeClipDecoder(nn.Module):
         # 是未读帧由 30 步递推 Y 还是由前缀 cross-attn 预测。
         self.copy_skip = bool(getattr(cfg, "copy_skip", True))
         self.gate = (nn.Parameter(torch.zeros(self.S)) if cfg.step_gate else None)
-        self.n_in = nn.LayerNorm(self.d)
+        # carry 对齐 v2（946226d）：默认**不加** LN，h = Q + γ·Y + step_emb；
+        # cfg.carry_ln=True 时才保留 2026-11-16 旧版的手写 LN。
+        self.n_in = nn.LayerNorm(self.d) if cfg.carry_ln else None
         layer = nn.TransformerDecoderLayer(
             d_model=self.d, nhead=int(cfg.dec_heads),
             dim_feedforward=int(self.d * cfg.dec_ratio), dropout=cfg.dec_drop,
@@ -381,11 +396,17 @@ class WholeClipDecoder(nn.Module):
             layer, num_layers=int(cfg.dec_depth), norm=None)
         self.norm_out = nn.LayerNorm(self.d)
         self.cls_head = nn.Linear(self.d, self.code_dim)    # 只有 z_cls 需要投影
-        fi = torch.arange(L) // self.R                      # 位置 → 帧号（0=起始槽）
-        allowed = fi[None, :] <= fi[:, None]                # True = 可看
-        mask = torch.zeros(L, L, dtype=torch.float32).masked_fill(
-            ~allowed, float("-inf"))
-        self.register_buffer("_mask", mask, persistent=False)
+        # 读出 self-attn：默认**全双向、无 tgt_mask**（同 v2 的 OutputQueryDecoder，
+        # 946226d 口径）；streaming 由「第 t 步 memory 只有前 t+1 组 z」保证，
+        # 不靠 self-attn mask。cfg.readout_mask=True 时才加旧版帧级因果 mask。
+        if cfg.readout_mask:
+            fi = torch.arange(L) // self.R                  # 位置 → 帧号（0=起始槽）
+            allowed = fi[None, :] <= fi[:, None]            # True = 可看
+            mask = torch.zeros(L, L, dtype=torch.float32).masked_fill(
+                ~allowed, float("-inf"))
+            self.register_buffer("_mask", mask, persistent=False)
+        else:
+            self._mask = None
 
     def _split(self, Y: Tensor, resid: Optional[Tensor] = None
                ) -> Tuple[Tensor, Tensor]:
@@ -412,7 +433,7 @@ class WholeClipDecoder(nn.Module):
         assert 1 <= n <= S, (n, S)
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
-        mask = self._mask.to(dtype=z.dtype)
+        mask = None if self._mask is None else self._mask.to(dtype=z.dtype)
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
         prefix = (self.mem_mode == "prefix")
@@ -433,7 +454,9 @@ class WholeClipDecoder(nn.Module):
         clss: List[Tensor] = []
         for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
-            h = self.n_in(Q + w * Y) + self.step_emb[:, t]
+            carry = Q + w * Y                                # = v2 的 query_base + Y
+            h = (self.n_in(carry) if self.n_in is not None else carry) \
+                + self.step_emb[:, t]
             nf = min(self.F, (t + 1) * grp)                  # 已读帧数
             if prefix:
                 keys = (zr[:, :nf]
@@ -678,8 +701,16 @@ if __name__ == "__main__":
     assert all(float(d[t]) == 0.0 for t in range(k)), d
     assert float(d[k]) > 1e-6 and float(d[-1]) > 1e-6, d
 
-    # γ 零初始化 ⇒ 第 0 步的读出与 Y 无关（起点=单步读出）
-    assert m.readout.gate is not None and float(m.readout.gate.abs().max()) == 0.0
+    # 默认 = v2 对齐口径：carry 无 LN、无 γ 门控、读出 self-attn 全双向无 mask
+    assert m.readout.n_in is None, "默认 carry 不该有 LN（v2 口径）"
+    assert m.readout._mask is None, "默认读出不该有 tgt_mask（v2 口径）"
+    assert m.readout.gate is None, "默认不该建 γ 门控（w≡1，= v2 的 query_base + Y）"
+    print("[v2-aligned] carry 无 LN、无 γ、读出全双向（无 tgt_mask）✓")
+
+    # 显式打开 step_gate 时，γ 零初始化 ⇒ 第 0 步的读出与 Y 无关（起点=单步读出）
+    cfg_g = V10Config(**{**asdict(cfg), "step_gate": True})
+    rd = WholeClipDecoder(cfg_g, code_dim=cfg.rate_dim, num_specials=cfg.target_tokens)
+    assert rd.gate is not None and float(rd.gate.abs().max()) == 0.0
     print("[gate] γ 零初始化 ✓")
 
     # 小步过拟合：20 步内 loss 应下降

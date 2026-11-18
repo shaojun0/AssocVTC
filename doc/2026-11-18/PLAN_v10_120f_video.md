@@ -224,3 +224,19 @@ ssh sha1 'cd /root/AssocVTC_v10 && SDPA_BACKEND=math MUSA_VISIBLE_DEVICES=0 \
   细节」的额外收益（设计文档 §3 的论证在 K=16 下不成立）。
 - loss 是 latent L1，不是像素指标；像素 PSNR 只经冻结 R 渲染后计算。
 - 单 seed；val 1142 条里取 2 条做训练中监控、60 条做逐档评测。
+
+### 1.3.1 处置（2026-11-18 17:30）：main 的 model_v10 已对齐 v2，旧 run 停掉重训
+
+- **停掉**旧读出的全量 run（`v10_120f_step`，旧 run 到 832/4000，日志
+  `logs/v10_train_step.log` 保留）；旧 prefix 产物（27.98 dB）仍保留在 `v10_120f`。
+- `model_v10.py` 读出按 946226d 口径改：**carry 无 LN**（`h = Q + Y + step_emb`）、
+  **默认无 γ 门控**（w≡1）、**读出 self-attn 全双向无 tgt_mask**；三者各留一个
+  开关（`--carry_ln / --step_gate / --readout_mask`，默认 0），只为复现 2026-11-16
+  旧产物/做消融；`run_v10_train.sh`（27.98 dB 配方）已显式打开旧开关。
+- `eval_v10_stepwise.py`：按权重自动检测旧 ckpt 的 `carry_ln`/`readout_mask`，
+  历史 ckpt 仍可严格加载评测。
+- **新 run**：`MEM=step COPY=1 LOSSREAD=1 STEPGATE=0 CARRYLN=0 MASK=0`，
+  与旧 run 只差架构（监督配方不变，控制变量），输出
+  `/root/autodl-tmp/tok448_v2/v10_120f_v2align`，日志 `logs/v10_train_v2align.log`，
+  2.42 s/step，ETA ≈ 2 h 42 min。
+- 待办：v2-pure 对照（`COPY=0 LOSSREAD=0`，全程平权监督、无 shortcut）作为第二组。
