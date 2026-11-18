@@ -54,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip", type=int, default=0,
                    help="缓存全局下标（= ClipDataset train 下标，缓存是按同序切的）")
     p.add_argument("--arch", choices=["prefix", "step"], default="prefix")
+    p.add_argument("--mid_mode", choices=["packed", "crossq"], default="packed",
+                   help="中间态结构（crossq = 实验 A 的双向交叉查询）")
     p.add_argument("--copy_skip", type=int, default=1)
     p.add_argument("--loss_read", type=int, default=1)
     p.add_argument("--steps", type=int, default=800)
@@ -88,6 +90,7 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         tok_ckpt=a.tok_ckpt, frames=120, group=4,
         rate_tokens=16, rate_dim=448, target_tokens=16, chunk_tokens=2,
         mid_dim=0, mid_depth=6, mid_heads=16, mid_ratio=2.0,
+        mid_mode=a.mid_mode,
         dec_dim=0, dec_depth=4, dec_heads=16, dec_ratio=2.0, dec_drop=0.0,
         step_gate=True, step_weights="mean",
         mem_mode=a.arch, loss_read=bool(a.loss_read),

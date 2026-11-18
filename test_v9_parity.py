@@ -25,25 +25,30 @@ COMMON = dict(frames=8, group=4, rate_tokens=4, rate_dim=C, target_tokens=K,
               mid_ratio=2.0, dec_depth=2, dec_heads=2, dec_ratio=2.0)
 
 
+OLD = dict(step_gate=True, carry_ln=True, readout_mask=True)   # v9 历史口径
+ALIGNED = dict(step_gate=False, carry_ln=False, readout_mask=False)  # v2 对齐口径
+
+
 def check_readout() -> None:
-    c10 = V10Config(**COMMON, mem_mode="prefix", loss_read=True, copy_skip=True)
-    c9 = V9Config(**COMMON, loss_read=True, copy_skip=True)
-    torch.manual_seed(0)
-    r10 = WholeClipDecoder(c10, code_dim=C, num_specials=K)
-    torch.manual_seed(0)
-    r9 = ParallelReadout(c9, code_dim=C, num_specials=K)
-    sd10, sd9 = r10.state_dict(), r9.state_dict()
-    assert set(sd10) == set(sd9), (set(sd10) ^ set(sd9))
-    r9.load_state_dict(sd10)                       # 直接搬权重
-    z = torch.randn(2, c10.n_steps, c10.chunks_per_step, c10.width)
-    o10 = r10(z, return_step_preds=True)
-    o9 = r9(z, return_step_preds=True)
-    for k in ("pred", "preds"):
-        d = (o10[k] - o9[k]).abs().max().item()
-        assert d == 0.0, (k, d)
-    print(f"[ok] ParallelReadout == WholeClipDecoder(prefix)  "
-          f"params={sum(p.numel() for p in r9.parameters())/1e3:.1f}K  "
-          f"max|Δ|={0.0}")
+    for tag, flags in (("old", OLD), ("aligned", ALIGNED)):
+        c10 = V10Config(**COMMON, mem_mode="prefix", loss_read=True,
+                        copy_skip=True, **flags)
+        c9 = V9Config(**COMMON, loss_read=True, copy_skip=True, **flags)
+        torch.manual_seed(0)
+        r10 = WholeClipDecoder(c10, code_dim=C, num_specials=K)
+        torch.manual_seed(0)
+        r9 = ParallelReadout(c9, code_dim=C, num_specials=K)
+        sd10, sd9 = r10.state_dict(), r9.state_dict()
+        assert set(sd10) == set(sd9), (set(sd10) ^ set(sd9))
+        r9.load_state_dict(sd10)                   # 直接搬权重
+        z = torch.randn(2, c10.n_steps, c10.chunks_per_step, c10.width)
+        o10 = r10(z, return_step_preds=True)
+        o9 = r9(z, return_step_preds=True)
+        for k in ("pred", "preds"):
+            d = (o10[k] - o9[k]).abs().max().item()
+            assert d == 0.0, (tag, k, d)
+        print(f"[ok] {tag}: ParallelReadout == WholeClipDecoder(prefix)  "
+              f"params={sum(p.numel() for p in r9.parameters())/1e3:.1f}K  max|Δ|=0")
 
 
 def check_video() -> None:
@@ -53,9 +58,9 @@ def check_video() -> None:
                    pixel_hidden=32, zs_dim=C, dec_recurrent=False,
                    dec_steps="1", dec_step_plan="square")
     c10 = V10Config(tok_ckpt="", tok_cfg=tok_cfg, **COMMON,
-                    mem_mode="prefix", loss_read=True, copy_skip=True)
+                    mem_mode="prefix", loss_read=True, copy_skip=True, **OLD)
     c9 = V9Config(tok_ckpt="", tok_cfg=tok_cfg, **COMMON,
-                  loss_read=True, copy_skip=True)
+                  loss_read=True, copy_skip=True, **OLD)
     m9 = VideoV9(c9).eval()
     m10 = VideoV10(c10).eval()
     m10.load_state_dict(m9.state_dict())           # v9 → v10 权重

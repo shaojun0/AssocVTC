@@ -121,8 +121,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--readout_mask", type=int, default=0,
                    help="1 = 读出 self-attn 帧级因果 mask（旧版）；默认 0 = 全双向（v2 口径）")
     p.add_argument("--step_weights", type=str, default="mean")
-    p.add_argument("--loss_read", type=int, default=0,
-                   help="1 = 第 t 步只在已读帧上算 loss（配合 --mem_mode prefix 去掉均值平凡解）")
+    p.add_argument("--loss_read", type=int, default=1,
+                   help="1 = 第 t 步只在已读帧上算 loss（去掉均值平凡解；v10 配方默认开）")
+    p.add_argument("--loss_frame_norm", type=int, default=0,
+                   help="1 = loss_read 时按帧归一化（消掉早期帧权重 ~120×后期帧的偏差）")
     p.add_argument("--copy_skip", type=int, default=1,
                    help="1 = 已读帧 direct-copy 残差（prefix/step 都支持，默认开）")
     p.add_argument("--init_trainable", type=str, default="",
@@ -189,6 +191,7 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         step_gate=bool(a.step_gate), step_weights=a.step_weights,
         carry_ln=bool(a.carry_ln), readout_mask=bool(a.readout_mask),
         mem_mode=a.mem_mode, loss_read=bool(a.loss_read),
+        loss_frame_norm=bool(a.loss_frame_norm),
         copy_skip=bool(a.copy_skip))
 
 

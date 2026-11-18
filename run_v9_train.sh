@@ -21,7 +21,7 @@ exec torchrun --nproc_per_node=4 --master_port=29553 train_v9.py \
   --rate_tokens 16 --rate_dim 448 --target_tokens 16 --chunk_tokens 2 \
   --mid_ratio 2 --mid_depth 6 --mid_heads 16 \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
-  --step_gate 1 --step_weights mean \
+  --step_gate 1 --carry_ln 1 --readout_mask 1 --step_weights mean \
   --loss_read 1 --copy_skip 1 \
   --batch 2 --accum_steps 2 \
   --lr 8e-4 --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \

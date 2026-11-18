@@ -114,7 +114,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dec_depth", type=int, default=4)
     p.add_argument("--dec_heads", type=int, default=16)
     p.add_argument("--dec_ratio", type=float, default=2.0)
-    p.add_argument("--step_gate", type=int, default=1)
+    p.add_argument("--step_gate", type=int, default=1,
+                   help="1 = carry 处零初始化 γ 门控（v9 历史口径）")
+    p.add_argument("--carry_ln", type=int, default=1,
+                   help="1 = carry 处加 LayerNorm（v9 历史口径）；0 = v2 对齐口径")
+    p.add_argument("--readout_mask", type=int, default=1,
+                   help="1 = 读出 self-attn 帧级因果 mask（v9 历史口径）；0 = 全双向（v2 口径）")
     p.add_argument("--step_weights", type=str, default="mean")
     p.add_argument("--loss_read", type=int, default=1,
                    help="1 = 第 t 步只在已读帧上算 loss（v9 配方默认开，去掉均值平凡解）")
@@ -178,6 +183,7 @@ def build_cfg(a: argparse.Namespace) -> V9Config:
         mid_ratio=a.mid_ratio, dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
         step_gate=bool(a.step_gate), step_weights=a.step_weights,
+        carry_ln=bool(a.carry_ln), readout_mask=bool(a.readout_mask),
         loss_read=bool(a.loss_read),
         copy_skip=bool(a.copy_skip))
 

@@ -284,3 +284,22 @@ nn.TransformerDecoder（query 间 self-attn + 到 E 的 cross-attn，6 层，**�
    默认配置（target_tokens=32、注释 1792、loss_read=0+copy_skip=1）不可用；
    位置嵌入的 4+ 处差异（middle 无位置、readout 再补 kv_pos、norm_out 多一层 LN）；
    best 用固定 2 条 val 选（选择噪声 ~0.1–0.3 dB）；cache docstring 仍教 torchrun 4 卡。
+
+## 1.6 实验 A 结果：crossq（双向 middle）塌了（2026-11-18 晚）
+
+`v10_120f_v2midA`（crossq middle + step + copy_skip + loss_read，读出对齐 v2）
+跑到 **1971/4000** 时 eval 一直停在 **10.6–13.5 dB**（latent L1 0.27–0.42），
+远低于同配方 packed middle 在 step200 的 20.5 dB ⇒ **双向交叉查询 middle 在
+全量数据上塌了**（与旧架构原版塌的样子一致，只是更早/更低）。已停止该 run
+（日志 `logs/v10_train_v2midA.log` 保留，partial 产物已清理）。
+
+初步判断（待单片段过拟合确认）：
+- crossq 把**全部 960 行**都变成"全片摘要"，readout 的 step memory（当步 32 行）
+  虽然含全片信息，但**每行不再对应"某帧某行"的确定内容**——copy_skip 想直抄
+  的"该帧 rate 行"与"全片摘要行"语义错位，模型最容易学的是"所有行输出同一
+  个全片均值"，于是退化成模板；
+- 这提示：**"摘要"不能靠把所有行都变成摘要**，而应像 v2 那样——**一行全局
+  摘要（z_cls）+ 逐帧局部 token 并存**（即 PLAN §1.4 里的方案 C）。
+
+今晚保留的对照：packed middle + 已对齐 v2 读出的全量 run（`v10_120f_v2align`），
+作为"对齐架构 vs 旧架构"的同配方基线（此前只跑到 759 步就被实验 A 替换）。

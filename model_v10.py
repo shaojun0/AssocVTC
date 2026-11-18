@@ -1,15 +1,15 @@
 """v10 = **1792 原生宽度 + 全片段循环读出**的视频模型（2026-11-16 设计定稿）。
 
-宽度只有一种：1792 = 4 token × 448
+宽度只有一种：896 = 2 token × 448（正式配方；1792 = 4×448 是早期 K=32 设计口径）
 ----------------------------------
-`chunk_tokens=4` 个 token 拼成一个 1792 向量，于是「宽度」和「位置数」由同一
+`chunk_tokens=2` 个 token 拼成一个 896 向量，于是「宽度」和「位置数」由同一
 个常量决定，任何位置都不用投影、不用填充：
 
-    码率侧   16 token/帧  → 4 个 1792/帧
-    预测侧   32 special + 1 z_cls → 8 个 1792 + 1 行（冻结 R 出像素必须要 cls）
+    码率侧   16 token/帧  → 8 个 896/帧
+    预测侧   16 special + 1 z_cls → 8 个 896 + 1 行（冻结 R 出像素必须要 cls）
 
 旧版把 token 直接当位置、宽 1024 时，每帧 33×1024 = 33,792 个数只承载
-33×448 = 14,784 个值 ⇒ **填充 2.29×**；本版 4×1792 = 7,168 承载 7,168 ⇒ 填充 1.00×。
+33×448 = 14,784 个值 ⇒ **填充 2.29×**；本版 8×896 = 7,168 承载 7,168 ⇒ 填充 1.00×。
 
 实现说明（2026-11-16 重构）
 ---------------------------
@@ -37,16 +37,16 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
 
     x            (B, 120, 3, 448, 448)                  视频片段 15 s @ 8 fps
     E（冻结）    每帧独立前向 → z_cls (B,120,1,448), z_s (B,120,32,448)
-    rate         前缀截断前 16 个 special → reshape (B,120,4,1792)（纯 reshape）
-    middle       480 个位置，帧级因果 + 6 层 Transformer → (B,120,4,1792)
-                 reshape → z (B,30,16,1792)（4 帧 × 4 行 = 每步 16 行）
-    readout      Q（可学习，随机初始化）(1,1089,1792)；γ_0 = 0
+    rate         前缀截断前 16 个 special → reshape (B,120,8,896)（纯 reshape）
+    middle       960 个位置，帧级因果 + 6 层 Transformer → (B,120,8,896)
+                 reshape → z (B,30,32,896)（4 帧 × 8 行 = 每步 32 行）
+    readout      Q（可学习，随机初始化）(1,1089,896)；γ_0 = 0
                  for t in 0..29:
                      h    = Q + γ_t·Y_{t-1} + step_emb[t]   # carry 同 v2：无 LN
-                     Y_t  = Decoder(h, z_t)     帧级因果 self-attn + cross-attn(16×1792)
+                     Y_t  = Decoder(h, z_t)     全双向 self-attn + cross-attn(32×896)
                      pred = LN(Y_t) → 后 120 帧 × 9 行
-                          8 行 reshape 成 32×448；第 9 行过 cls_head 成 z_cls
-                 loss = mean_t L1(pred_t, 冻结编码器给的全量 33 token)
+                          8 行 reshape 成 16×448；第 9 行过 cls_head（896→448）成 z_cls
+                 loss = mean_t L1(pred_t, 冻结编码器给的全量 17 行)
     R（冻结）    用 pred_30 的 (z_cls, 32 special) 还原像素，用于 PSNR
 
 2026-11-18 与 v2 对齐（远端 946226d 口径）
@@ -60,14 +60,14 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
 
 为什么「率 < 目标」
 ------------------
-率 = 前 16 个 token（7,168 值/帧），目标 = 全部 33 个位置（14,784 值/帧）。
+率 = 前 16 个 token（7,168 值/帧）；正式配方里分词器 K=16 ⇒ **率 = 目标**（没有压缩级，§7 已记录这个边界；本段「率<目标」的论证只对早期 K=32 设计成立）。
 如果目标也只有 16 个 token，恒等映射就是最优解，跨帧混合没有任何存在必要。
 
 可改的旋钮（V10Config）
 -----------------------
 rate_tokens     率：每帧保留多少 special token（默认 16，= 前缀截断）
 rate_dim        单个 token 宽度（= 分词器 zs_dim，448）
-chunk_tokens    一个向量拼几个 token（默认 4 ⇒ 宽度 1792，不允许改宽度）
+chunk_tokens    一个向量拼几个 token（默认 2 ⇒ 宽度 896，不允许改宽度）
 target_tokens   目标 special 数；本版必须等于 num_specials（冻结 R 要全量）
 group           z 步覆盖帧数（4 → 30 步，2 fps 潜在帧）
 mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"投影到别的宽度"
@@ -123,17 +123,17 @@ class V10Config:
     # ── 率 / 目标（值数口径见模块 docstring）
     rate_tokens: int = 16      # 每帧保留的 special token 数（前缀截断）
     rate_dim: int = 448        # 单个 token 宽度（= 分词器 zs_dim）
-    target_tokens: int = 32    # 目标 special token 数（全量）
-    chunk_tokens: int = 4      # 一个可训练向量 = 几个 token 拼接（4×448 = 1792，不填充）
+    target_tokens: int = 16    # 目标 special token 数（本分支配方 = num_specials = 16）
+    chunk_tokens: int = 2      # 一个可训练向量 = 2 个 token 拼接（2×448 = 896，不填充）
     # ── 中间态（帧内 block 因果）
-    mid_dim: int = 0           # 0 = 自动取 width（1792），不允许填成别的宽度
+    mid_dim: int = 0           # 0 = 自动取 width（896），不允许填成别的宽度
     mid_mode: str = "packed"   # "packed" = 帧级因果 TransformerEncoder（v10 原版）
                                # "crossq" = 可学 query 的**双向**交叉注意力重采样（v2 式摘要，实验 A）
     mid_depth: int = 6
     mid_heads: int = 16
     mid_ratio: float = 4.0
     # ── 读出（整片段循环）
-    dec_dim: int = 0           # 0 = 自动取 width（1792）
+    dec_dim: int = 0           # 0 = 自动取 width（896）
     dec_depth: int = 4
     dec_heads: int = 16
     dec_ratio: float = 2.0
@@ -143,7 +143,8 @@ class V10Config:
     readout_mask: bool = False # 读出 self-attn 是否用帧级因果 mask（默认关 = 全双向，同 v2）
     step_weights: str = "mean"
     mem_mode: str = "step"     # "step" = 每步只看 z_t（设计原版）; "prefix" = 看已读前缀
-    loss_read: bool = False    # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
+    loss_read: bool = True     # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
+    loss_frame_norm: bool = False  # True = loss_read 时按帧归一化（消掉早期帧权重 ~120×后期帧）
     copy_skip: bool = True     # 已读帧的 rate 行直抄到输出（残差捷径；prefix/step 都支持）
 
 
@@ -157,10 +158,10 @@ class V10Config:
         """每个 z 步的 rate token 数（= rate_tokens × group）。"""
         return self.rate_tokens * self.group
 
-    # ── 1792 口径：宽度由 chunk_tokens 决定，位置数由它除出来
+    # ── 宽度口径：宽度由 chunk_tokens 决定，位置数由它除出来
     @property
     def width(self) -> int:
-        """一个可训练向量的宽度 = chunk_tokens × rate_dim（默认 4×448 = 1792）。
+        """一个可训练向量的宽度 = chunk_tokens × rate_dim（默认 2×448 = 896）。
 
         这是本模型的唯一宽度：token 和它等宽时不需要任何投影，多出来的
         维度全是填充 —— 那正是要避免的冗余。
@@ -285,12 +286,12 @@ class FrozenTokenizer(nn.Module):
 class TemporalMiddle(nn.Module):
     """帧内 block 因果的 Transformer：一帧之内的向量互看，跨帧只看历史帧。
 
-    打包视图就是设计口径本身：每帧 `chunk_tokens` 个 token 拼成一个 1792
+    打包视图就是设计口径本身：每帧 `chunk_tokens` 个 token 拼成一个 896
     的向量，所以每帧 = 4 个位置，`tokens_per_frame` 直接等于 4，不需要在
     33 token 的视图里模拟 block 边界。
 
     当 `in_dim == dim`（打包后天然等宽）时**不建投影层**：硬加一个
-    `Linear(1792, 1792)` 只是把同一个向量重新线性混合一遍，属于纯冗余。
+    `Linear(896, 896)` 只是把同一个向量重新线性混合一遍，属于纯冗余。
     """
 
     def __init__(self, in_dim: int, dim: int, depth: int, heads: int,
@@ -371,23 +372,23 @@ class CrossQueryMiddle(nn.Module):
 
 # ═══════════════════════════════════════════════════════════ 整片段循环读出
 class WholeClipDecoder(nn.Module):
-    """(frames+1) 行 × rows_pred 列的 1792 向量 + 30 步循环：每步读一组 z、重出整段。
+    """(frames+1) 行 × rows_pred 列的 896 向量 + 30 步循环：每步读一组 z、重出整段。
 
     每步结构：
         h      = Q + γ_t·Y_{t-1} + step_emb[t]       carry 同 v2：无 LN、默认 w≡1
         Y      = TransformerDecoder(h, z_t)          全双向 self-attn（无 tgt_mask）+ cross-attn
         pred_t = LN(Y) 拆成 8 个 chunk（32 个 special）+ 1 行 z_cls
 
-    位置数 = 121 × 9 = 1089：120 帧 + 1 个随机初始化起始槽，每帧 9 行 1792
+    位置数 = 121 × 9 = 1089：120 帧 + 1 个随机初始化起始槽，每帧 9 行 896
     （8 行装 32 个 special，1 行装 z_cls —— 冻结 R 出像素必须要它）。
     self-attn 跨帧因果（帧 j 只看 0..j），所以整条链是 streaming 的，不需要
     任何帧内 mask。
 
     零冗余的三处：
-      * 不建 kv_proj —— z 本身就是 1792，再投影一遍只是把同一向量重新线性
+      * 不建 kv_proj —— z 本身就是 896，再投影一遍只是把同一向量重新线性
         混合一次；
-      * 不建 special 的 head —— 8 行 1792 直接 reshape 成 32×448，只有
-        z_cls 那一行需要 `cls_head`（1792→448）；
+      * 不建 special 的 head —— 8 行 896 直接 reshape 成 16×448，只有
+        z_cls 那一行需要 `cls_head`（896→448）；
       * 不复制 memory —— 整段是一条 batch，cross-attn 直接对这一步的 16 个
         key，不需要 `repeat_interleave` 出 120 份副本。
     """
@@ -633,6 +634,7 @@ class VideoV10(nn.Module):
         preds = out["preds"]                                     # (B,S',F,T,c)
         B, S1 = preds.shape[:2]
         err = (preds - target.unsqueeze(1)).abs()                # (B,S',F,T,c)
+        w = self.step_weights(S1, self.cfg.step_weights, err.device)
         if self.cfg.loss_read:
             # 只惩罚「第 t 步已经读到的帧」（前缀 t+1 组）。均值平凡解在已读帧
             # 上不再是解：读到的帧必须被抄出来，梯度不再被"不可知的未来帧"淹没。
@@ -643,10 +645,19 @@ class VideoV10(nn.Module):
             m = (frame[None, :] < nf[:, None]).to(err.dtype)      # (S',F)
             per_frame = err.mean(dim=(3, 4))                      # (B,S',F)
             per_step = (per_frame * m).sum(-1) / m.sum(-1).clamp_min(1)
+            if self.cfg.loss_frame_norm:
+                # 2026-11-18 审计：默认口径下 frame0 的梯度权重约是 frame119 的
+                # 120×（早期帧被 30 步重复监督、末段帧只有最后几步）。打开后：
+                # 先对每帧在「被读到的步」上取加权均值（步权重仍生效），
+                # 再对帧取均值 ⇒ 帧间平权。
+                num = (per_frame * m * w[None, :, None]).sum(dim=1)   # (B,F)
+                den = (m * w[:, None]).sum(dim=0)                     # (F,)
+                loss = (num / den.clamp_min(1e-8)).mean()
+            else:
+                loss = (per_step.mean(dim=0) * w).sum()
         else:
             per_step = err.mean(dim=(2, 3, 4))                   # (B,S1)
-        w = self.step_weights(S1, self.cfg.step_weights, per_step.device)
-        loss = (per_step.mean(dim=0) * w).sum()
+            loss = (per_step.mean(dim=0) * w).sum()
         res = dict(loss=loss, l1=per_step.detach().mean(),
                    step_l1=per_step.detach().mean(dim=0), pred=out["pred"],
                    z=enc["z"], target=target, latents=dict(
@@ -698,7 +709,7 @@ if __name__ == "__main__":
                    dec_dim=32, dec_depth=1, dec_heads=2, dec_mlp_ratio=4.0,
                    pixel_hidden=32, zs_dim=8, dec_recurrent=False,
                    dec_steps="1", dec_step_plan="square")
-    # chunk_tokens=4 ⇒ 宽度 = 4×8 = 32（正式配置是 4×448 = 1792）
+    # 自检用 chunk_tokens=4 ⇒ 宽度 = 4×8 = 32（正式配置是 2×448 = 896）
     cfg = V10Config(tok_ckpt="", tok_cfg=tok_cfg, frames=8, group=4,
                     rate_tokens=4, rate_dim=8, target_tokens=4, chunk_tokens=4,
                     mid_depth=2, mid_heads=2, mid_ratio=2.0,
@@ -781,6 +792,17 @@ if __name__ == "__main__":
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for p in mx.middle.parameters()), "crossq middle 没有梯度"
     print(f"[mid] crossq: loss={float(ox['loss'].detach()):.4f} 双向重采样通路 ✓")
+
+    # loss_frame_norm：帧间归一化后的 loss 通路（finite + 反向能到 middle）
+    from dataclasses import replace as _replace
+    cfg_fn = _replace(cfg, loss_frame_norm=True)
+    mfn = VideoV10(cfg_fn).train()
+    ofn = mfn(xs_fn := torch.rand(2, cfg_fn.frames, 3, 32, 32))
+    assert bool(torch.isfinite(ofn["loss"])), ofn["loss"]
+    ofn["loss"].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for p in mfn.middle.parameters()), "loss_frame_norm 没有梯度"
+    print(f"[loss] loss_frame_norm: loss={float(ofn['loss'].detach()):.4f} ✓")
 
     # 小步过拟合：20 步内 loss 应下降
     m.train()

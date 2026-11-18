@@ -46,6 +46,12 @@ v9/v10 定稿宽度是 896（= 2×448），不是早期设计里的 1792（= 4×
                         loss_read=1 时只算已读帧（去掉均值平凡解）
     R（冻结）    用 pred_30 的 (z_cls, 16 special) 还原像素，用于 PSNR
 
+2026-11-18 加的口径开关（默认 = v9 历史口径，用于复现 27.98 dB）
+----------------------------------------------------------------
+`step_gate=True` / `carry_ln=True` / `readout_mask=True` 是 v9 训练时的口径；
+与 v2 的 `query_base + Y`（裸加、无门控、全双向 self-attn）对齐时传
+`step_gate=False, carry_ln=False, readout_mask=False`。
+
 可改的旋钮（V9Config）
 ----------------------
 rate_tokens     率：每帧保留多少 special token（默认 16，= 前缀截断）
@@ -118,7 +124,9 @@ class V9Config:
     dec_heads: int = 16
     dec_ratio: float = 2.0
     dec_drop: float = 0.0
-    step_gate: bool = True     # γ 零初始化门控
+    step_gate: bool = True     # γ 零初始化门控（v9 历史口径默认开）
+    carry_ln: bool = True      # carry 处是否加 LayerNorm（v9 历史口径默认开）
+    readout_mask: bool = True  # 读出 self-attn 是否帧级因果 mask（v9 历史口径默认开）
     step_weights: str = "mean"
     loss_read: bool = True     # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
     copy_skip: bool = True     # 已读帧的 rate 行直抄到输出（残差捷径）
@@ -360,7 +368,10 @@ class ParallelReadout(nn.Module):
         # 0.015，pred 完全不吃 memory，因为均值解是局部极小）。
         self.copy_skip = bool(getattr(cfg, "copy_skip", True))
         self.gate = (nn.Parameter(torch.zeros(self.S)) if cfg.step_gate else None)
-        self.n_in = nn.LayerNorm(self.d)
+        # 2026-11-18 加开关：v9 的历史口径是「carry 加 LN + 读出帧级因果 mask」，
+        # 与 v2 的 `query_base + Y` 全双向不一致。默认保持历史口径（复现 27.98 dB），
+        # 需要对齐时传 carry_ln=False / readout_mask=False。
+        self.n_in = nn.LayerNorm(self.d) if cfg.carry_ln else None
         layer = nn.TransformerDecoderLayer(
             d_model=self.d, nhead=int(cfg.dec_heads),
             dim_feedforward=int(self.d * cfg.dec_ratio), dropout=cfg.dec_drop,
@@ -369,11 +380,14 @@ class ParallelReadout(nn.Module):
             layer, num_layers=int(cfg.dec_depth), norm=None)
         self.norm_out = nn.LayerNorm(self.d)
         self.cls_head = nn.Linear(self.d, self.code_dim)    # 只有 z_cls 需要投影
-        fi = torch.arange(L) // self.R                      # 位置 → 帧号（0=起始槽）
-        allowed = fi[None, :] <= fi[:, None]                # True = 可看
-        mask = torch.zeros(L, L, dtype=torch.float32).masked_fill(
-            ~allowed, float("-inf"))
-        self.register_buffer("_mask", mask, persistent=False)
+        if cfg.readout_mask:
+            fi = torch.arange(L) // self.R                  # 位置 → 帧号（0=起始槽）
+            allowed = fi[None, :] <= fi[:, None]            # True = 可看
+            mask = torch.zeros(L, L, dtype=torch.float32).masked_fill(
+                ~allowed, float("-inf"))
+            self.register_buffer("_mask", mask, persistent=False)
+        else:
+            self._mask = None
 
     def _split(self, Y: Tensor, resid: Optional[Tensor] = None
                ) -> Tuple[Tensor, Tensor]:
@@ -400,7 +414,7 @@ class ParallelReadout(nn.Module):
         assert 1 <= n <= S, (n, S)
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
-        mask = self._mask.to(dtype=z.dtype)
+        mask = None if self._mask is None else self._mask.to(dtype=z.dtype)
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
         grp = int(self.cfg.group)
@@ -416,7 +430,9 @@ class ParallelReadout(nn.Module):
         clss: List[Tensor] = []
         for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
-            h = self.n_in(Q + w * Y) + self.step_emb[:, t]
+            carry = Q + w * Y
+            h = (self.n_in(carry) if self.n_in is not None else carry) \
+                + self.step_emb[:, t]
             nf = min(self.F, (t + 1) * grp)                  # 已读帧数
             keys = (zr[:, :nf]
                     + self.frame_emb[:, :nf].reshape(1, nf, 1, self.d)

@@ -20,6 +20,7 @@ export TOKENIZERS_PARALLELISM=false
 MEM=${MEM:-step}
 COPY=${COPY:-1}
 LOSSREAD=${LOSSREAD:-1}
+LFRAMENORM=${LFRAMENORM:-0} # 1 = loss_read 时按帧归一化（frame0 vs frame119 权重拉平）
 STEPGATE=${STEPGATE:-0}   # 0 = w≡1（v2 口径）; 1 = 零初始化 γ 门控（旧版）
 CARRYLN=${CARRYLN:-0}     # 0 = carry 无 LN（v2 口径）; 1 = 旧版手写 LN
 MASK=${MASK:-0}           # 0 = 读出全双向（v2 口径）; 1 = 旧版帧级因果 mask
@@ -41,7 +42,8 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
   --step_gate "$STEPGATE" --step_weights mean \
   --carry_ln "$CARRYLN" --readout_mask "$MASK" \
-  --mem_mode "$MEM" --loss_read "$LOSSREAD" --copy_skip "$COPY" \
+  --mem_mode "$MEM" --loss_read "$LOSSREAD" --loss_frame_norm "$LFRAMENORM" \
+  --copy_skip "$COPY" \
   --batch 2 --accum_steps 2 \
   --lr "$LR" --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
   --max_steps "$STEPS" --amp 1 --log_every 20 \

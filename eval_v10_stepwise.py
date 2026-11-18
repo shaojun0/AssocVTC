@@ -4,6 +4,15 @@
 全部渲染出来，画「率 vs 质量」曲线（论文的 stepwise 口径），并落逐片段 JSON
 便于复核/画图。
 
+**指标口径（2026-11-18 审计后加）**：同时给出两套曲线，别混用——
+  * `psnr_all_steps` / `l1_all_steps`：整片（120 帧全算）。`loss_read=1` 时中间档
+    的未读帧是"猜未来"，这条曲线在中间档**不能**当重建成绩；
+  * `psnr_read_steps` / `l1_read_steps`：只算「第 t 档已读到的帧」（前 4(t+1) 帧），
+    这才是与训练监督一致的口径；
+  * `zcls_l1_steps` / `spec_l1_steps`：z_cls 行 vs special 行的误差分解
+    （27.98→30.53 的缺口主要来自 z_cls，见 PLAN §1.5）；
+  末档（读全量）两条 PSNR 曲线重合，可直接与 `psnr_tok_full` 上界比。
+
 用法（单卡，1~2 分钟/片段，60 片段约 10 min）::
 
     SDPA_BACKEND=math MUSA_VISIBLE_DEVICES=0 python eval_v10_stepwise.py \
@@ -46,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n_steps_max", type=int, default=0,
                    help="只评前 N 档（0 = 全 30 档）")
     return p.parse_args()
+
+
+def psnr_per_frame(pred: torch.Tensor, target: torch.Tensor,
+                   eps: float = 1e-10) -> torch.Tensor:
+    """(B,F,3,H,W) → (B,F)：逐帧 PSNR（用来算「只读已读帧」的曲线）。"""
+    mse = ((pred.float() - target.float()) ** 2).flatten(2).mean(2)
+    return -10.0 * torch.log10(mse.clamp_min(eps))
 
 
 def _set_sdpa_math() -> None:
@@ -116,33 +132,58 @@ def main() -> None:
             target = model.target_latents(z_cls, z_s)      # (1,F,1+K,c)
             out = model.readout(enc["z"], n_steps=n_max,
                                 return_step_preds=True)
-            preds = out["preds"][0]                        # (n,F,1+K,c)
-            psnrs, l1s = [], []
+            preds = out["preds"][0].float()                # (n,F,1+K,c)
+            tgt = target[0].float()                        # (F,1+K,c)
+            err = (preds - tgt.unsqueeze(0)).abs()         # (n,F,1+K,c)
+            grp = int(cfg.group)
+            F = cfg.frames
+            psnr_all, psnr_read = [], []
+            l1_all, l1_read, zcls_l1, spec_l1 = [], [], [], []
             for t in range(preds.shape[0]):
                 pt = preds[t:t + 1]                        # (1,F,1+K,c)
                 pix = model.tokenizer.render(pt[:, :, :1].contiguous(),
                                              pt[:, :, 1:].contiguous())
-                psnrs.append(float(psnr_from_l1(pix, x).mean()))
-                l1s.append(float((pt - target).abs().mean()))
+                pf = psnr_per_frame(pix, x)[0]             # (F,)
+                nf = min(F, (t + 1) * grp)                 # 本档已读帧数
+                psnr_all.append(float(pf.mean()))
+                psnr_read.append(float(pf[:nf].mean()))
+                e = err[t]                                 # (F,1+K,c)
+                l1_all.append(float(e.mean()))
+                l1_read.append(float(e[:nf].mean()))
+                zcls_l1.append(float(e[:, 0].mean()))
+                spec_l1.append(float(e[:, 1:].mean()))
             up = model.tokenizer.render(z_cls, z_s)
             psnr_full = float(psnr_from_l1(up, x).mean())
-        rec = dict(idx=i, psnr_steps=psnrs, l1_steps=l1s,
+        rec = dict(idx=i,
+                   psnr_steps=psnr_all, psnr_all_steps=psnr_all,
+                   psnr_read_steps=psnr_read,
+                   l1_steps=l1_all, l1_all_steps=l1_all,
+                   l1_read_steps=l1_read,
+                   zcls_l1_steps=zcls_l1, spec_l1_steps=spec_l1,
                    psnr_tok_full=psnr_full)
         per_clip.append(rec)
         if i % 5 == 0 or i == n_clips - 1:
             el = time.time() - t0
-            print(f"[{i + 1}/{n_clips}] step{n_max} psnr={psnrs[-1]:.3f} "
+            print(f"[{i + 1}/{n_clips}] step{n_max} psnr_all={psnr_all[-1]:.3f} "
+                  f"zcls_l1={zcls_l1[-1]:.4f} spec_l1={spec_l1[-1]:.4f} "
                   f"tok_full={psnr_full:.3f}  {(i + 1) / el:.2f} clip/s "
                   f"eta {(n_clips - i - 1) * el / (i + 1) / 60:.1f} min", flush=True)
 
-    P = np.asarray([r["psnr_steps"] for r in per_clip])     # (N,n_max)
-    L = np.asarray([r["l1_steps"] for r in per_clip])
+    P = np.asarray([r["psnr_all_steps"] for r in per_clip])   # (N,n_max)
+    PR = np.asarray([r["psnr_read_steps"] for r in per_clip])
+    L = np.asarray([r["l1_all_steps"] for r in per_clip])
+    LR = np.asarray([r["l1_read_steps"] for r in per_clip])
+    ZC = np.asarray([r["zcls_l1_steps"] for r in per_clip])
+    SP = np.asarray([r["spec_l1_steps"] for r in per_clip])
     TF = np.asarray([r["psnr_tok_full"] for r in per_clip])
     curves = dict(
         n_clips=int(P.shape[0]), n_steps=int(P.shape[1]),
         psnr_mean=P.mean(0).tolist(), psnr_per_clip_mean=P.mean(1).tolist(),
-        l1_mean=L.mean(0).tolist(), psnr_tok_full_mean=float(TF.mean()),
-        psnr_tok_full_std=float(TF.std()),
+        psnr_all_mean=P.mean(0).tolist(), psnr_read_mean=PR.mean(0).tolist(),
+        l1_mean=L.mean(0).tolist(), l1_all_mean=L.mean(0).tolist(),
+        l1_read_mean=LR.mean(0).tolist(),
+        zcls_l1_mean=ZC.mean(0).tolist(), spec_l1_mean=SP.mean(0).tolist(),
+        psnr_tok_full_mean=float(TF.mean()), psnr_tok_full_std=float(TF.std()),
     )
     summary = dict(curves=curves, cfg=cfg.__dict__,
                    args=vars(a), per_clip=per_clip if a.dump_per_clip else None)
@@ -151,8 +192,14 @@ def main() -> None:
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
         print(f"[out] {a.out}", flush=True)
-    print("[curve] PSNR per step:",
-          " ".join(f"{v:.2f}" for v in curves["psnr_mean"]), flush=True)
+    print("[curve] PSNR all(整片):",
+          " ".join(f"{v:.2f}" for v in curves["psnr_all_mean"]), flush=True)
+    print("[curve] PSNR read(已读帧):",
+          " ".join(f"{v:.2f}" for v in curves["psnr_read_mean"]), flush=True)
+    print("[curve] zcls_l1:",
+          " ".join(f"{v:.4f}" for v in curves["zcls_l1_mean"]), flush=True)
+    print("[curve] spec_l1:",
+          " ".join(f"{v:.4f}" for v in curves["spec_l1_mean"]), flush=True)
     print(f"[curve] tokenizer full-read upper bound: {TF.mean():.3f} dB "
           f"(+/- {TF.std():.3f})", flush=True)
 
@@ -161,21 +208,31 @@ def main() -> None:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+            fig, ax = plt.subplots(1, 3, figsize=(16, 4))
             xs = np.arange(1, P.shape[1] + 1)
-            ax[0].plot(xs, P.mean(0), "-o", ms=3, label="v10 (read t groups)")
+            ax[0].plot(xs, P.mean(0), "-o", ms=3, label="整片（含未读帧）")
+            ax[0].plot(xs, PR.mean(0), "-s", ms=3, label="已读帧（训练口径）")
             ax[0].axhline(TF.mean(), ls="--", c="gray",
                           label="tokenizer full read")
             ax[0].set_xlabel("z steps read (rate budget)")
             ax[0].set_ylabel("PSNR (dB)")
             ax[0].set_title(f"v10 stepwise PSNR ({n_clips} val clips)")
             ax[0].grid(alpha=.3)
-            ax[0].legend()
-            ax[1].plot(xs, L.mean(0), "-o", ms=3, c="C1")
+            ax[0].legend(fontsize=7)
+            ax[1].plot(xs, L.mean(0), "-o", ms=3, label="整片 latent L1")
+            ax[1].plot(xs, LR.mean(0), "-s", ms=3, label="已读帧 latent L1")
             ax[1].set_xlabel("z steps read")
             ax[1].set_ylabel("latent L1")
             ax[1].set_title("v10 stepwise latent L1")
             ax[1].grid(alpha=.3)
+            ax[1].legend(fontsize=7)
+            ax[2].plot(xs, ZC.mean(0), "-o", ms=3, label="z_cls 行误差")
+            ax[2].plot(xs, SP.mean(0), "-s", ms=3, label="special 行误差")
+            ax[2].set_xlabel("z steps read")
+            ax[2].set_ylabel("latent L1")
+            ax[2].set_title("误差分解（z_cls vs special）")
+            ax[2].grid(alpha=.3)
+            ax[2].legend(fontsize=7)
             fig.tight_layout()
             png = os.path.splitext(a.out or "fig_stepwise")[0] + "_fig.png"
             fig.savefig(png, dpi=130)
