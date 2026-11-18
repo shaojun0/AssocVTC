@@ -108,6 +108,45 @@ loss          mean_t L1(pred_t, 全量目标)，30 档平权
 代码侧新增：`copy_skip` 不再只属于 prefix（step 也能直抄，CLI `--copy_skip`），
 `train_v10.py --init_trainable` 支持「并行拟合 → 切循环」的课程学习。
 
+## 1.3 架构复核：v10 读出 vs v2（2026-11-18 晚，用户提问后补查）
+
+用户复核口径：**v10 的循环解码架构应与 model_v2 的 `OutputQueryDecoder` 一致**。
+逐行对照后确认：**审核口径本身没漏**（远端 main 上 `946226d` 已经按这个口径改完），
+漏的是**本地训练线没有同步这个改动**——今天训练 27.98 dB 用的是 2026-11-16 的旧版
+读出（带 LN + γ 门控 + 块因果 mask），不是 v2 对齐版。
+
+| 机制 | v2（`model_v2.py:596-608`） | 本地训练版（`model_v10.py` b345942） | v2 对齐版（`946226d`/`75ac271`） |
+|---|---|---|---|
+| 循环 | 同一 stack 在 \|T\| 步上反复施加，carry 走 BPTT | 同 | 同 |
+| carry | `Y = query_base + Y` 裸加，**无 LN** | `h = LN(Q + γ_t·Y) + step_emb[t]`（有 `n_in`） | `h = Q + Y + step_emb[t]`（无 LN） |
+| 门控 γ | 无 | 零初始化 γ，**默认开** | `step_gate` 默认关（w≡1） |
+| self-attn mask | 单步内 N 行**全双向** | 1089 行**帧级因果 mask**（`_mask` + `tgt_mask`） | 全双向、**无 tgt_mask** |
+| 每步输出 | N 行 = 整图 patch | 121×9 = 整段 120 帧 | 同左 |
+| 每步 memory | 当步 `[z_cls;z_s]` 块切片 | 当步 `z_t` / 已读前缀（v9） | 当步 `z_t` |
+| 目标 | 像素（PixelHead） | 冻结分词器 latent（17 行） | 同左 |
+| middle | 无（DINO 直连 decoder） | 新增 `TemporalMiddle` | 同左（6 层） |
+| 训练侧 shortcut | 无 | `copy_skip` 直抄 + `loss_read` 只监督已读帧 | 无 |
+| 宽度/深度 | d=dim，depth=2 | d=896（2×448），depth=4 | d=1792（4×448），depth=4 |
+
+时间线（解释为什么训练版没对齐）：
+
+- `ef6fdd2`（11-16）：v10 初版 = LN + γ + 块因果 mask（**我们本地线的分叉点**）；
+- `50e8ff6`/`946226d`（11-17 10:23）：按用户复核口径**去 mask / 门控 / LN**，
+  并把 carry 逐字对齐 v2（`Q + Y + step_emb`），同时换原生 `nn.Transformer*`、
+  宽度 1792；`50e8ff6` 就是配套的 `exp_carry_ln.py`（量化 carry 处 LN/门控的作用）；
+- 本地线（`44ab442`…`63846dc`）从 `ef6fdd2` 分叉，直接在这份**旧读出**上做了
+  MUSA 移植、120 帧通路、prefix/copy_skip/loss_read，**从未合入 946226d**。
+
+结论（对之前归因的修正）：
+
+1. 「全量塌成均值解」发生在**未对齐 v2 的旧读出**上（LN + γ + 因果 mask）；
+   它能不能用「监督口径」解释要分开看——未读帧全监督 + 均值解是叠加因素，
+   但**对齐版（去 LN/γ/mask）在 120 帧全量上还没训练过**，不能断言它的行为。
+2. 今天 27.98 dB（以及正在跑的 step+copy 全量对照）都是**旧读出 + shortcut** 的
+   结果，不是「与 v2 一致的架构」的结果；论文/报告里必须写清这一点。
+3. 下一步应做：**v2 对齐版 vs 旧版**的同条件消融（单片段先筛，再全量），
+   把「carry/门控/mask 三处偏差」和「copy_skip/loss_read 两处 shortcut」解耦。
+
 ## 2. 数据
 
 - 根：`/root/autodl-tmp/video_recon/data3`（42 GB，原生 120 帧 448² 8 fps）
