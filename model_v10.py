@@ -128,7 +128,7 @@ class V10Config:
     step_weights: str = "mean"
     mem_mode: str = "step"     # "step" = 每步只看 z_t（设计原版）; "prefix" = 看已读前缀
     loss_read: bool = False    # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
-    copy_skip: bool = True     # prefix 模式：已读帧的 rate 行直抄到输出（残差捷径）
+    copy_skip: bool = True     # 已读帧的 rate 行直抄到输出（残差捷径；prefix/step 都支持）
 
 
     @property
@@ -364,11 +364,13 @@ class WholeClipDecoder(nn.Module):
             self.start_emb = nn.Parameter(torch.randn(1, 1, self.d) * 0.02)
             qf = torch.arange(L, dtype=torch.long) // self.R - 1     # -1 = 起始槽
             self.register_buffer("_qframe", qf, persistent=False)
-        # prefix 模式默认开「直抄残差」：输出行 0..rr-1 += 已读帧的 rate 行。
-        # 没有它时实测训练会塌到「与输入无关的模板」（middle 输出跨片段 std
-        # 从 0.29 崩到 0.015，pred 完全不吃 memory），因为均值解是局部极小。
-        self.copy_skip = bool(self.mem_mode == "prefix" and
-                              bool(getattr(cfg, "copy_skip", True)))
+        # 「直抄残差」：输出行 0..rr-1 += 已读帧的 rate 行。prefix 模式默认开
+        # （没有它时实测训练会塌到「与输入无关的模板」：middle 输出跨片段 std
+        # 从 0.29 崩到 0.015，pred 完全不吃 memory，因为均值解是局部极小）。
+        # 2026-11-18 起 **step 模式也支持**（CLI --copy_skip），用于
+        # 「纯循环 vs 循环+直抄」的单片段过拟合对照：两者信息量相同，唯一差别
+        # 是未读帧由 30 步递推 Y 还是由前缀 cross-attn 预测。
+        self.copy_skip = bool(getattr(cfg, "copy_skip", True))
         self.gate = (nn.Parameter(torch.zeros(self.S)) if cfg.step_gate else None)
         self.n_in = nn.LayerNorm(self.d)
         layer = nn.TransformerDecoderLayer(
@@ -414,11 +416,12 @@ class WholeClipDecoder(nn.Module):
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
         prefix = (self.mem_mode == "prefix")
-        if prefix:
-            grp = int(self.cfg.group)
-            rr = int(self.P // grp)                          # 每帧 rows_rate 行
+        grp = int(self.cfg.group)
+        rr = int(self.P // grp)                          # 每帧 rows_rate 行
+        if prefix or self.copy_skip:
             assert grp * rr == self.P and self.F * rr == self.S * self.P, (grp, rr)
-            zr = z.reshape(B, self.F, rr, self.d)            # (B,F,rows_rate,d)
+            zr = z.reshape(B, self.F, rr, self.d)        # (B,F,rows_rate,d)
+        if prefix:
             fem = self.frame_emb.reshape(self.F, self.d)
             qf = self._qframe
             qe = fem[qf.clamp(min=0)]                        # (L,d)
@@ -431,22 +434,22 @@ class WholeClipDecoder(nn.Module):
         for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
             h = self.n_in(Q + w * Y) + self.step_emb[:, t]
+            nf = min(self.F, (t + 1) * grp)                  # 已读帧数
             if prefix:
-                nf = min(self.F, (t + 1) * grp)              # 已读帧数
                 keys = (zr[:, :nf]
                         + self.frame_emb[:, :nf].reshape(1, nf, 1, self.d)
                         + self.row_emb)                       # (B,nf,rr,d)
                 keys = keys.reshape(B, nf * rr, self.d)
                 Y = self.decoder(tgt=h + qe, memory=keys, tgt_mask=mask)
-                # 直抄残差：已读帧的 rate 行原样回填到输出行（读到的帧立刻
-                # 精确可出，不需要模型"学会抄"；未读帧为 0，留给模型预测）
-                resid = None
-                if self.copy_skip:
-                    resid = z.new_zeros(B, self.F, self.R, self.d)
-                    resid[:, :nf, :rr] = zr[:, :nf]
             else:
                 Y = self.decoder(tgt=h, memory=kv_all[:, t], tgt_mask=mask)
-                resid = None
+            # 直抄残差：已读帧的 rate 行原样回填到输出行（读到的帧立刻精确
+            # 可出，不需要模型"学会抄"；未读帧为 0，留给模型预测）。
+            # 两种 mem_mode 共用一套填充逻辑，对照实验里这是共同项。
+            resid = None
+            if self.copy_skip:
+                resid = z.new_zeros(B, self.F, self.R, self.d)
+                resid[:, :nf, :rr] = zr[:, :nf]
             spec, cls = self._split(self.norm_out(Y), resid)
             specs.append(spec)
             clss.append(cls)

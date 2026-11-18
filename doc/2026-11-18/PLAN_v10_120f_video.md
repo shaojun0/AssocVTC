@@ -65,7 +65,46 @@ loss          mean_t L1(pred_t, 全量目标)，30 档平权
   模型只需学 z_cls 与未读帧），从结构上消灭均值解；
 - `--loss_read 1`：第 t 步只惩罚已读帧，梯度不再被"不可知的未来帧"稀释。
 
-改完 400 步就正常：loss 1.13 → 0.12，PSNR 9 → 19.7 dB；正式 run 4000 步到 **27.6–28.0 dB**。
+改完 400 步就正常：loss 1.13 → 0.12，PSNR 9 → 19.7 dB；正式 run 4000 步到 **27.6–28.0 dB**
+（`v10_120f/best_trainable.pt`，best `eval_psnr=27.98 @step3000`）。
+
+> 并行读出这份代码已单独作为 **`v9` 分支**推到 GitHub（`git push origin v9`），
+> 附带一份代码导读：`doc/2026-11-18/README_v9_parallel_readout.md`。
+
+## 1.2 循环 vs 并行读出：单片段过拟合对照（2026-11-18 下午）
+
+用户安排：**先单片段过拟合跑一些步数，确认循环架构能拟合，再切循环架构**，同条件
+对照两种架构。单片段是唯一能把「架构/优化器根本学不动」与「泛化差」分开的实验。
+
+矩阵（同一片段 clip 0，800 步，lr 8e-4 常数，bf16，`loss_read=1`，weight decay 0.05）：
+
+| 架构 | 说明 | 末档 latent L1 | 末档 PSNR |
+|---|---|---|---|
+| `prefix`（v9 并行） | 基线：cross-attn 看已读前缀 | 0.0275 | **29.28 dB** |
+| `step` 纯递推 | 设计原版：memory=当步 z_t | 0.0266 | 28.86 dB |
+| `step` + 直抄 | 已读帧直接抄，递推只管未读帧 | 0.0253 | **35.08 dB** |
+| `step` + 直抄 + 并行预热 | 从正式训练 `best_trainable.pt` 初始化后切循环 | 0.0181 | 30.96 dB |
+| 上界 | 冻结分词器满读同片段 | — | 36.05 dB |
+
+读法/结论：
+
+1. **循环架构能拟合单片段**，而且不输并行（纯递推 28.86 vs 并行 29.28）——说明
+   「架构写错」可以排除，之前全量塌成均值解是**优化/监督口径**问题。
+2. 加上直抄残差后循环+直抄 **+5.8 dB**（35.08，逼近 36.05 上界）；作为对照，并行
+   +直抄只到 29.28。逐档曲线（`artifacts/overfit_v10/overfit_v10_arch.png`）里
+   循环+直抄的已读帧 L1 也最低。
+3. **单片段过拟合不能外推泛化**（历史上循环架构单片段能拟合、全量却塌），必须
+   全量训练裁决。已启动同条件全量对照（与 `v10_120f` 只差 `mem_mode`）：
+   `MEM=step COPY=1 LOSSREAD=1 OUT=.../v10_120f_step`，4000 步，日志
+   `logs/v10_train_step.log`。
+4. 分解探针（`probe_overfit_breakdown.py`）：单片段上 loss/PSNR 主要由 **z_cls 行**
+   与 special 行的误差结构决定；同样的 latent L1 在不同架构下像素 PSNR 可差 6 dB，
+   说明误差的空间模式（哪些 token 错）比 L1 均值更决定 PSNR。
+
+产物：`doc/2026-11-18/artifacts/overfit_v10/{prefix,step_nocopy,step_copy,step_warm}.jsonl`
++ `overfit_v10_arch.png`；脚本 `overfit_v10.py` / `run_v10_overfit.sh` / `plot_overfit.py`。
+代码侧新增：`copy_skip` 不再只属于 prefix（step 也能直抄，CLI `--copy_skip`），
+`train_v10.py --init_trainable` 支持「并行拟合 → 切循环」的课程学习。
 
 ## 2. 数据
 

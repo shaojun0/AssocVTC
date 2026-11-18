@@ -115,7 +115,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss_read", type=int, default=0,
                    help="1 = 第 t 步只在已读帧上算 loss（配合 --mem_mode prefix 去掉均值平凡解）")
     p.add_argument("--copy_skip", type=int, default=1,
-                   help="1 = prefix 模式下已读帧 direct-copy 残差（默认开）")
+                   help="1 = 已读帧 direct-copy 残差（prefix/step 都支持，默认开）")
+    p.add_argument("--init_trainable", type=str, default="",
+                   help="只加载 middle/readout 的 trainable ckpt（best_trainable.pt）。"
+                        "课程学习用：先用 prefix 拟合，再切 --mem_mode step 继续训")
     p.add_argument("--mem_mode", type=str, default="step", choices=["step", "prefix"],
                    help="读出侧 cross-attn 的 memory：step=只看当步 z_t（设计原版）；"
                         "prefix=看已读前缀（每步重出全片时可把读过的帧直接抄过来）")
@@ -518,6 +521,14 @@ def main() -> None:
 
     # ── 模型（分词器在 FrozenTokenizer 里已冻结）
     model = VideoV10(cfg)
+    if a.init_trainable:
+        blob = torch.load(a.init_trainable, map_location="cpu", weights_only=False)
+        r1 = model.middle.load_state_dict(blob["middle"], strict=False)
+        r2 = model.readout.load_state_dict(blob["readout"], strict=False)
+        print(f"[init_trainable] {a.init_trainable} step={blob.get('step')} "
+              f"mid_missing={len(r1.missing_keys)} "
+              f"read_missing={list(r2.missing_keys)[:4]} "
+              f"read_unexpected={list(r2.unexpected_keys)[:4]}", flush=True)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     warmup_steps = int(a.warmup_frac * a.max_steps)
 
