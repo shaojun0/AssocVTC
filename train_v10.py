@@ -105,6 +105,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mid_depth", type=int, default=6)
     p.add_argument("--mid_heads", type=int, default=16)
     p.add_argument("--mid_ratio", type=float, default=4.0)
+    p.add_argument("--mid_mode", type=str, default="packed",
+                   choices=["packed", "crossq"],
+                   help="中间态结构：packed=帧级因果 TransformerEncoder（默认）；"
+                        "crossq=可学 query 的全双向交叉注意力重采样（实验 A，v2 式摘要）")
     p.add_argument("--dec_dim", type=int, default=0,
                    help="0 = 自动取 chunk_tokens×rate_dim")
     p.add_argument("--dec_depth", type=int, default=4)
@@ -179,7 +183,8 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         rate_tokens=a.rate_tokens, rate_dim=a.rate_dim,
         target_tokens=a.target_tokens, chunk_tokens=a.chunk_tokens,
         mid_dim=a.mid_dim, mid_depth=a.mid_depth, mid_heads=a.mid_heads,
-        mid_ratio=a.mid_ratio, dec_dim=a.dec_dim, dec_depth=a.dec_depth,
+        mid_ratio=a.mid_ratio, mid_mode=a.mid_mode,
+        dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
         step_gate=bool(a.step_gate), step_weights=a.step_weights,
         carry_ln=bool(a.carry_ln), readout_mask=bool(a.readout_mask),

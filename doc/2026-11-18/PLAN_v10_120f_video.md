@@ -240,3 +240,47 @@ ssh sha1 'cd /root/AssocVTC_v10 && SDPA_BACKEND=math MUSA_VISIBLE_DEVICES=0 \
   `/root/autodl-tmp/tok448_v2/v10_120f_v2align`，日志 `logs/v10_train_v2align.log`，
   2.42 s/step，ETA ≈ 2 h 42 min。
 - 待办：v2-pure 对照（`COPY=0 LOSSREAD=0`，全程平权监督、无 shortcut）作为第二组。
+
+## 1.4 实验 A：middle 改成「双向交叉查询重采样」（2026-11-18 18:05 起跑）
+
+用户指出：v2 的 decoder 第 1 步就能读到编码器给的全局摘要（`z_cls` 在 memory 里），
+而 v10 的 `TemporalMiddle` 是**帧级因果** encoder——第 t 步的 z 只含前 4(t+1) 帧。
+要求改成：**E 输出 (120×rows×d) 作为交叉注意力的 K/V，同形状随机初始化 query
+去查询**（即 middle 做 v2 式摘要）。
+
+实现：`--mid_mode crossq` → `CrossQueryMiddle`（`model_v10.py`）：
+
+```
+Q (1, F·T_f, d) 随机初始化（行↔(帧,行)）;  KV = E 打包行 + 可学 kv_pos
+nn.TransformerDecoder（query 间 self-attn + 到 E 的 cross-attn，6 层，**无 mask**）
+→ 输出 (B,F,T_f,d)，与 packed 版同形状（readout 不用改）
+```
+
+- 参数：d=896 时 ~57.9M（packed 版 38.6M）；算力可忽略（middle 每样本只算一次）。
+- **语义代价（必须写进报告）**：rate 不再是「第 t 组只含前 4(t+1) 帧」的渐进码流，
+  每行都是全片摘要；逐档曲线不再是"读前 t 组帧 vs 质量"，改成 v2 口径
+  「读多少 token 的质量」；`copy_skip/loss_read` 里"已读帧"的字面含义变弱。
+- 运行：`v10_120f_v2midA`，与 `v2align` 同配方（step+copy+loss_read，读出已对齐
+  v2），**只换 middle**；日志 `logs/v10_train_v2midA.log`，2.49 s/step。
+
+## 1.5 子智能体审计：还有哪些「设计意图 vs 实现」的类似问题
+
+2026-11-18 18:00 由只读审计子智能体给出（无 P0，按严重度）：
+
+1. **P1 评测口径**：`eval_v10_stepwise.py` 用整片 PSNR/L1，而 `loss_read=1` 时中间
+   档未读帧无监督 ⇒ "read t groups" 曲线把"猜未来"当成绩。应加 read-frame-only 曲线。
+2. **P1 文档/实现第二类不一致**：DESIGN 里 `n_steps=1` 单步预热/降率退火、checkpoint
+   AutoModel 自描述都**未实现**（`train_v10` 只有 LR warmup；`VideoV10` 仍是 `nn.Module`）。
+3. **P1 z_cls 不进率**：readout memory 永远没有 z_cls；v2 第 1 步就能读。27.98→30.53
+   的缺口主要是 z_cls 回归误差（probe：zcls_l1=0.0725）⇒ DESIGN §3「率<目标」在 K=16 失效。
+4. **P1 loss_read 帧权重极不均**：per-step 对已读帧取均值 ⇒ 解析算 frame0 权重约是
+   frame119 的 **120×**（早期帧过训、末尾帧几乎无监督）。可加 per-frame 归一化消融。
+5. **P1 v9 未对齐**：`model_v9.py` 仍是 carry LN + γ 默认开 + 因果 mask，且无开关
+   ⇒ v9-vs-v10 的 27.32/27.98 差异混着架构与 3 处偏差，无法归因。
+6. **P1 crossq 语义**：切双向 middle 后 rate 非前缀、逐档/渐进口径与 copy_skip 前提都变；
+   eval/PLAN 需同步（本条已在 §1.4 记录）。
+7. **P2**：copy_skip 使 specials 直抄、递推主要只影响 z_cls ⇒ "读出重建"措辞夸大；
+   `evaluate().latent_l1` 在 loss_read=1 时是 masked L1，与 §1.1 的 0.49（全帧）不可比；
+   默认配置（target_tokens=32、注释 1792、loss_read=0+copy_skip=1）不可用；
+   位置嵌入的 4+ 处差异（middle 无位置、readout 再补 kv_pos、norm_out 多一层 LN）；
+   best 用固定 2 条 val 选（选择噪声 ~0.1–0.3 dB）；cache docstring 仍教 torchrun 4 卡。

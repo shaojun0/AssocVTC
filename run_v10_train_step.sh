@@ -23,6 +23,7 @@ LOSSREAD=${LOSSREAD:-1}
 STEPGATE=${STEPGATE:-0}   # 0 = w≡1（v2 口径）; 1 = 零初始化 γ 门控（旧版）
 CARRYLN=${CARRYLN:-0}     # 0 = carry 无 LN（v2 口径）; 1 = 旧版手写 LN
 MASK=${MASK:-0}           # 0 = 读出全双向（v2 口径）; 1 = 旧版帧级因果 mask
+MIDMODE=${MIDMODE:-packed} # packed = 帧因果 TransformerEncoder; crossq = 双向交叉查询（实验 A）
 LR=${LR:-8e-4}
 STEPS=${STEPS:-4000}
 INIT=${INIT:-}
@@ -36,7 +37,7 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --out "$OUT" ${RESUME:+--resume "$RESUME"} ${INIT:+--init_trainable "$INIT"} \
   --frames 120 --img 448 --group 4 \
   --rate_tokens 16 --rate_dim 448 --target_tokens 16 --chunk_tokens 2 \
-  --mid_ratio 2 --mid_depth 6 --mid_heads 16 \
+  --mid_ratio 2 --mid_depth 6 --mid_heads 16 --mid_mode "$MIDMODE" \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
   --step_gate "$STEPGATE" --step_weights mean \
   --carry_ln "$CARRYLN" --readout_mask "$MASK" \

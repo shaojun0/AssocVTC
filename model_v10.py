@@ -91,7 +91,8 @@ from torch import Tensor
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
 __all__ = ["V10Config", "FrozenTokenizer", "TemporalMiddle",
-           "WholeClipDecoder", "VideoV10", "patches_to_image", "psnr_from_l1"]
+           "CrossQueryMiddle", "WholeClipDecoder", "VideoV10",
+           "patches_to_image", "psnr_from_l1"]
 
 
 # ═══════════════════════════════════════════════════════════ 小工具
@@ -126,6 +127,8 @@ class V10Config:
     chunk_tokens: int = 4      # 一个可训练向量 = 几个 token 拼接（4×448 = 1792，不填充）
     # ── 中间态（帧内 block 因果）
     mid_dim: int = 0           # 0 = 自动取 width（1792），不允许填成别的宽度
+    mid_mode: str = "packed"   # "packed" = 帧级因果 TransformerEncoder（v10 原版）
+                               # "crossq" = 可学 query 的**双向**交叉注意力重采样（v2 式摘要，实验 A）
     mid_depth: int = 6
     mid_heads: int = 16
     mid_ratio: float = 4.0
@@ -323,6 +326,49 @@ class TemporalMiddle(nn.Module):
         return self.norm_out(x).view(B, Fr, Tf, -1)
 
 
+# ═══════════════════════════════════════════════════════════ 交叉查询中间态（实验 A）
+class CrossQueryMiddle(nn.Module):
+    """(B,F,T_f,d) → (B,F,T_f,d)：可学 query 对编码器输出做**全双向**重采样。
+
+    为什么（2026-11-18 用户提出）：v2 的 readout memory 是 `[z_cls; z_s]`——这些
+    token 都来自**全局双向**的 DINO（任意 token 都"看过"整张图，z_cls 更是全局
+    摘要），所以 v2 的 decoder 每一步都拿得到"整图摘要 + 已读 token"。v10 的
+    middle 却是**帧级因果**的 TransformerEncoder：第 t 步的 z 只含前 4(t+1) 帧，
+    未读帧的信息根本不在。本模块把 middle 换成「E 输出做 K/V + 可学 query」的
+    交叉注意力（**无 mask、全双向**）⇒ 每个 rate 行都是全片范围内的摘要，
+    早期步也能拿到全片信息（等价于 v2 里 z_cls 的作用）。
+
+    代价（必须记住）：rate 不再是「第 t 组只含前 4(t+1) 帧」的**渐进码流**；
+    逐档曲线语义变成 v2 那种「读多少 token 的质量」，不能再解释为"读前 t 组帧"。
+
+    结构：Q 随机初始化（1, F·T_f, d，行↔(帧,行)），KV = E 打包行 + 可学位置嵌入，
+    `nn.TransformerDecoder`（self-attn 在 query 之间 + cross-attn 到 E）。
+    """
+
+    def __init__(self, dim: int, depth: int, heads: int, ratio: float,
+                 frames: int, tokens_per_frame: int, drop: float = 0.0):
+        super().__init__()
+        self.frames = int(frames)
+        self.tpf = int(tokens_per_frame)
+        L = self.frames * self.tpf
+        self.Q = nn.Parameter(torch.randn(1, L, dim) * 0.02)
+        self.kv_pos = nn.Parameter(torch.randn(1, L, dim) * 0.02)
+        layer = nn.TransformerDecoderLayer(
+            d_model=dim, nhead=heads, dim_feedforward=int(dim * ratio),
+            dropout=drop, activation="gelu", batch_first=True, norm_first=True)
+        self.decoder = nn.TransformerDecoder(layer, num_layers=int(depth))
+        self.norm_out = nn.LayerNorm(dim)
+
+    def forward(self, z_in: Tensor) -> Tensor:
+        B, Fr, Tf, _ = z_in.shape
+        assert Fr == self.frames and Tf == self.tpf, (z_in.shape, self.frames, self.tpf)
+        mem = z_in.reshape(B, Fr * Tf, -1) + self.kv_pos
+        Q = self.Q.expand(B, -1, -1)
+        # 无 mask：960 个 query 全双向 attend 全片 960 行 ⇒ 每行都是全片摘要
+        Y = self.decoder(tgt=Q, memory=mem)
+        return self.norm_out(Y).view(B, Fr, Tf, -1)
+
+
 # ═══════════════════════════════════════════════════════════ 整片段循环读出
 class WholeClipDecoder(nn.Module):
     """(frames+1) 行 × rows_pred 列的 1792 向量 + 30 步循环：每步读一组 z、重出整段。
@@ -513,10 +559,19 @@ class VideoV10(nn.Module):
             f"mid_dim={cfg.mid_dim} dec_dim={cfg.dec_dim} 必须都等于 "
             f"chunk_tokens×rate_dim={cfg.width}；换宽度只会引入填充冗余")
         self.cfg = cfg
-        self.middle = TemporalMiddle(
-            in_dim=cfg.width, dim=cfg.width, depth=cfg.mid_depth,
-            heads=cfg.mid_heads, ratio=cfg.mid_ratio,
-            tokens_per_frame=cfg.rows_rate, frames=cfg.frames)
+        mid_mode = str(getattr(cfg, "mid_mode", "packed")).lower()
+        assert mid_mode in ("packed", "crossq"), mid_mode
+        if mid_mode == "crossq":
+            # 实验 A：双向交叉查询重采样（v2 式全局摘要，rate 不再是渐进码流）
+            self.middle = CrossQueryMiddle(
+                dim=cfg.width, depth=cfg.mid_depth, heads=cfg.mid_heads,
+                ratio=cfg.mid_ratio, frames=cfg.frames,
+                tokens_per_frame=cfg.rows_rate)
+        else:
+            self.middle = TemporalMiddle(
+                in_dim=cfg.width, dim=cfg.width, depth=cfg.mid_depth,
+                heads=cfg.mid_heads, ratio=cfg.mid_ratio,
+                tokens_per_frame=cfg.rows_rate, frames=cfg.frames)
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
 
     # ── 目标：全量 special + z_cls（冻结编码器给）
@@ -712,6 +767,20 @@ if __name__ == "__main__":
     rd = WholeClipDecoder(cfg_g, code_dim=cfg.rate_dim, num_specials=cfg.target_tokens)
     assert rd.gate is not None and float(rd.gate.abs().max()) == 0.0
     print("[gate] γ 零初始化 ✓")
+
+    # 中间态两种模式：crossq（实验 A）形状/前向/反向都通
+    cfg_x = V10Config(tok_ckpt="", tok_cfg=tok_cfg, frames=8, group=4,
+                      rate_tokens=4, rate_dim=8, target_tokens=4, chunk_tokens=4,
+                      mid_depth=2, mid_heads=2, mid_ratio=2.0,
+                      dec_depth=2, dec_heads=2, dec_ratio=2.0,
+                      mid_mode="crossq")
+    mx = VideoV10(cfg_x).train()
+    ox = mx(xs := torch.rand(2, cfg_x.frames, 3, 32, 32))
+    assert ox["pred"].shape == (2, cfg_x.frames, 1 + cfg_x.target_tokens, 8), ox["pred"].shape
+    ox["loss"].backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for p in mx.middle.parameters()), "crossq middle 没有梯度"
+    print(f"[mid] crossq: loss={float(ox['loss'].detach()):.4f} 双向重采样通路 ✓")
 
     # 小步过拟合：20 步内 loss 应下降
     m.train()
