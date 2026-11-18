@@ -68,8 +68,10 @@ loss          mean_t L1(pred_t, 全量目标)，30 档平权
 改完 400 步就正常：loss 1.13 → 0.12，PSNR 9 → 19.7 dB；正式 run 4000 步到 **27.6–28.0 dB**
 （`v10_120f/best_trainable.pt`，best `eval_psnr=27.98 @step3000`）。
 
-> 并行读出这份代码已单独作为 **`v9` 分支**推到 GitHub（`git push origin v9`），
-> 附带一份代码导读：`doc/2026-11-18/README_v9_parallel_readout.md`。
+> 并行读出这份代码在 main 上独立成 **`model_v9.py`**（配套 `train_v9.py` /
+> `eval_v9_stepwise.py` / `run_v9_train.sh`），代码导读见
+> `doc/2026-11-18/README_v9_parallel_readout.md`；`test_v9_parity.py` 保证
+> `VideoV9` 与 `VideoV10(mem_mode="prefix")` 同权重输出逐位一致。
 
 ## 1.2 循环 vs 并行读出：单片段过拟合对照（2026-11-18 下午）
 
