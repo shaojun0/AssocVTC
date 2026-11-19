@@ -281,7 +281,8 @@ S3 7.1 h ≈ **25.6 h**；S3z448 末档 **26.1369 dB**（2560 val），逐档曲
 
 | 文档条目 | 本仓库主线状态 |
 |---|---|
-| `n_steps=1` 单步预热 / 降率退火 | **未实现**；`train_v10.py` 只有 LR warmup + cosine |
+| `n_steps=1` 单步预热 | **已实现（2026-11-19）**：`train_v10.py --stage1_epochs n --stage2_epochs m`，单次 run 内按 `global_step` 自动从 `n_steps=1` 切到 30 步；阶段 1 的评测带 `_s1` 后缀且不更新 `best_trainable.pt`（见 `run_v10_train_2stage.sh`） |
+| 降率退火 | **未实现**（仍只有 `--stage1_epochs` 的单步预热） |
 | checkpoint 自描述（`AutoModel` + `trust_remote_code`） | **未实现**（该实现只在远端 `75ac271` 那条历史线；本线 `VideoV10` 仍是 `nn.Module`） |
 | 读出 carry 与 v2 对齐（无 LN / 无 γ / 全双向 self-attn） | **已实现（2026-11-18 17:30）**：默认 `carry_ln=0, step_gate=0, readout_mask=0`；旧口径用开关显式复现 |
 | middle 两种模式 | **已实现**：`packed`（帧因果，默认）/ `crossq`（可学 query 双向交叉注意力，实验 A；rate 不再是渐进码流） |

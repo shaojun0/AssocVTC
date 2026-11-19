@@ -303,3 +303,36 @@ nn.TransformerDecoder（query 间 self-attn + 到 E 的 cross-attn，6 层，**�
 
 今晚保留的对照：packed middle + 已对齐 v2 读出的全量 run（`v10_120f_v2align`），
 作为"对齐架构 vs 旧架构"的同配方基线（此前只跑到 759 步就被实验 A 替换）。
+
+## 1.7 实验 B：两阶段训练（单步预热 → 30 步循环，2026-11-19 上午）
+
+**用户口径**：先不换架构，试「第一阶段单步解码 n 个 epoch，然后 30 步循环解码
+m 个 epoch」。动机是 DESIGN §5 的论文式配方：多步循环早期步只读到极少信息，
+条件最优解接近均值，从零直接训 30 步会卡在平凡解；先用最容易的单步把通路
+（middle 的「抄写」映射 + 前段 z_cls）训起来，再展开 30 档深监督。
+
+**实现**（`train_v10.py` / `run_v10_train_2stage.sh`）：
+- `--stage1_epochs n --stage2_epochs m`：总步数 = (n+m)×steps_per_epoch
+  （steps_per_epoch 由 `len(train)/(batch×accum×world)` 反推，本机 = 2011），
+  LR 仍是覆盖全程的单条 cosine（warmup_frac 0.02）；
+- 阶段 1：`n_steps=1` **只读第一组 z、只监督前 `group`=4 帧**（`loss_read` 的
+  已读帧 mask 天然给出）。`copy_skip` 下这条 loss 训练的是 middle 输出 =
+  target specials 的抄写映射 + 这 4 帧的 z_cls（读出 specials 分支没有被监督）；
+- 阶段 2：切回全 30 步，口径与 `v10_120f_v2align` 完全一致（packed middle、
+  step 读出、carry 无 LN/无 γ、全双向 self-attn、copy_skip + loss_read）；
+- 切换在 `V10Trainer.compute_loss` 里按 `state.global_step` 完成，不用重启、
+  不用手工热启动；阶段 1 的 eval（`eval_*_s1`）**不写** `best_trainable.pt`，
+  因为全 30 步 PSNR 在阶段 1 无意义。
+
+**本轮配置**：`v10_120f_2stage`，n=m=2（4022 + 4022 步 = 8044），lr 8e-4，
+batch 2×2×4 卡（16 clips/step）。阶段 1 实测 **0.24 s/it**（vs 30 步 2.4 s/it），
+阶段 1 已读帧 latent L1（2 条 val）：0.166@200 → 0.103@400 → 0.077@600 → 0.061@800。
+
+**要回答的问题**：同配方下 2 epoch 单步预热 + 2 epoch 循环，末档 PSNR 能否
+超过 `v10_120f_v2align`（同 4000 步主训练、无预热，跑到 2210 步时 26.05 dB /
+上界 30.53）与旧架构 `v10_120f`（27.98 dB）。逐档曲线（`psnr_read_mean`、
+`zcls_l1_mean`、`spec_l1_mean`）由收尾评测给出。
+
+**如果仍不理想**，下一步候选（按 §1.5/§1.6）：方案 C（causal middle + **1 个**
+全局摘要 token 进读出 memory）、方案 D（z_cls 进 rate，rate=z_cls+15 specials）、
+`loss_frame_norm` 消融、v2-pure（`COPY=0 LOSSREAD=0`）。

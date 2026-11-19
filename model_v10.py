@@ -574,6 +574,10 @@ class VideoV10(nn.Module):
                 heads=cfg.mid_heads, ratio=cfg.mid_ratio,
                 tokens_per_frame=cfg.rows_rate, frames=cfg.frames)
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
+        # 两阶段训练用：训练态下若 train_steps>0，forward 默认只跑这么多步
+        # （0 = 全 30 步）。由 train_v10.py 的 V10Trainer 按 step 切换，
+        # eval（model.eval()）恒走全步，不受影响。
+        self.train_steps = 0
 
     # ── 目标：全量 special + z_cls（冻结编码器给）
     def target_latents(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
@@ -624,6 +628,9 @@ class VideoV10(nn.Module):
 
         → dict(loss, pred, l1, step_l1, z, target)；像素 PSNR 只在给了 x 时算。
         """
+        if n_steps is None and self.training and getattr(self, "train_steps", 0):
+            # 两阶段训练的第 1 阶段：只跑 1 步（只读第一组 z、只监督前 group 帧）
+            n_steps = int(self.train_steps)
         if x is not None:
             enc = self.encode_rate(x)
         else:
@@ -659,6 +666,9 @@ class VideoV10(nn.Module):
             per_step = err.mean(dim=(2, 3, 4))                   # (B,S1)
             loss = (per_step.mean(dim=0) * w).sum()
         res = dict(loss=loss, l1=per_step.detach().mean(),
+                   # 与训练 loss 同口径（只算已读帧）的标量：阶段 1（n_steps=1）
+                   # 评测时 `l1` 混了未读帧的未训练输出，只有这个可比。
+                   l1_read=(loss.detach() if self.cfg.loss_read else None),
                    step_l1=per_step.detach().mean(dim=0), pred=out["pred"],
                    z=enc["z"], target=target, latents=dict(
                        z_cls=enc["z_cls"], z_s=enc["z_s"]))
@@ -683,6 +693,8 @@ class VideoV10(nn.Module):
                  pixel_psnr: bool = True) -> Dict[str, float]:
         res = self.forward(x, n_steps=n_steps, return_pix=False)
         out = {"latent_l1": float(res["l1"])}
+        if res.get("l1_read") is not None:
+            out["latent_l1_read"] = float(res["l1_read"])
         if pixel_psnr:
             pc = res["pred"][:, :, :1].contiguous()
             ps = res["pred"][:, :, 1:].contiguous()

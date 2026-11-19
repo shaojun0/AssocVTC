@@ -44,6 +44,12 @@ DeepSpeed 的 stage / bf16 / offload 全部在 `ds_zero2_v10.json` 里改。
   率 < 目标是故意的；`--target_tokens` 必须等于分词器 num_specials，
   否则冻结 R 的 `render` 会 assert 失败。
 * 损失：逐步平权 latent L1（`--step_weights mean|lin|last`），深监督全部 30 步。
+* 两阶段（2026-11-19，`--stage1_epochs/--stage2_epochs`）：阶段 1 用
+  `n_steps=1` 只读第一组 z、只监督前 `group` 帧，把「已读帧必须抄出来」的
+  通路打通（`copy_skip` 下这条 loss 只训练 middle 的抄写映射 + 前段 z_cls）；
+  阶段 2 切回全部 30 步深监督。阶段 1 不更新 `best_trainable.pt`（全步
+  PSNR 在阶段 1 无意义）。总步数 = (stage1_epochs+stage2_epochs)×steps_per_epoch，
+  LR 仍是覆盖全程的单条 cosine。
 * 评测：`--psnr_eval 1` 时，`V10Trainer.evaluate` 临时给裸模型设
   `eval_pixel=True`，`VideoV10.forward` 就额外返回 `psnr` / `psnr_tok_full`；
   `prediction_step` 会丢掉 `pix/pred/target/z`，避免 eval 把整段特征堆到 CPU。
@@ -58,6 +64,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import random
 from dataclasses import asdict
@@ -141,6 +148,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup_frac", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--max_steps", type=int, default=20000)
+    # ── 两阶段（2026-11-19）：单步预热 → 30 步循环
+    p.add_argument("--stage1_epochs", type=float, default=0.0,
+                   help="阶段 1（n_steps=1 单步解码）训几个 epoch；0 = 关（单阶段）")
+    p.add_argument("--stage1_n_steps", type=int, default=1,
+                   help="阶段 1 的 n_steps（默认 1 = 只读第一组 z、只监督前 group 帧）")
+    p.add_argument("--stage2_epochs", type=float, default=0.0,
+                   help="阶段 2（全 30 步循环）训几个 epoch；>0 时按 epoch 反推 "
+                        "max_steps（覆盖 --max_steps）")
     p.add_argument("--amp", type=int, default=1, help="bf16（CPU 自动关闭）")
     # DeepSpeed
     p.add_argument("--deepspeed", type=str, default="",
@@ -375,11 +390,17 @@ class V10EvalCallback(TrainerCallback):
     """
 
     def __init__(self, data_root: str, frames: int, img: int, n_clips: int,
-                 every: int, out_dir: str, psnr: bool = True):
+                 every: int, out_dir: str, psnr: bool = True,
+                 stage1_steps: int = 0, stage1_n_steps: int = 1):
         self.every = max(1, int(every))
         self.n_clips = max(1, int(n_clips))
         self.out_dir = str(out_dir)
         self.psnr = bool(psnr)
+        # 阶段 1（单步预热）里用 n_steps=1 评测：像素 PSNR 按整片算没有意义
+        # （未读帧的输出还没训），只报已读帧的 latent L1，指标带 `_s1` 后缀，
+        # 且**不更新** best_trainable.pt。
+        self.stage1_steps = int(stage1_steps)
+        self.stage1_n_steps = max(1, int(stage1_n_steps))
         self._ds = None
         self._spec = (str(data_root), int(frames), int(img))
         self.best = None
@@ -396,6 +417,10 @@ class V10EvalCallback(TrainerCallback):
             return
         trainer = self.trainer
         raw = trainer.accelerator.unwrap_model(trainer.model)
+        # 阶段 1（单步预热）期间：n_steps=1、不算像素、不存 best
+        in_s1 = bool(self.stage1_steps) and state.global_step <= self.stage1_steps
+        nsfx = "_s1" if in_s1 else ""
+        ns = self.stage1_n_steps if in_s1 else None
         was_training = raw.training
         raw.eval()
         self._ensure_ds()
@@ -408,15 +433,16 @@ class V10EvalCallback(TrainerCallback):
                 ctx = (torch.autocast("cuda", dtype=torch.bfloat16) if amp
                        else contextlib.nullcontext())
                 with ctx:
-                    out = raw.evaluate(x, pixel_psnr=self.psnr)
+                    out = raw.evaluate(x, n_steps=ns,
+                                       pixel_psnr=self.psnr and not in_s1)
                 for k, v in out.items():
                     acc[k] = acc.get(k, 0.0) + float(v)
                 n += 1
         raw.train(was_training)
-        metrics = {f"eval_{k}": v / max(n, 1) for k, v in acc.items()}
+        metrics = {f"eval_{k}{nsfx}": v / max(n, 1) for k, v in acc.items()}
         metrics["eval_clips"] = n
         trainer.log(metrics)
-        if self.psnr and "eval_psnr" in metrics and \
+        if self.psnr and not in_s1 and "eval_psnr" in metrics and \
                 (self.best is None or metrics["eval_psnr"] > self.best):
             self.best = metrics["eval_psnr"]
             self.best_step = int(state.global_step)
@@ -431,10 +457,33 @@ class V10EvalCallback(TrainerCallback):
 class V10Trainer(Trainer):
     """官方扩展点：无 labels 的 eval loss、丢掉巨型输出、MUSA RNG 适配。"""
 
-    def __init__(self, *args, psnr_eval: bool = False, **kwargs):
+    def __init__(self, *args, psnr_eval: bool = False,
+                 stage1_steps: int = 0, stage1_n_steps: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self.can_return_loss = True
         self.psnr_eval = bool(psnr_eval)
+        self.stage1_steps = int(stage1_steps)
+        self.stage1_n_steps = max(1, int(stage1_n_steps))
+        self._stage_tag = None
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """两阶段切换点：`global_step < stage1_steps` 时只跑 n_steps=1（单步
+        预热），之后放开全 30 步。DDP/accelerate 包装下要改 unwrap 后的裸模型。"""
+        raw = self.accelerator.unwrap_model(model)
+        if self.stage1_steps > 0:
+            in_s1 = self.state.global_step < self.stage1_steps
+            raw.train_steps = self.stage1_n_steps if in_s1 else 0
+            tag = "s1" if in_s1 else "s2"
+            if tag != self._stage_tag:
+                self._stage_tag = tag
+                if self.accelerator.is_main_process:
+                    self.accelerator.print(
+                        f"[stage] step {self.state.global_step} → 阶段{tag} "
+                        f"(train n_steps={raw.train_steps or 'full'})")
+        else:
+            raw.train_steps = 0
+        return super().compute_loss(model, inputs, return_outputs=return_outputs,
+                                    **kwargs)
 
     def evaluate(self, *args, **kwargs):
         raw = self.accelerator.unwrap_model(self.model)
@@ -543,6 +592,23 @@ def main() -> None:
               f"mid_missing={len(r1.missing_keys)} "
               f"read_missing={list(r2.missing_keys)[:4]} "
               f"read_unexpected={list(r2.unexpected_keys)[:4]}", flush=True)
+    # ── 两阶段步数：epoch → step（world_size 从 torchrun/accelerate 环境读）
+    world = int(os.environ.get("WORLD_SIZE", "1") or 1)
+    clips_per_step = max(1, a.batch * a.accum_steps * world)
+    steps_per_epoch = (math.ceil(len(tr) / clips_per_step) if len(tr) > 0
+                       else max(1, a.max_steps))
+    stage1_steps = 0
+    if a.stage1_epochs > 0 or a.stage2_epochs > 0:
+        stage1_steps = int(round(a.stage1_epochs * steps_per_epoch))
+        if a.stage2_epochs > 0:
+            a.max_steps = stage1_steps + int(round(a.stage2_epochs * steps_per_epoch))
+        else:
+            a.max_steps = max(a.max_steps, stage1_steps + 1)
+        if a.stage1_n_steps > 0 and stage1_steps > 0:
+            print(f"[stage] steps/epoch={steps_per_epoch} (世界={world}, "
+                  f"clips/step={clips_per_step}) 阶段1={a.stage1_epochs}ep="
+                  f"{stage1_steps}st(n_steps={a.stage1_n_steps}) → "
+                  f"阶段2={a.stage2_epochs}ep 共 {a.max_steps}st", flush=True)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     warmup_steps = int(a.warmup_frac * a.max_steps)
 
@@ -588,7 +654,8 @@ def main() -> None:
         eval_cb = V10EvalCallback(
             data_root=a.data_root, frames=a.frames, img=a.img,
             n_clips=a.val_batches, every=a.val_every, out_dir=a.out,
-            psnr=bool(a.psnr_eval))
+            psnr=bool(a.psnr_eval),
+            stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps)
     trainer = V10Trainer(
         model=model,
         args=training_args,
@@ -598,6 +665,7 @@ def main() -> None:
         compute_metrics=None,
         callbacks=[eval_cb] if eval_cb is not None else None,
         psnr_eval=bool(a.psnr_eval),
+        stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
     )
     if eval_cb is not None:
         eval_cb.trainer = trainer
@@ -612,7 +680,9 @@ def main() -> None:
     if trainer.accelerator.is_main_process:
         with open(os.path.join(a.out, "run_args.json"), "w",
                   encoding="utf-8") as f:
-            json.dump(dict(vars(a), cfg=asdict(cfg)), f,
+            json.dump(dict(vars(a), cfg=asdict(cfg),
+                           steps_per_epoch=steps_per_epoch,
+                           stage1_steps=stage1_steps), f,
                       ensure_ascii=False, indent=2)
 
     if a.resume:
