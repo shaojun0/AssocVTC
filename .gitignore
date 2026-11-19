@@ -19,3 +19,6 @@ __pycache__/
 
 # SVD cache (large)
 svd_cache/
+
+# 大体量逐档视频（全分辨率，仅本地保留；viz_224/ 的压缩版进 git）
+**/viz_full/
