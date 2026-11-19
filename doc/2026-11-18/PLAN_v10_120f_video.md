@@ -309,15 +309,27 @@ nn.TransformerDecoder（query 间 self-attn + 到 E 的 cross-attn，6 层，**�
 **用户口径**：先不换架构，试「第一阶段单步解码 n 个 epoch，然后 30 步循环解码
 m 个 epoch」。动机是 DESIGN §5 的论文式配方：多步循环早期步只读到极少信息，
 条件最优解接近均值，从零直接训 30 步会卡在平凡解；先用最容易的单步把通路
-（middle 的「抄写」映射 + 前段 z_cls）训起来，再展开 30 档深监督。
+训起来，再展开 30 档深监督。
+
+**"单步"必须对齐原 v2 的 A 相（2026-11-19 09:30 用户纠正）**：v2 的
+`train_v2.py --warm_steps N` 把 `decoder.steps` 设成 `[K]`（`single_steps =
+[model.num_specials]`），`step_windows` 首步 `lo=0, hi=K` ⇒ **一步读完全部
+`[z_cls; z_s]`、一步出整图**；loss = 各步直接预测 L1 平权，A 相只有 1 步 ⇒
+**全部位置都在 loss 里**。因此 v10 阶段 1 = `n_steps=1` + memory 换成**整段
+30 组 z（960 行）** + loss 覆盖全部 120 帧（`--stage1_mode full`，默认）。
+最初的实现（`n_steps=1` 只读 z_0、只监督前 4 帧）**不等价**，保留为
+`--stage1_mode first` 仅作对照，不是本轮口径。
 
 **实现**（`train_v10.py` / `run_v10_train_2stage.sh`）：
 - `--stage1_epochs n --stage2_epochs m`：总步数 = (n+m)×steps_per_epoch
   （steps_per_epoch 由 `len(train)/(batch×accum×world)` 反推，本机 = 2011），
   LR 仍是覆盖全程的单条 cosine（warmup_frac 0.02）；
-- 阶段 1：`n_steps=1` **只读第一组 z、只监督前 `group`=4 帧**（`loss_read` 的
-  已读帧 mask 天然给出）。`copy_skip` 下这条 loss 训练的是 middle 输出 =
-  target specials 的抄写映射 + 这 4 帧的 z_cls（读出 specials 分支没有被监督）；
+- 阶段 1（`--stage1_mode full`，默认）：`n_steps=1` + readout 的 cross-attn
+  memory = **整段 z 的全部 30×32=960 行**（memory 位置 = 行位置 `kv_pos`（32）
+  叠加 z 步位置 `step_emb`（30），复用既有参数、不新增/不破坏旧 ckpt），
+  一步出全部 1089 位置 × 9 行；`copy_skip` 下 120 帧都有直抄残差；
+  loss = 全部帧的 latent L1（full_read 下自动关掉 `loss_read` 的已读帧 mask，
+  等价 v2 A 相的"全部位置监督"）；
 - 阶段 2：切回全 30 步，口径与 `v10_120f_v2align` 完全一致（packed middle、
   step 读出、carry 无 LN/无 γ、全双向 self-attn、copy_skip + loss_read）；
 - 切换在 `V10Trainer.compute_loss` 里按 `state.global_step` 完成，不用重启、
@@ -325,8 +337,10 @@ m 个 epoch」。动机是 DESIGN §5 的论文式配方：多步循环早期步
   因为全 30 步 PSNR 在阶段 1 无意义。
 
 **本轮配置**：`v10_120f_2stage`，n=m=2（4022 + 4022 步 = 8044），lr 8e-4，
-batch 2×2×4 卡（16 clips/step）。阶段 1 实测 **0.24 s/it**（vs 30 步 2.4 s/it），
-阶段 1 已读帧 latent L1（2 条 val）：0.166@200 → 0.103@400 → 0.077@600 → 0.061@800。
+batch 2×2×4 卡（16 clips/step）。阶段 1（旧 first 口径）实测 0.24 s/it（vs 30 步
+2.4 s/it）⇒ 全读口径同量级（多出的只是 cross-attn key 从 32 行变 960 行）。
+阶段 1 评测（2 条 val，带 `_s1`）同时报 latent L1 与像素 PSNR —— 单步全读能
+出全片，PSNR 在此口径下有意义；旧 first 口径的 PSNR 无意义。
 
 **要回答的问题**：同配方下 2 epoch 单步预热 + 2 epoch 循环，末档 PSNR 能否
 超过 `v10_120f_v2align`（同 4000 步主训练、无预热，跑到 2210 步时 26.05 dB /

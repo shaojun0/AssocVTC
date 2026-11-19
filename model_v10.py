@@ -472,12 +472,24 @@ class WholeClipDecoder(nn.Module):
         return spec, cls
 
     def forward(self, z: Tensor, n_steps: Optional[int] = None,
-                return_step_preds: bool = False) -> Dict[str, Tensor]:
-        """z (B,S,P,d) → dict(pred (B,F,1+K,c), feats, preds 可选 (B,S,F,1+K,c))。"""
+                return_step_preds: bool = False,
+                full_read: bool = False) -> Dict[str, Tensor]:
+        """z (B,S,P,d) → dict(pred (B,F,1+K,c), feats, preds 可选 (B,S,F,1+K,c))。
+
+        `full_read=True`（两阶段训练的阶段 1，对齐 v2 的 A 相）：只跑 **1 步**，
+        但 cross-attn 的 memory 是**整段 z 的全部 S×P 行**（= 一次读完全部
+        rate），一步就出全部 120 帧 ⇒ "单步 + 全读"。memory 位置 = 行位置
+        `kv_pos` + z 步位置 `step_emb`，复用既有参数（不新增、不破坏旧 ckpt）。
+        loss 侧由调用方按"全部帧已读"处理（见 `VideoV10.forward` 的 full_read）。
+        """
         B, S, P, _ = z.shape
         assert P == self.P, (P, self.P)
         n = self.S if n_steps is None else int(n_steps)
         assert 1 <= n <= S, (n, S)
+        if full_read:
+            assert n == 1, (n, "full_read 只跑 1 步")
+            assert self.mem_mode != "prefix", "full_read 只支持 step 模式"
+            assert self.kv_pos is not None
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
         mask = None if self._mask is None else self._mask.to(dtype=z.dtype)
@@ -489,7 +501,12 @@ class WholeClipDecoder(nn.Module):
         if prefix or self.copy_skip:
             assert grp * rr == self.P and self.F * rr == self.S * self.P, (grp, rr)
             zr = z.reshape(B, self.F, rr, self.d)        # (B,F,rows_rate,d)
-        if prefix:
+        if full_read:
+            # (B,S,P,d)：行位置（每步 P 行共用）+ 步位置（区分 30 组 z）
+            mem_all = (z + self.kv_pos.reshape(1, 1, self.P, self.d)
+                       + self.step_emb.reshape(1, S, 1, self.d))
+            mem_all = mem_all.reshape(B, S * P, self.d)
+        elif prefix:
             fem = self.frame_emb.reshape(self.F, self.d)
             qf = self._qframe
             qe = fem[qf.clamp(min=0)]                        # (L,d)
@@ -504,8 +521,10 @@ class WholeClipDecoder(nn.Module):
             carry = Q + w * Y                                # = v2 的 query_base + Y
             h = (self.n_in(carry) if self.n_in is not None else carry) \
                 + self.step_emb[:, t]
-            nf = min(self.F, (t + 1) * grp)                  # 已读帧数
-            if prefix:
+            nf = self.F if full_read else min(self.F, (t + 1) * grp)  # 已读帧数
+            if full_read:
+                Y = self.decoder(tgt=h, memory=mem_all, tgt_mask=mask)
+            elif prefix:
                 keys = (zr[:, :nf]
                         + self.frame_emb[:, :nf].reshape(1, nf, 1, self.d)
                         + self.row_emb)                       # (B,nf,rr,d)
@@ -623,13 +642,23 @@ class VideoV10(nn.Module):
     def forward(self, x: Optional[Tensor] = None, n_steps: Optional[int] = None,
                 return_pix: bool = False,
                 z_cls: Optional[Tensor] = None,
-                z_s: Optional[Tensor] = None) -> Dict[str, Tensor]:
+                z_s: Optional[Tensor] = None,
+                full_read: Optional[bool] = None) -> Dict[str, Tensor]:
         """x (B,F,3,H,W) ∈[0,1]，或已缓存的 (z_cls (B,F,1,c), z_s (B,F,K,c))。
 
         → dict(loss, pred, l1, step_l1, z, target)；像素 PSNR 只在给了 x 时算。
+
+        `full_read=None` 时由训练态属性决定（`self.train_full_read`，两阶段
+        训练的阶段 1）；True = 单步全读（一步读完全部 z、一步出全片，v2 A 相
+        口径），此时 loss 覆盖**全部帧**（不套 loss_read 的已读帧 mask）。
         """
-        if n_steps is None and self.training and getattr(self, "train_steps", 0):
-            # 两阶段训练的第 1 阶段：只跑 1 步（只读第一组 z、只监督前 group 帧）
+        if full_read is None:
+            full_read = bool(self.training and
+                             getattr(self, "train_full_read", False))
+        if full_read:
+            n_steps = 1
+        elif n_steps is None and self.training and getattr(self, "train_steps", 0):
+            # 阶段 1 的另一种口径（stage1_mode="first"）：只读第一组 z、只监督前 group 帧
             n_steps = int(self.train_steps)
         if x is not None:
             enc = self.encode_rate(x)
@@ -637,12 +666,13 @@ class VideoV10(nn.Module):
             assert z_cls is not None and z_s is not None, "须给 x，或 (z_cls, z_s)"
             enc = self.encode_rate_latents(z_cls, z_s)
         target = self.target_latents(enc["z_cls"], enc["z_s"])   # (B,F,1+T,c) 冻结
-        out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True)
+        out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True,
+                           full_read=full_read)
         preds = out["preds"]                                     # (B,S',F,T,c)
         B, S1 = preds.shape[:2]
         err = (preds - target.unsqueeze(1)).abs()                # (B,S',F,T,c)
         w = self.step_weights(S1, self.cfg.step_weights, err.device)
-        if self.cfg.loss_read:
+        if self.cfg.loss_read and not full_read:
             # 只惩罚「第 t 步已经读到的帧」（前缀 t+1 组）。均值平凡解在已读帧
             # 上不再是解：读到的帧必须被抄出来，梯度不再被"不可知的未来帧"淹没。
             F = err.shape[2]
@@ -690,8 +720,10 @@ class VideoV10(nn.Module):
     # ── 评测：latent L1 + 经冻结 R 的像素 PSNR
     @torch.no_grad()
     def evaluate(self, x: Tensor, n_steps: Optional[int] = None,
-                 pixel_psnr: bool = True) -> Dict[str, float]:
-        res = self.forward(x, n_steps=n_steps, return_pix=False)
+                 pixel_psnr: bool = True,
+                 full_read: bool = False) -> Dict[str, float]:
+        res = self.forward(x, n_steps=n_steps, return_pix=False,
+                           full_read=full_read)
         out = {"latent_l1": float(res["l1"])}
         if res.get("l1_read") is not None:
             out["latent_l1_read"] = float(res["l1_read"])

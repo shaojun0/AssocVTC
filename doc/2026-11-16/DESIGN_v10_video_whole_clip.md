@@ -128,8 +128,12 @@ R（冻结）    末档 pred → 像素 → PSNR（只用于评测/监控）
 论文 §3.2 的教训：前几档只读到很少 token 时最优解接近均值，从零训练会卡在平凡解。
 v10 对应做法：
 
-1. **单步预热**：`n_steps=1`（只读第一组 z）把 middle/compressor/readout 的通路
-   训到收敛（相当于"4 帧 → 整段"的尽力预测，曲线是粗的）；
+1. **单步预热（全读）**：对齐 v2 的 A 相（`train_v2.py --warm_steps`：把
+   `decoder.steps` 设成 `[K]`，**一步读完全部 `[z_cls; z_s]`、一步出整图、
+   loss 覆盖全部位置**）。v10 里 = `n_steps=1` + readout 的 memory 换成
+   **整段 30 组 z（960 行，行位置 `kv_pos` + 步位置 `step_emb`）**、
+   loss 覆盖全部 120 帧（`--stage1_mode full`，默认）。旧理解"只读第一组 z"
+   不等价，保留为 `--stage1_mode first` 仅作对照；
 2. **展开 30 档**：从阶段 1 权重热启动，深监督全部 30 步；
 3. （可选）**降率退火**：先按 `rate_tokens=32`（满档）训，再线性降到 16 —— 对应
    论文的降维退火，让模型把信息重分配到更窄的率上。
@@ -281,7 +285,7 @@ S3 7.1 h ≈ **25.6 h**；S3z448 末档 **26.1369 dB**（2560 val），逐档曲
 
 | 文档条目 | 本仓库主线状态 |
 |---|---|
-| `n_steps=1` 单步预热 | **已实现（2026-11-19）**：`train_v10.py --stage1_epochs n --stage2_epochs m`，单次 run 内按 `global_step` 自动从 `n_steps=1` 切到 30 步；阶段 1 的评测带 `_s1` 后缀且不更新 `best_trainable.pt`（见 `run_v10_train_2stage.sh`） |
+| 单步全读预热（v2 A 相口径） | **已实现（2026-11-19）**：`train_v10.py --stage1_epochs n --stage1_mode full --stage2_epochs m`，阶段 1 = 1 步 + memory 为整段 z（960 行）+ loss 覆盖全帧；单次 run 内按 `global_step` 自动切到 30 步渐进读出。阶段 1 评测带 `_s1` 后缀且不更新 `best_trainable.pt`（见 `run_v10_train_2stage.sh`） |
 | 降率退火 | **未实现**（仍只有 `--stage1_epochs` 的单步预热） |
 | checkpoint 自描述（`AutoModel` + `trust_remote_code`） | **未实现**（该实现只在远端 `75ac271` 那条历史线；本线 `VideoV10` 仍是 `nn.Module`） |
 | 读出 carry 与 v2 对齐（无 LN / 无 γ / 全双向 self-attn） | **已实现（2026-11-18 17:30）**：默认 `carry_ln=0, step_gate=0, readout_mask=0`；旧口径用开关显式复现 |

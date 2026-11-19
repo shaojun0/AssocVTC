@@ -1,14 +1,18 @@
 #!/bin/bash
 # v10 两阶段训练（2026-11-19）—— 阶段1 单步预热（n_steps=1）→ 阶段2 全 30 步循环。
 #
-# 动机：单步阶段只读第一组 z、只监督前 group 帧（copy_skip 下这条 loss 只训练
-# middle 的「抄写」映射 + 前段 z_cls），把通路从均值平凡解里拽出来；随后切回
-# 30 步深监督（全 30 档、只对已读帧算 loss）。阶段切换由 train_v10.py 的
-# V10Trainer.compute_loss 按 global_step 完成，单次 run 内自动切换。
+# 动机（对齐 v2 训练的 A 相）：v2 的 --warm_steps 把 decoder.steps 设成 [K]
+# ——**一步读完全部 [z_cls; z_s]、一步出整图、loss 覆盖全部位置**。v10 对应
+# 口径 = n_steps=1 + memory=整段 30 组 z（960 行）+ loss 覆盖全部 120 帧，
+# 先把「整段 z → 整段 special/z_cls」的通路从均值平凡解里拽出来；随后切回
+# 30 步渐进读出（每步只读当步 z_t、loss 只算已读帧）。阶段切换由
+# train_v10.py 的 V10Trainer.compute_loss 按 global_step 完成，单次 run 内自动切换。
 #
 # 环境变量（都可覆盖）：
-#   S1E=2      阶段1 epoch 数（n_steps=1 单步解码；0=关）
-#   S1NS=1     阶段1 的 n_steps（1 = 只读第一组 z）
+#   S1E=2      阶段1 epoch 数（单步全读；0=关）
+#   S1MODE=full 阶段1 口径：full = 单步但一次读完整段 z、一步出全片（v2 A 相，默认）；
+#               first = 只读第一组 z、只监督前 group 帧（旧口径，仅对照用）
+#   S1NS=1     阶段1 的 n_steps（1 = 单步）
 #   S2E=2      阶段2 epoch 数（全 30 步循环）
 #   MEM=step|prefix  COPY=1|0  LOSSREAD=1|0  其余同 run_v10_train_step.sh
 #   LR / OUT / NAME / PORT / INIT / RESUME
@@ -22,6 +26,7 @@ export MUSA_VISIBLE_DEVICES=${GPUS:-0,1,2,3}
 export OMP_NUM_THREADS=6
 export TOKENIZERS_PARALLELISM=false
 S1E=${S1E:-2}
+S1MODE=${S1MODE:-full}
 S1NS=${S1NS:-1}
 S2E=${S2E:-2}
 MEM=${MEM:-step}
@@ -50,7 +55,8 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --carry_ln "$CARRYLN" --readout_mask "$MASK" \
   --mem_mode "$MEM" --loss_read "$LOSSREAD" --loss_frame_norm "$LFRAMENORM" \
   --copy_skip "$COPY" \
-  --stage1_epochs "$S1E" --stage1_n_steps "$S1NS" --stage2_epochs "$S2E" \
+  --stage1_epochs "$S1E" --stage1_mode "$S1MODE" \
+  --stage1_n_steps "$S1NS" --stage2_epochs "$S2E" \
   --batch 2 --accum_steps 2 \
   --lr "$LR" --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
   --max_steps 8000 --amp 1 --log_every 20 \

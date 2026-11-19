@@ -44,11 +44,14 @@ DeepSpeed 的 stage / bf16 / offload 全部在 `ds_zero2_v10.json` 里改。
   率 < 目标是故意的；`--target_tokens` 必须等于分词器 num_specials，
   否则冻结 R 的 `render` 会 assert 失败。
 * 损失：逐步平权 latent L1（`--step_weights mean|lin|last`），深监督全部 30 步。
-* 两阶段（2026-11-19，`--stage1_epochs/--stage2_epochs`）：阶段 1 用
-  `n_steps=1` 只读第一组 z、只监督前 `group` 帧，把「已读帧必须抄出来」的
-  通路打通（`copy_skip` 下这条 loss 只训练 middle 的抄写映射 + 前段 z_cls）；
-  阶段 2 切回全部 30 步深监督。阶段 1 不更新 `best_trainable.pt`（全步
-  PSNR 在阶段 1 无意义）。总步数 = (stage1_epochs+stage2_epochs)×steps_per_epoch，
+* 两阶段（2026-11-19，`--stage1_epochs/--stage2_epochs`）：阶段 1 = **单步
+  全读**，对齐 v2 的 A 相（`--warm_steps`: `decoder.steps=[K]` 一次读完
+  `[z_cls; z_s]`、一步出整图、loss 覆盖全部位置）：v10 里 = `n_steps=1` +
+  memory 为整段 30 组 z（960 行）、loss 覆盖全部 120 帧；阶段 2 切回 30 步
+  渐进读出（每步只读当步 z_t、loss 只算已读帧）。旧口径
+  `--stage1_mode first`（只读第一组 z、只监督前 4 帧）保留但默认关。
+  阶段 1 评测带 `_s1` 后缀且不更新 `best_trainable.pt`（选择口径仍是阶段 2
+  的全 30 步 PSNR）。总步数 = (stage1_epochs+stage2_epochs)×steps_per_epoch，
   LR 仍是覆盖全程的单条 cosine。
 * 评测：`--psnr_eval 1` 时，`V10Trainer.evaluate` 临时给裸模型设
   `eval_pixel=True`，`VideoV10.forward` 就额外返回 `psnr` / `psnr_tok_full`；
@@ -152,7 +155,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage1_epochs", type=float, default=0.0,
                    help="阶段 1（n_steps=1 单步解码）训几个 epoch；0 = 关（单阶段）")
     p.add_argument("--stage1_n_steps", type=int, default=1,
-                   help="阶段 1 的 n_steps（默认 1 = 只读第一组 z、只监督前 group 帧）")
+                   help="阶段 1 的 n_steps（默认 1 = 单步）")
+    p.add_argument("--stage1_mode", type=str, default="full",
+                   choices=["full", "first"],
+                   help="阶段 1 口径：full（默认，对齐 v2 的 A 相）= 单步但"
+                        "**一次读完整段 z**（960 行）、一步出全片、loss 覆盖全部帧；"
+                        "first = 只读第一组 z、只监督前 group 帧（旧口径）")
     p.add_argument("--stage2_epochs", type=float, default=0.0,
                    help="阶段 2（全 30 步循环）训几个 epoch；>0 时按 epoch 反推 "
                         "max_steps（覆盖 --max_steps）")
@@ -391,16 +399,18 @@ class V10EvalCallback(TrainerCallback):
 
     def __init__(self, data_root: str, frames: int, img: int, n_clips: int,
                  every: int, out_dir: str, psnr: bool = True,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1):
+                 stage1_steps: int = 0, stage1_n_steps: int = 1,
+                 stage1_mode: str = "full"):
         self.every = max(1, int(every))
         self.n_clips = max(1, int(n_clips))
         self.out_dir = str(out_dir)
         self.psnr = bool(psnr)
-        # 阶段 1（单步预热）里用 n_steps=1 评测：像素 PSNR 按整片算没有意义
-        # （未读帧的输出还没训），只报已读帧的 latent L1，指标带 `_s1` 后缀，
-        # 且**不更新** best_trainable.pt。
+        # 阶段 1 评测：指标带 `_s1` 后缀、**不更新** best_trainable.pt（选择
+        # 口径始终是阶段 2 的全 30 步 PSNR）。full 口径下单步就能出全片，
+        # 像素 PSNR 有意义；first 口径只监督前 group 帧，不算像素。
         self.stage1_steps = int(stage1_steps)
         self.stage1_n_steps = max(1, int(stage1_n_steps))
+        self.stage1_mode = str(stage1_mode).lower()
         self._ds = None
         self._spec = (str(data_root), int(frames), int(img))
         self.best = None
@@ -421,6 +431,7 @@ class V10EvalCallback(TrainerCallback):
         in_s1 = bool(self.stage1_steps) and state.global_step <= self.stage1_steps
         nsfx = "_s1" if in_s1 else ""
         ns = self.stage1_n_steps if in_s1 else None
+        full = bool(in_s1 and self.stage1_mode == "full")
         was_training = raw.training
         raw.eval()
         self._ensure_ds()
@@ -433,8 +444,11 @@ class V10EvalCallback(TrainerCallback):
                 ctx = (torch.autocast("cuda", dtype=torch.bfloat16) if amp
                        else contextlib.nullcontext())
                 with ctx:
-                    out = raw.evaluate(x, n_steps=ns,
-                                       pixel_psnr=self.psnr and not in_s1)
+                    out = raw.evaluate(
+                        x, n_steps=ns, full_read=full,
+                        # 单步全读能出全片 ⇒ 阶段 1 的像素 PSNR 有意义；
+                        # first 口径只监督前 4 帧，PSNR 无意义，不算。
+                        pixel_psnr=self.psnr and (full or not in_s1))
                 for k, v in out.items():
                     acc[k] = acc.get(k, 0.0) + float(v)
                 n += 1
@@ -458,12 +472,14 @@ class V10Trainer(Trainer):
     """官方扩展点：无 labels 的 eval loss、丢掉巨型输出、MUSA RNG 适配。"""
 
     def __init__(self, *args, psnr_eval: bool = False,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1, **kwargs):
+                 stage1_steps: int = 0, stage1_n_steps: int = 1,
+                 stage1_mode: str = "full", **kwargs):
         super().__init__(*args, **kwargs)
         self.can_return_loss = True
         self.psnr_eval = bool(psnr_eval)
         self.stage1_steps = int(stage1_steps)
         self.stage1_n_steps = max(1, int(stage1_n_steps))
+        self.stage1_mode = str(stage1_mode).lower()
         self._stage_tag = None
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -473,15 +489,21 @@ class V10Trainer(Trainer):
         if self.stage1_steps > 0:
             in_s1 = self.state.global_step < self.stage1_steps
             raw.train_steps = self.stage1_n_steps if in_s1 else 0
+            # 阶段 1 的两种口径：full = 单步全读（v2 A 相：memory=整段 z、
+            # loss 覆盖全部帧）；first = 只读第一组 z（旧口径）
+            raw.train_full_read = bool(in_s1 and self.stage1_mode == "full")
             tag = "s1" if in_s1 else "s2"
             if tag != self._stage_tag:
                 self._stage_tag = tag
                 if self.accelerator.is_main_process:
                     self.accelerator.print(
                         f"[stage] step {self.state.global_step} → 阶段{tag} "
-                        f"(train n_steps={raw.train_steps or 'full'})")
+                        f"(train n_steps={raw.train_steps or 'full'}"
+                        + (f", full_read={raw.train_full_read})"
+                           if in_s1 else ")"))
         else:
             raw.train_steps = 0
+            raw.train_full_read = False
         return super().compute_loss(model, inputs, return_outputs=return_outputs,
                                     **kwargs)
 
@@ -607,7 +629,8 @@ def main() -> None:
         if a.stage1_n_steps > 0 and stage1_steps > 0:
             print(f"[stage] steps/epoch={steps_per_epoch} (世界={world}, "
                   f"clips/step={clips_per_step}) 阶段1={a.stage1_epochs}ep="
-                  f"{stage1_steps}st(n_steps={a.stage1_n_steps}) → "
+                  f"{stage1_steps}st(n_steps={a.stage1_n_steps},"
+                  f"mode={a.stage1_mode}) → "
                   f"阶段2={a.stage2_epochs}ep 共 {a.max_steps}st", flush=True)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     warmup_steps = int(a.warmup_frac * a.max_steps)
@@ -655,7 +678,8 @@ def main() -> None:
             data_root=a.data_root, frames=a.frames, img=a.img,
             n_clips=a.val_batches, every=a.val_every, out_dir=a.out,
             psnr=bool(a.psnr_eval),
-            stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps)
+            stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
+            stage1_mode=a.stage1_mode)
     trainer = V10Trainer(
         model=model,
         args=training_args,
@@ -666,6 +690,7 @@ def main() -> None:
         callbacks=[eval_cb] if eval_cb is not None else None,
         psnr_eval=bool(a.psnr_eval),
         stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
+        stage1_mode=a.stage1_mode,
     )
     if eval_cb is not None:
         eval_cb.trainer = trainer
