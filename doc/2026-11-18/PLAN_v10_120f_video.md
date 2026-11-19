@@ -397,3 +397,64 @@ batch 2×2×4 卡（16 clips/step）。阶段 1（旧 first 口径）实测 0.24
 2. 读出 carry 显式搬运早期帧 `z_cls`（step 模式末步只有 `z_t`，需靠递推 Y 记住）；
 3. 先做 v2-pure（`COPY=0 LOSSREAD=0`）对照，确认循环读出本身有没有学到时间通路；
 4. 方案 C（causal middle + 1 个全局摘要 token）；`loss_frame_norm` 消融。
+
+## 1.8 用户重构版（635e90c「与 v2 同构最简形态」）复现：失败 + 定位（2026-11-19 22:20）
+
+**背景**：用户 2026-11-19 提交 `635e90c`，把 `model_v10.py` 精简到「与 v2 同构的最简
+形态」：middle 固定为 `CrossQueryMiddle`、删除 `copy_skip` / `carry_ln` / `loss_read` /
+`loss_frame_norm` / `step_weights` / 两阶段（full_read/train_steps/stage1_*）、读出
+self-attn 仍默认全双向，loss = 每步对**全部帧**的 latent L1 平权均值（v2 直接预测口径），
+decoder 末层 norm 移进 `nn.TransformerDecoder`、输出头改残差 MLP（`out = Y + MLP(Y)`）。
+用户要求用这一版「同样跑 2 阶段」。我在**不改架构**的前提下补回两阶段（commit
+`af49dd8`），并顺带修掉该提交里一个必崩 bug：`V10EvalCallback.on_step_end` 仍引用
+已删除的 `nsfx`/`in_s1`（任何 run 第一次 val 就 NameError）。
+
+**配置**（与上一轮 `v10_120f_2stage` 同口径）：阶段 1 = 2 epoch 单步全读（4022 步），
+阶段 2 = 2 epoch 全 30 步（4022 步），lr 8e-4，batch 2×accum2×4 卡，
+`step_gate=0 / readout_mask=0`，OUT=`v10_120f_2stage_rf`。8044 步跑满（3 h 38 m）。
+
+**结果（负）**：
+- 阶段 1（单步全读）：`eval_psnr_s1` **10.90 → 12.31**（最好 12.31@4022），
+  `eval_latent_l1_s1` 0.383 → 0.354 —— 从第 200 步起基本走平，**卡在均值解**。
+- 阶段 2：切换后 loss 0.35 → 0.48（预期，因为每步 memory 从 960 行缩到 32 行），
+  但 **step≈4340 时 loss 尖峰 29.5 → grad_norm=nan → 权重 NaN**，之后 167 行日志
+  的 eval 全是 `nan`；`best_trainable.pt` 停在 step 4200（10.62 dB）。
+- 60 val 逐档评测（best@4200）：末档 **12.36 ± 2.13 dB**（距上界 **17.70** dB），
+  且 **30 档曲线完全平**（t=1 → t=30：12.36 → 12.36；z_cls 0.392 / special 0.495
+  也不随档位变）⇒ 读出**完全不使用 rate**，输出与输入片段无关的模板。
+
+**定位**（`tools/diag_carry_norm.py` + `tools/diag_mid_identity.py`，
+产物 `artifacts/v10_120f_2stage_rf/diag.json`）：
+1. **不是 carry/调度数值问题**：best@4200 前向跑 30 步，`max|Y|` 稳定在 5.5–5.7，
+   bf16 与 fp32 都无 NaN ⇒ 递推本身稳定；NaN 是训练侧（loss 尖峰后反向溢出）引起的。
+2. **不是 middle 塌成常数**：middle 输出 std 2.3–2.6（输入 packed std 1.17），
+   跨片段均值的 std 1.8–2.0 ⇒ 有内容、有片段差异。
+3. **但 middle 把输入彻底混合掉了**：`cos(mid, packed)` 按位置 ≈ **0.001–0.005**
+   （每行都是全片摘要，与原位置的内容几乎正交），`mid_norm ≈ 2× packed_norm`。
+   即 rate 不再是「每帧 8 行局部 token」，而是一组与位置解绑的全片摘要。
+4. 第 3 条 + **删掉 `copy_skip`** ⇒ 读出必须从全片摘要反推 120 帧的 frame-local
+   specials，而没有任何恒等通路可走 ⇒ 收敛到均值模板是最省力的局部极小。
+   阶段 2 又把每步 memory 从 960 行缩到 32 行，进一步削弱条件，随后训练数值发散。
+
+**同口径对比（60 val）**：
+
+| run | 末档 PSNR | 距上界 | z_cls L1 | special L1 | 曲线形状 |
+|---|---|---|---|---|---|
+| v10_120f_2stage（我的版，packed middle + copy_skip） | **24.76 ± 3.28** | 5.30 | 0.3743 | 0.0139 | 单调 9.35→24.76 |
+| v10_120f 旧配方（27.98 那版，prefix 读出） | 24.12 ± 3.31 | 5.94 | 0.3834 | 0.0175 | 单调 |
+| v10_120f_v2align@2210 | 23.94 ± 2.94 | 6.12 | 0.3864 | 0.0222 | 单调 |
+| **v10_120f_2stage_rf（用户重构版）** | **12.36 ± 2.13** | 17.70 | 0.3924 | 0.4950 | **全平** |
+
+**结论**：这版「最简形态」与 v2 差在关键一点——v2 的 memory token 是编码器**本来就有**
+的全局摘要（z_cls + z_s），读出只做映射；这里的 `CrossQueryMiddle` 是**再学一个摘要**，
+把 960 行局部内容压成与位置解绑的混合，再删掉 `copy_skip` 后没有任何东西保证 rate 里
+保留每帧信息，于是读出放弃 rate、退化成均值。**这是"透明化实验"的直接产出：简化掉的
+两个部件（帧级因果 middle、copy_skip）不是一个可有可无的捷径，而是当前配方能工作的前提。**
+
+**若要继续这条线，最小回滚候选（等用户定）**：
+1. 保留 `TemporalMiddle`（帧级因果 packed，接近恒等）—— 上一轮 2stage 24.76 就是它；
+2. 或保留 `copy_skip`（读出不必重建 special，只学 z_cls/修正）；
+3. 若坚持 crossq：给它加恒等捷径 `mid = packed + crossq(packed)`，或把 query 改成
+   per-position 绑定（每行只 attend 自己那帧/行），否则 `cos_same_pos≈0` 不会自己消失；
+4. 阶段 2 数值发散需单独处理：30 步 BPTT 下 lr 8e-4 可能偏大（建议 stage2 2–4e-4 +
+   更严 grad clip，或切换时就地 detach/重置 carry）。
