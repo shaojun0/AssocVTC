@@ -1,30 +1,32 @@
 #!/usr/bin/env python
-"""v10 单片段过拟合对照：循环(step) vs 并行(prefix) 读出架构。
+"""v10 单片段过拟合：循环(step) 读出架构。
 
 为什么（2026-11-18 用户安排）
 ---------------------------
-先用「单片段过拟合」确认循环架构到底能不能拟合，再在「并行已经拟合」的权重
-上切到循环架构（课程学习），然后同条件对照两种架构 —— 单片段上过拟合是唯一
-能把「是不是这个架构/优化器根本学不动」与「泛化差」分开的实验。
+先用「单片段过拟合」确认循环架构到底能不能拟合，再在已拟合权重上做课程学习
+—— 单片段上过拟合是唯一能把「是不是这个架构/优化器根本学不动」与「泛化差」
+分开的实验。
 
-四个独立单卡作业（一卡一个进程；MUSA 上不要多进程同卡，见 build_latent_cache 注释）
---------------------------------------------------------------------------------
-  prefix      并行基线：cross-attn over 已读前缀（当前正式训练用的架构）
+（2026-11-19：模型里的 prefix 读出、packed 中间态与 copy_skip 直抄残差均已
+移除，本脚本只剩纯 step 循环读出一条通路。）
+
+单卡作业
+--------
   step_nocopy 纯循环：memory=当步 z_t，递推 Y 是搬运历史的**唯一**通路
-  step_copy   循环 + 直抄残差：已读帧直接抄（递推只负责未读帧）
-  step_warm   从并行正式训练 best_trainable.pt 初始化后切循环（课程学习）
+  step_warm   从正式训练 best_trainable.pt 初始化（课程学习）
 
 指标（每 --eval_every 步，整段 30 步，与训练同 bf16 前向；最后一步 = 读全量）
   l1_all     末档全片段 latent L1（17 行全算）
   psnr       末档经冻结 R 出像素、对原始帧的 PSNR
   tok_full   冻结分词器自身末档 PSNR（该片段的「读全量」上界）
   l1_whole   逐档全帧 latent L1 曲线（均值）
-  l1_read    逐档「已读帧」latent L1 曲线（均值；loss_read=1 时这才是训练指标）
+  l1_read    逐档「已读帧」latent L1 曲线（均值；仅作诊断参考，训练 loss 已
+             切换为 v2 式全帧平权均值，不再有已读帧口径）
 
 用法（单卡，独立进程启动）::
 
     SDPA_BACKEND=math MUSA_VISIBLE_DEVICES=0 python overfit_v10.py \
-        --arch prefix --steps 800 --out /root/autodl-tmp/tok448_v2/overfit/prefix
+        --steps 800 --out /root/autodl-tmp/tok448_v2/overfit/step_copy
 """
 from __future__ import annotations
 
@@ -53,11 +55,6 @@ def parse_args() -> argparse.Namespace:
                    help="只用于取该片段的原始帧算 PSNR")
     p.add_argument("--clip", type=int, default=0,
                    help="缓存全局下标（= ClipDataset train 下标，缓存是按同序切的）")
-    p.add_argument("--arch", choices=["prefix", "step"], default="prefix")
-    p.add_argument("--mid_mode", choices=["packed", "crossq"], default="packed",
-                   help="中间态结构（crossq = 实验 A 的双向交叉查询）")
-    p.add_argument("--copy_skip", type=int, default=1)
-    p.add_argument("--loss_read", type=int, default=1)
     p.add_argument("--steps", type=int, default=800)
     p.add_argument("--lr", type=float, default=8e-4)
     p.add_argument("--weight_decay", type=float, default=0.05)
@@ -90,11 +87,8 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         tok_ckpt=a.tok_ckpt, frames=120, group=4,
         rate_tokens=16, rate_dim=448, target_tokens=16, chunk_tokens=2,
         mid_dim=0, mid_depth=6, mid_heads=16, mid_ratio=2.0,
-        mid_mode=a.mid_mode,
         dec_dim=0, dec_depth=4, dec_heads=16, dec_ratio=2.0, dec_drop=0.0,
-        step_gate=True, step_weights="mean",
-        mem_mode=a.arch, loss_read=bool(a.loss_read),
-        copy_skip=bool(a.copy_skip))
+        step_gate=True)
 
 
 def load_cached_clip(cache_dir: str, idx: int) -> torch.Tensor:
@@ -179,8 +173,7 @@ def main() -> None:
                         img=448)[a.clip].to(dev)[None]      # (1,F,3,H,W)
     trainable = [p for p in m.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=a.lr, weight_decay=a.weight_decay)
-    print(f"[cfg] arch={cfg.mem_mode} copy_skip={cfg.copy_skip} "
-          f"loss_read={cfg.loss_read} clip={a.clip} steps={a.steps} lr={a.lr} "
+    print(f"[cfg] clip={a.clip} steps={a.steps} lr={a.lr} "
           f"trainable={sum(p.numel() for p in trainable)/1e6:.2f}M", flush=True)
 
     rows = []
@@ -199,7 +192,7 @@ def main() -> None:
             ev = evaluate(m, z_cls, z_s, x)
             row = dict(it=it, loss=round(float(loss.detach()), 5), **ev)
             rows.append(row)
-            print(f"[{a.arch}{'+copy' if cfg.copy_skip else ''}] "
+            print(f"[step] "
                   f"it {it:4d} loss {row['loss']:.5f} "
                   f"l1_all {row['l1_all']:.4f} "
                   f"psnr {row.get('psnr', float('nan')):.2f} "

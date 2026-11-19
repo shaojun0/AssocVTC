@@ -17,8 +17,9 @@
 `nn.TransformerDecoderLayer`；本文件只保留模型编排（打包、循环读出、门控），
 不再手写 QKV 投影和两层 MLP。
 
-- middle：`nn.TransformerEncoder`。每帧 4 个位置（不是 33 个 token），帧级
-  因果 mask。等宽 ⇒ **不建 in_proj**。
+- middle：`CrossQueryMiddle`（可学 query + E 输出做 KV 的**全双向**交叉注意力
+  重采样）。每帧 4 个位置（不是 33 个 token），等宽 ⇒ **不建 in_proj**。
+  （旧版帧级因果 `TemporalMiddle` 与 prefix 读出已于 2026-11-19 移除。）
 - readout：`nn.TransformerDecoder`。121 帧 × 9 行 = 1089 个位置，帧级因果。
   等宽 ⇒ **不建 kv_proj**；special 侧**也不建 head**（8 行 1792 直接 reshape
   成 32×448），只有 z_cls 那一行需要 `cls_head`（1792→448）。
@@ -52,11 +53,10 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
 2026-11-18 与 v2 对齐（远端 946226d 口径）
 ------------------------------------------
 循环骨架与 `model_v2.OutputQueryDecoder` 保持一致：
-  * carry = `Q + Y_{t-1}`（**不加 LN**；默认也没有 γ 门控，即等权相加）；
+  * carry = `Q + Y_{t-1}`（裸加，**无 LN**；默认也没有 γ 门控，即等权相加；
+    Y 本身已被 decoder 末层 norm 归一化，状态有界）；
   * 读出侧 self-attn **全双向、无 tgt_mask**（streaming 由「第 t 步 memory 只有
-    前 t+1 组 z」保证，不靠 self-attn mask）；
-旧版（LN + γ + 帧级因果 mask，2026-11-16）可用 `--carry_ln 1 --step_gate 1
---readout_mask 1` 显式打开，仅用于复现历史产物。
+    前 t+1 组 z」保证，不靠 self-attn mask）。
 
 为什么「率 < 目标」
 ------------------
@@ -72,9 +72,7 @@ target_tokens   目标 special 数；本版必须等于 num_specials（冻结 R 
 group           z 步覆盖帧数（4 → 30 步，2 fps 潜在帧）
 mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"投影到别的宽度"
 step_gate       是否用零初始化门控 γ（默认关 = w≡1，carry 与 v2 等权相加）
-carry_ln         carry 处是否加 LayerNorm（默认 0；v2 口径 = 不加）
 readout_mask     读出 self-attn 是否帧级因果（默认 0 = 全双向，同 v2）
-step_weights    逐步损失权重（"mean" 平权 | "lin" 线性加权到末步）
 
 自检：``python model_v10.py``（CPU 可跑，不需要 ckpt）
 """
@@ -86,11 +84,12 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
-__all__ = ["V10Config", "FrozenTokenizer", "TemporalMiddle",
+__all__ = ["V10Config", "FrozenTokenizer",
            "CrossQueryMiddle", "WholeClipDecoder", "VideoV10",
            "patches_to_image", "psnr_from_l1"]
 
@@ -125,10 +124,8 @@ class V10Config:
     rate_dim: int = 448        # 单个 token 宽度（= 分词器 zs_dim）
     target_tokens: int = 16    # 目标 special token 数（本分支配方 = num_specials = 16）
     chunk_tokens: int = 2      # 一个可训练向量 = 2 个 token 拼接（2×448 = 896，不填充）
-    # ── 中间态（帧内 block 因果）
+    # ── 中间态
     mid_dim: int = 0           # 0 = 自动取 width（896），不允许填成别的宽度
-    mid_mode: str = "packed"   # "packed" = 帧级因果 TransformerEncoder（v10 原版）
-                               # "crossq" = 可学 query 的**双向**交叉注意力重采样（v2 式摘要，实验 A）
     mid_depth: int = 6
     mid_heads: int = 16
     mid_ratio: float = 4.0
@@ -139,13 +136,8 @@ class V10Config:
     dec_ratio: float = 2.0
     dec_drop: float = 0.0
     step_gate: bool = False    # γ 零初始化门控（默认关 = w≡1，同 v2 的 query_base + Y）
-    carry_ln: bool = False     # carry 处是否加 LayerNorm（默认关；v2 口径 = 不加）
     readout_mask: bool = False # 读出 self-attn 是否用帧级因果 mask（默认关 = 全双向，同 v2）
-    step_weights: str = "mean"
-    mem_mode: str = "step"     # "step" = 每步只看 z_t（设计原版）; "prefix" = 看已读前缀
-    loss_read: bool = True     # True = 第 t 步只在「已读帧」上算 loss（去均值平凡解）
-    loss_frame_norm: bool = False  # True = loss_read 时按帧归一化（消掉早期帧权重 ~120×后期帧）
-    copy_skip: bool = True     # 已读帧的 rate 行直抄到输出（残差捷径；prefix/step 都支持）
+    # loss 侧无开关：每步 pred 对全部帧 latent L1 平权均值（v2 直接预测口径）
 
 
     @property
@@ -282,52 +274,7 @@ class FrozenTokenizer(nn.Module):
         return self
 
 
-# ═══════════════════════════════════════════════════════════ 中间态
-class TemporalMiddle(nn.Module):
-    """帧内 block 因果的 Transformer：一帧之内的向量互看，跨帧只看历史帧。
-
-    打包视图就是设计口径本身：每帧 `chunk_tokens` 个 token 拼成一个 896
-    的向量，所以每帧 = 4 个位置，`tokens_per_frame` 直接等于 4，不需要在
-    33 token 的视图里模拟 block 边界。
-
-    当 `in_dim == dim`（打包后天然等宽）时**不建投影层**：硬加一个
-    `Linear(896, 896)` 只是把同一个向量重新线性混合一遍，属于纯冗余。
-    """
-
-    def __init__(self, in_dim: int, dim: int, depth: int, heads: int,
-                 ratio: float, tokens_per_frame: int, frames: int,
-                 drop: float = 0.0):
-        super().__init__()
-        self.tpf = int(tokens_per_frame)
-        self.frames = int(frames)
-        L = self.tpf * self.frames
-        assert in_dim == dim, (in_dim, dim)
-        self.in_proj = None
-        self.norm_in = nn.LayerNorm(dim)
-        layer = nn.TransformerEncoderLayer(
-            d_model=dim, nhead=heads, dim_feedforward=int(dim * ratio),
-            dropout=drop, activation="gelu", batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(
-            layer, num_layers=int(depth), norm=None,
-            enable_nested_tensor=False)
-        self.norm_out = nn.LayerNorm(dim)
-        fi = torch.arange(L) // self.tpf                    # token → 帧号
-        allowed = fi[None, :] <= fi[:, None]                # True = 可看
-        # nn.MultiheadAttention 的浮点 mask 是加性的：0 保留，-inf 屏蔽。
-        mask = torch.zeros(L, L, dtype=torch.float32).masked_fill(
-            ~allowed, float("-inf"))
-        self.register_buffer("_attn_mask", mask, persistent=False)
-
-    def forward(self, z_in: Tensor) -> Tensor:
-        """z_in (B, F, T_f, d) → (B, F, T_f, d)（同形；打包后无需投影）。"""
-        B, Fr, Tf, _ = z_in.shape
-        assert Fr == self.frames and Tf == self.tpf, (z_in.shape, self.frames, self.tpf)
-        x = self.norm_in(z_in.reshape(B, Fr * Tf, -1))
-        x = self.encoder(x, mask=self._attn_mask)
-        return self.norm_out(x).view(B, Fr, Tf, -1)
-
-
-# ═══════════════════════════════════════════════════════════ 交叉查询中间态（实验 A）
+# ═══════════════════════════════════════════════════════════ 交叉查询中间态
 class CrossQueryMiddle(nn.Module):
     """(B,F,T_f,d) → (B,F,T_f,d)：可学 query 对编码器输出做**全双向**重采样。
 
@@ -357,8 +304,17 @@ class CrossQueryMiddle(nn.Module):
         layer = nn.TransformerDecoderLayer(
             d_model=dim, nhead=heads, dim_feedforward=int(dim * ratio),
             dropout=drop, activation="gelu", batch_first=True, norm_first=True)
-        self.decoder = nn.TransformerDecoder(layer, num_layers=int(depth))
-        self.norm_out = nn.LayerNorm(dim)
+        # 末层 norm 交给 TransformerDecoder（norm_first 的推荐用法）：
+        # 输出已是 LN(Y_raw)，forward 里不用再写一遍。
+        self.decoder = nn.TransformerDecoder(
+            layer, num_layers=int(depth), norm=nn.LayerNorm(dim))
+        # 输出头：残差 MLP —— out = Y + MLP(Y)（Y 已被 decoder 末层 norm 归一化），
+        # 与读出侧同构；残差保证 rate 行的尺度/语义锚在 decoder 摘要上。
+        self.mlp_out = nn.Sequential(
+            nn.Linear(dim, 4 * dim),
+            nn.GELU(),
+            nn.Linear(4 * dim, dim),
+        )
 
     def forward(self, z_in: Tensor) -> Tensor:
         B, Fr, Tf, _ = z_in.shape
@@ -367,7 +323,8 @@ class CrossQueryMiddle(nn.Module):
         Q = self.Q.expand(B, -1, -1)
         # 无 mask：960 个 query 全双向 attend 全片 960 行 ⇒ 每行都是全片摘要
         Y = self.decoder(tgt=Q, memory=mem)
-        return self.norm_out(Y).view(B, Fr, Tf, -1)
+        Y = Y + self.mlp_out(Y)
+        return Y.view(B, Fr, Tf, -1)
 
 
 # ═══════════════════════════════════════════════════════════ 整片段循环读出
@@ -377,7 +334,7 @@ class WholeClipDecoder(nn.Module):
     每步结构：
         h      = Q + γ_t·Y_{t-1} + step_emb[t]       carry 同 v2：无 LN、默认 w≡1
         Y      = TransformerDecoder(h, z_t)          全双向 self-attn（无 tgt_mask）+ cross-attn
-        pred_t = LN(Y) 拆成 8 个 chunk（32 个 special）+ 1 行 z_cls
+        pred_t = Y + MLP(Y) 拆成 8 个 chunk（32 个 special）+ 1 行 z_cls
 
     位置数 = 121 × 9 = 1089：120 帧 + 1 个随机初始化起始槽，每帧 9 行 896
     （8 行装 32 个 special，1 行装 z_cls —— 冻结 R 出像素必须要它）。
@@ -408,40 +365,26 @@ class WholeClipDecoder(nn.Module):
         # 查询与状态（整片段一条序列）
         self.Q = nn.Parameter(torch.randn(1, L, self.d) * 0.02)
         self.step_emb = nn.Parameter(torch.randn(1, self.S, 1, self.d) * 0.02)
-        self.mem_mode = str(getattr(cfg, "mem_mode", "step")).lower()
-        # prefix 模式下 kv_pos 用不到：不建它，否则 DDP 会因为「有参数不参与
-        # loss」在第二次迭代报 "Expected to have finished reduction"。
-        self.kv_pos = (nn.Parameter(torch.randn(1, self.P, self.d) * 0.02)
-                       if self.mem_mode != "prefix" else None)
-        if self.mem_mode == "prefix":
-            # 前缀读出（2026-11-18 诊断后新增）：第 t 步 cross-attn 的 key 是
-            # **已读过的前 (t+1) 组 z**（每组 group 帧 × rows_rate 行），并给
-            # key 与 query 都加「帧位置 + 行号」嵌入 ⇒ "把读过的帧抄到对应输出
-            # 位置" 变成一步可学的映射，不再依赖 30 步递推去搬运整段信息。
-            rr = int(self.P // int(cfg.group))                # 每帧 rows_rate 行
-            self.frame_emb = nn.Parameter(torch.randn(1, self.F, 1, self.d) * 0.02)
-            self.row_emb = nn.Parameter(torch.randn(1, 1, rr, self.d) * 0.02)
-            self.start_emb = nn.Parameter(torch.randn(1, 1, self.d) * 0.02)
-            qf = torch.arange(L, dtype=torch.long) // self.R - 1     # -1 = 起始槽
-            self.register_buffer("_qframe", qf, persistent=False)
-        # 「直抄残差」：输出行 0..rr-1 += 已读帧的 rate 行。prefix 模式默认开
-        # （没有它时实测训练会塌到「与输入无关的模板」：middle 输出跨片段 std
-        # 从 0.29 崩到 0.015，pred 完全不吃 memory，因为均值解是局部极小）。
-        # 2026-11-18 起 **step 模式也支持**（CLI --copy_skip），用于
-        # 「纯循环 vs 循环+直抄」的单片段过拟合对照：两者信息量相同，唯一差别
-        # 是未读帧由 30 步递推 Y 还是由前缀 cross-attn 预测。
-        self.copy_skip = bool(getattr(cfg, "copy_skip", True))
+        self.kv_pos = nn.Parameter(torch.randn(1, self.P, self.d) * 0.02)
         self.gate = (nn.Parameter(torch.zeros(self.S)) if cfg.step_gate else None)
-        # carry 对齐 v2（946226d）：默认**不加** LN，h = Q + γ·Y + step_emb；
-        # cfg.carry_ln=True 时才保留 2026-11-16 旧版的手写 LN。
-        self.n_in = nn.LayerNorm(self.d) if cfg.carry_ln else None
+        # carry 对齐 v2（946226d）：裸加，h = Q + γ·Y + step_emb，无 LN；
+        # Y 已被下方 decoder 的末层 norm 归一化，carry 状态有界。
         layer = nn.TransformerDecoderLayer(
             d_model=self.d, nhead=int(cfg.dec_heads),
             dim_feedforward=int(self.d * cfg.dec_ratio), dropout=cfg.dec_drop,
             activation="gelu", batch_first=True, norm_first=True)
+        # 末层 norm 交给 TransformerDecoder（norm_first 的推荐用法）：每步输出
+        # 已是 LN(Y_raw)，循环里不用再写一遍。副作用：carry 递推用的 Y 也是
+        # 归一化后的（等价于 carry 处自带 LayerNorm，状态有界，利于 30 步 BPTT）。
         self.decoder = nn.TransformerDecoder(
-            layer, num_layers=int(cfg.dec_depth), norm=None)
-        self.norm_out = nn.LayerNorm(self.d)
+            layer, num_layers=int(cfg.dec_depth), norm=nn.LayerNorm(self.d))
+        # 输出头：残差 MLP —— out = Y + MLP(Y)（Y 已被 decoder 末层 norm 归一化），
+        # 保留恒等通路（替换掉原来的裸 LayerNorm）。
+        self.mlp_out = nn.Sequential(
+            nn.Linear(self.d, 4 * self.d),
+            nn.GELU(),
+            nn.Linear(4 * self.d, self.d),
+        )
         self.cls_head = nn.Linear(self.d, self.code_dim)    # 只有 z_cls 需要投影
         # 读出 self-attn：默认**全双向、无 tgt_mask**（同 v2 的 OutputQueryDecoder，
         # 946226d 口径）；streaming 由「第 t 步 memory 只有前 t+1 组 z」保证，
@@ -455,91 +398,40 @@ class WholeClipDecoder(nn.Module):
         else:
             self._mask = None
 
-    def _split(self, Y: Tensor, resid: Optional[Tensor] = None
-               ) -> Tuple[Tensor, Tensor]:
-        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。
-
-        `resid` (B,F,R,d) 是 prefix 模式的**直抄残差**：把已经读到的 rate 行
-        原样加到输出行上（第 r 行 = 该帧第 r 个 rate 行），写第一个 special
-        不需要任何学习；未读帧的残差为 0。
-        """
+    def _split(self, Y: Tensor) -> Tuple[Tensor, Tensor]:
+        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。"""
         B = Y.shape[0]
         Y = Y.view(B, self.F + 1, self.R, self.d)[:, 1:]    # 丢掉随机起始槽
-        if resid is not None:
-            Y = Y + resid
         spec = Y[:, :, :self.R - 1].reshape(B, self.F, self.K, self.code_dim)
         cls = self.cls_head(Y[:, :, self.R - 1]).unsqueeze(2)
         return spec, cls
 
     def forward(self, z: Tensor, n_steps: Optional[int] = None,
-                return_step_preds: bool = False,
-                full_read: bool = False) -> Dict[str, Tensor]:
+                return_step_preds: bool = False) -> Dict[str, Tensor]:
         """z (B,S,P,d) → dict(pred (B,F,1+K,c), feats, preds 可选 (B,S,F,1+K,c))。
 
-        `full_read=True`（两阶段训练的阶段 1，对齐 v2 的 A 相）：只跑 **1 步**，
-        但 cross-attn 的 memory 是**整段 z 的全部 S×P 行**（= 一次读完全部
-        rate），一步就出全部 120 帧 ⇒ "单步 + 全读"。memory 位置 = 行位置
-        `kv_pos` + z 步位置 `step_emb`，复用既有参数（不新增、不破坏旧 ckpt）。
-        loss 侧由调用方按"全部帧已读"处理（见 `VideoV10.forward` 的 full_read）。
+        与 v2 的 `OutputQueryDecoder` 同构：循环体无分支。第 t 步 memory =
+        当步 P 行（kv_pos 只含行位置）；`n_steps` 只控制渐进读出的档数
+        （评测逐档曲线用），训练恒走全 S 步。
         """
         B, S, P, _ = z.shape
         assert P == self.P, (P, self.P)
         n = self.S if n_steps is None else int(n_steps)
         assert 1 <= n <= S, (n, S)
-        if full_read:
-            assert n == 1, (n, "full_read 只跑 1 步")
-            assert self.mem_mode != "prefix", "full_read 只支持 step 模式"
-            assert self.kv_pos is not None
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
         mask = None if self._mask is None else self._mask.to(dtype=z.dtype)
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
-        prefix = (self.mem_mode == "prefix")
-        grp = int(self.cfg.group)
-        rr = int(self.P // grp)                          # 每帧 rows_rate 行
-        if prefix or self.copy_skip:
-            assert grp * rr == self.P and self.F * rr == self.S * self.P, (grp, rr)
-            zr = z.reshape(B, self.F, rr, self.d)        # (B,F,rows_rate,d)
-        if full_read:
-            # (B,S,P,d)：行位置（每步 P 行共用）+ 步位置（区分 30 组 z）
-            mem_all = (z + self.kv_pos.reshape(1, 1, self.P, self.d)
-                       + self.step_emb.reshape(1, S, 1, self.d))
-            mem_all = mem_all.reshape(B, S * P, self.d)
-        elif prefix:
-            fem = self.frame_emb.reshape(self.F, self.d)
-            qf = self._qframe
-            qe = fem[qf.clamp(min=0)]                        # (L,d)
-            qe = torch.where((qf >= 0).unsqueeze(-1), qe,
-                             self.start_emb.reshape(1, self.d).expand_as(qe))
-        else:
-            kv_all = z + self.kv_pos                         # (B,S,P,d)，等宽投影
+        kv = z + self.kv_pos                                 # (B,S,P,d)，等宽投影
         specs: List[Tensor] = []
         clss: List[Tensor] = []
         for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
             carry = Q + w * Y                                # = v2 的 query_base + Y
-            h = (self.n_in(carry) if self.n_in is not None else carry) \
-                + self.step_emb[:, t]
-            nf = self.F if full_read else min(self.F, (t + 1) * grp)  # 已读帧数
-            if full_read:
-                Y = self.decoder(tgt=h, memory=mem_all, tgt_mask=mask)
-            elif prefix:
-                keys = (zr[:, :nf]
-                        + self.frame_emb[:, :nf].reshape(1, nf, 1, self.d)
-                        + self.row_emb)                       # (B,nf,rr,d)
-                keys = keys.reshape(B, nf * rr, self.d)
-                Y = self.decoder(tgt=h + qe, memory=keys, tgt_mask=mask)
-            else:
-                Y = self.decoder(tgt=h, memory=kv_all[:, t], tgt_mask=mask)
-            # 直抄残差：已读帧的 rate 行原样回填到输出行（读到的帧立刻精确
-            # 可出，不需要模型"学会抄"；未读帧为 0，留给模型预测）。
-            # 两种 mem_mode 共用一套填充逻辑，对照实验里这是共同项。
-            resid = None
-            if self.copy_skip:
-                resid = z.new_zeros(B, self.F, self.R, self.d)
-                resid[:, :nf, :rr] = zr[:, :nf]
-            spec, cls = self._split(self.norm_out(Y), resid)
+            h = carry + self.step_emb[:, t]
+            Y = self.decoder(tgt=h, memory=kv[:, t], tgt_mask=mask)
+            spec, cls = self._split(Y + self.mlp_out(Y))
             specs.append(spec)
             clss.append(cls)
         out = dict(pred=torch.cat([clss[-1], specs[-1]], dim=2),
@@ -579,24 +471,11 @@ class VideoV10(nn.Module):
             f"mid_dim={cfg.mid_dim} dec_dim={cfg.dec_dim} 必须都等于 "
             f"chunk_tokens×rate_dim={cfg.width}；换宽度只会引入填充冗余")
         self.cfg = cfg
-        mid_mode = str(getattr(cfg, "mid_mode", "packed")).lower()
-        assert mid_mode in ("packed", "crossq"), mid_mode
-        if mid_mode == "crossq":
-            # 实验 A：双向交叉查询重采样（v2 式全局摘要，rate 不再是渐进码流）
-            self.middle = CrossQueryMiddle(
-                dim=cfg.width, depth=cfg.mid_depth, heads=cfg.mid_heads,
-                ratio=cfg.mid_ratio, frames=cfg.frames,
-                tokens_per_frame=cfg.rows_rate)
-        else:
-            self.middle = TemporalMiddle(
-                in_dim=cfg.width, dim=cfg.width, depth=cfg.mid_depth,
-                heads=cfg.mid_heads, ratio=cfg.mid_ratio,
-                tokens_per_frame=cfg.rows_rate, frames=cfg.frames)
+        self.middle = CrossQueryMiddle(
+            dim=cfg.width, depth=cfg.mid_depth, heads=cfg.mid_heads,
+            ratio=cfg.mid_ratio, frames=cfg.frames,
+            tokens_per_frame=cfg.rows_rate)
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
-        # 两阶段训练用：训练态下若 train_steps>0，forward 默认只跑这么多步
-        # （0 = 全 30 步）。由 train_v10.py 的 V10Trainer 按 step 切换，
-        # eval（model.eval()）恒走全步，不受影响。
-        self.train_steps = 0
 
     # ── 目标：全量 special + z_cls（冻结编码器给）
     def target_latents(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
@@ -626,79 +505,29 @@ class VideoV10(nn.Module):
         z = mid.reshape(B, S, self.cfg.chunks_per_step, d)   # (B,30,P,width)
         return dict(z=z, z_cls=z_cls, z_s=z_s, packed=packed, mid=mid)
 
-    @staticmethod
-    def step_weights(n: int, mode: str, device) -> Tensor:
-        if mode == "lin":
-            w = torch.arange(1, n + 1, dtype=torch.float32, device=device)
-        elif mode == "last":
-            w = torch.zeros(n, device=device)
-            w[-1] = 1.0
-            return w
-        else:
-            w = torch.ones(n, device=device)
-        return w / w.sum()
-
-    # ── 前向 + 损失
+    # ── 前向 + 损失（v2 口径：每步输出都监督全部帧，逐步平权，无开关）
     def forward(self, x: Optional[Tensor] = None, n_steps: Optional[int] = None,
                 return_pix: bool = False,
                 z_cls: Optional[Tensor] = None,
-                z_s: Optional[Tensor] = None,
-                full_read: Optional[bool] = None) -> Dict[str, Tensor]:
+                z_s: Optional[Tensor] = None) -> Dict[str, Tensor]:
         """x (B,F,3,H,W) ∈[0,1]，或已缓存的 (z_cls (B,F,1,c), z_s (B,F,K,c))。
 
         → dict(loss, pred, l1, step_l1, z, target)；像素 PSNR 只在给了 x 时算。
-
-        `full_read=None` 时由训练态属性决定（`self.train_full_read`，两阶段
-        训练的阶段 1）；True = 单步全读（一步读完全部 z、一步出全片，v2 A 相
-        口径），此时 loss 覆盖**全部帧**（不套 loss_read 的已读帧 mask）。
+        `n_steps` 只用于评测逐档曲线（渐进读出）；训练恒走全 S 步。
+        损失 = 每步 pred 对全部帧 latent L1 的平权均值（v2 的直接预测口径）。
         """
-        if full_read is None:
-            full_read = bool(self.training and
-                             getattr(self, "train_full_read", False))
-        if full_read:
-            n_steps = 1
-        elif n_steps is None and self.training and getattr(self, "train_steps", 0):
-            # 阶段 1 的另一种口径（stage1_mode="first"）：只读第一组 z、只监督前 group 帧
-            n_steps = int(self.train_steps)
         if x is not None:
             enc = self.encode_rate(x)
         else:
             assert z_cls is not None and z_s is not None, "须给 x，或 (z_cls, z_s)"
             enc = self.encode_rate_latents(z_cls, z_s)
         target = self.target_latents(enc["z_cls"], enc["z_s"])   # (B,F,1+T,c) 冻结
-        out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True,
-                           full_read=full_read)
+        out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True)
         preds = out["preds"]                                     # (B,S',F,T,c)
-        B, S1 = preds.shape[:2]
-        err = (preds - target.unsqueeze(1)).abs()                # (B,S',F,T,c)
-        w = self.step_weights(S1, self.cfg.step_weights, err.device)
-        if self.cfg.loss_read and not full_read:
-            # 只惩罚「第 t 步已经读到的帧」（前缀 t+1 组）。均值平凡解在已读帧
-            # 上不再是解：读到的帧必须被抄出来，梯度不再被"不可知的未来帧"淹没。
-            F = err.shape[2]
-            grp = int(self.cfg.group)
-            nf = (torch.arange(S1, device=err.device) + 1) * grp  # (S',) 已读帧数
-            frame = torch.arange(F, device=err.device)
-            m = (frame[None, :] < nf[:, None]).to(err.dtype)      # (S',F)
-            per_frame = err.mean(dim=(3, 4))                      # (B,S',F)
-            per_step = (per_frame * m).sum(-1) / m.sum(-1).clamp_min(1)
-            if self.cfg.loss_frame_norm:
-                # 2026-11-18 审计：默认口径下 frame0 的梯度权重约是 frame119 的
-                # 120×（早期帧被 30 步重复监督、末段帧只有最后几步）。打开后：
-                # 先对每帧在「被读到的步」上取加权均值（步权重仍生效），
-                # 再对帧取均值 ⇒ 帧间平权。
-                num = (per_frame * m * w[None, :, None]).sum(dim=1)   # (B,F)
-                den = (m * w[:, None]).sum(dim=0)                     # (F,)
-                loss = (num / den.clamp_min(1e-8)).mean()
-            else:
-                loss = (per_step.mean(dim=0) * w).sum()
-        else:
-            per_step = err.mean(dim=(2, 3, 4))                   # (B,S1)
-            loss = (per_step.mean(dim=0) * w).sum()
-        res = dict(loss=loss, l1=per_step.detach().mean(),
-                   # 与训练 loss 同口径（只算已读帧）的标量：阶段 1（n_steps=1）
-                   # 评测时 `l1` 混了未读帧的未训练输出，只有这个可比。
-                   l1_read=(loss.detach() if self.cfg.loss_read else None),
+        # 与 v2 同口径：reduction="none" 保留步维，再按帧/token/通道求均值 ⇒ (B,S')
+        per_step = F.l1_loss(preds, target.unsqueeze(1),
+                             reduction="none").mean(dim=(2, 3, 4))
+        res = dict(loss=per_step.mean(), l1=per_step.detach().mean(),
                    step_l1=per_step.detach().mean(dim=0), pred=out["pred"],
                    z=enc["z"], target=target, latents=dict(
                        z_cls=enc["z_cls"], z_s=enc["z_s"]))
@@ -720,13 +549,9 @@ class VideoV10(nn.Module):
     # ── 评测：latent L1 + 经冻结 R 的像素 PSNR
     @torch.no_grad()
     def evaluate(self, x: Tensor, n_steps: Optional[int] = None,
-                 pixel_psnr: bool = True,
-                 full_read: bool = False) -> Dict[str, float]:
-        res = self.forward(x, n_steps=n_steps, return_pix=False,
-                           full_read=full_read)
+                 pixel_psnr: bool = True) -> Dict[str, float]:
+        res = self.forward(x, n_steps=n_steps, return_pix=False)
         out = {"latent_l1": float(res["l1"])}
-        if res.get("l1_read") is not None:
-            out["latent_l1_read"] = float(res["l1_read"])
         if pixel_psnr:
             pc = res["pred"][:, :, :1].contiguous()
             ps = res["pred"][:, :, 1:].contiguous()
@@ -812,7 +637,7 @@ if __name__ == "__main__":
     assert float(d[k]) > 1e-6 and float(d[-1]) > 1e-6, d
 
     # 默认 = v2 对齐口径：carry 无 LN、无 γ 门控、读出 self-attn 全双向无 mask
-    assert m.readout.n_in is None, "默认 carry 不该有 LN（v2 口径）"
+    assert not hasattr(m.readout, "n_in"), "carry_ln 已移除，不该再有 n_in"
     assert m.readout._mask is None, "默认读出不该有 tgt_mask（v2 口径）"
     assert m.readout.gate is None, "默认不该建 γ 门控（w≡1，= v2 的 query_base + Y）"
     print("[v2-aligned] carry 无 LN、无 γ、读出全双向（无 tgt_mask）✓")
@@ -822,31 +647,6 @@ if __name__ == "__main__":
     rd = WholeClipDecoder(cfg_g, code_dim=cfg.rate_dim, num_specials=cfg.target_tokens)
     assert rd.gate is not None and float(rd.gate.abs().max()) == 0.0
     print("[gate] γ 零初始化 ✓")
-
-    # 中间态两种模式：crossq（实验 A）形状/前向/反向都通
-    cfg_x = V10Config(tok_ckpt="", tok_cfg=tok_cfg, frames=8, group=4,
-                      rate_tokens=4, rate_dim=8, target_tokens=4, chunk_tokens=4,
-                      mid_depth=2, mid_heads=2, mid_ratio=2.0,
-                      dec_depth=2, dec_heads=2, dec_ratio=2.0,
-                      mid_mode="crossq")
-    mx = VideoV10(cfg_x).train()
-    ox = mx(xs := torch.rand(2, cfg_x.frames, 3, 32, 32))
-    assert ox["pred"].shape == (2, cfg_x.frames, 1 + cfg_x.target_tokens, 8), ox["pred"].shape
-    ox["loss"].backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0
-               for p in mx.middle.parameters()), "crossq middle 没有梯度"
-    print(f"[mid] crossq: loss={float(ox['loss'].detach()):.4f} 双向重采样通路 ✓")
-
-    # loss_frame_norm：帧间归一化后的 loss 通路（finite + 反向能到 middle）
-    from dataclasses import replace as _replace
-    cfg_fn = _replace(cfg, loss_frame_norm=True)
-    mfn = VideoV10(cfg_fn).train()
-    ofn = mfn(xs_fn := torch.rand(2, cfg_fn.frames, 3, 32, 32))
-    assert bool(torch.isfinite(ofn["loss"])), ofn["loss"]
-    ofn["loss"].backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0
-               for p in mfn.middle.parameters()), "loss_frame_norm 没有梯度"
-    print(f"[loss] loss_frame_norm: loss={float(ofn['loss'].detach()):.4f} ✓")
 
     # 小步过拟合：20 步内 loss 应下降
     m.train()

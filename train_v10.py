@@ -43,16 +43,8 @@ DeepSpeed 的 stage / bf16 / offload 全部在 `ds_zero2_v10.json` 里改。
   目标 = 全部 `--target_tokens` + z_cls（默认 32+1 → 8×1792 + 1 行）。
   率 < 目标是故意的；`--target_tokens` 必须等于分词器 num_specials，
   否则冻结 R 的 `render` 会 assert 失败。
-* 损失：逐步平权 latent L1（`--step_weights mean|lin|last`），深监督全部 30 步。
-* 两阶段（2026-11-19，`--stage1_epochs/--stage2_epochs`）：阶段 1 = **单步
-  全读**，对齐 v2 的 A 相（`--warm_steps`: `decoder.steps=[K]` 一次读完
-  `[z_cls; z_s]`、一步出整图、loss 覆盖全部位置）：v10 里 = `n_steps=1` +
-  memory 为整段 30 组 z（960 行）、loss 覆盖全部 120 帧；阶段 2 切回 30 步
-  渐进读出（每步只读当步 z_t、loss 只算已读帧）。旧口径
-  `--stage1_mode first`（只读第一组 z、只监督前 4 帧）保留但默认关。
-  阶段 1 评测带 `_s1` 后缀且不更新 `best_trainable.pt`（选择口径仍是阶段 2
-  的全 30 步 PSNR）。总步数 = (stage1_epochs+stage2_epochs)×steps_per_epoch，
-  LR 仍是覆盖全程的单条 cosine。
+* 损失：每步 pred 对**全部帧** latent L1 的平权均值（v2 直接预测口径，无开关），
+  深监督全部 30 步。
 * 评测：`--psnr_eval 1` 时，`V10Trainer.evaluate` 临时给裸模型设
   `eval_pixel=True`，`VideoV10.forward` 就额外返回 `psnr` / `psnr_tok_full`；
   `prediction_step` 会丢掉 `pix/pred/target/z`，避免 eval 把整段特征堆到 CPU。
@@ -115,10 +107,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mid_depth", type=int, default=6)
     p.add_argument("--mid_heads", type=int, default=16)
     p.add_argument("--mid_ratio", type=float, default=4.0)
-    p.add_argument("--mid_mode", type=str, default="packed",
-                   choices=["packed", "crossq"],
-                   help="中间态结构：packed=帧级因果 TransformerEncoder（默认）；"
-                        "crossq=可学 query 的全双向交叉注意力重采样（实验 A，v2 式摘要）")
     p.add_argument("--dec_dim", type=int, default=0,
                    help="0 = 自动取 chunk_tokens×rate_dim")
     p.add_argument("--dec_depth", type=int, default=4)
@@ -126,23 +114,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dec_ratio", type=float, default=2.0)
     p.add_argument("--step_gate", type=int, default=0,
                    help="1 = carry 处零初始化 γ 门控（旧版）；默认 0 = w≡1（v2 口径）")
-    p.add_argument("--carry_ln", type=int, default=0,
-                   help="1 = carry 处加 LayerNorm（旧版）；默认 0 = 不加（v2 口径）")
     p.add_argument("--readout_mask", type=int, default=0,
                    help="1 = 读出 self-attn 帧级因果 mask（旧版）；默认 0 = 全双向（v2 口径）")
-    p.add_argument("--step_weights", type=str, default="mean")
-    p.add_argument("--loss_read", type=int, default=1,
-                   help="1 = 第 t 步只在已读帧上算 loss（去掉均值平凡解；v10 配方默认开）")
-    p.add_argument("--loss_frame_norm", type=int, default=0,
-                   help="1 = loss_read 时按帧归一化（消掉早期帧权重 ~120×后期帧的偏差）")
-    p.add_argument("--copy_skip", type=int, default=1,
-                   help="1 = 已读帧 direct-copy 残差（prefix/step 都支持，默认开）")
     p.add_argument("--init_trainable", type=str, default="",
-                   help="只加载 middle/readout 的 trainable ckpt（best_trainable.pt）。"
-                        "课程学习用：先用 prefix 拟合，再切 --mem_mode step 继续训")
-    p.add_argument("--mem_mode", type=str, default="step", choices=["step", "prefix"],
-                   help="读出侧 cross-attn 的 memory：step=只看当步 z_t（设计原版）；"
-                        "prefix=看已读前缀（每步重出全片时可把读过的帧直接抄过来）")
+                   help="只加载 middle/readout 的 trainable ckpt（best_trainable.pt）"
+                        "做热启动/课程学习")
     # 优化（全部转发给 TrainingArguments）
     p.add_argument("--batch", type=int, default=2, help="每卡 micro-batch")
     p.add_argument("--accum_steps", type=int, default=2)
@@ -151,19 +127,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup_frac", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--max_steps", type=int, default=20000)
-    # ── 两阶段（2026-11-19）：单步预热 → 30 步循环
-    p.add_argument("--stage1_epochs", type=float, default=0.0,
-                   help="阶段 1（n_steps=1 单步解码）训几个 epoch；0 = 关（单阶段）")
-    p.add_argument("--stage1_n_steps", type=int, default=1,
-                   help="阶段 1 的 n_steps（默认 1 = 单步）")
-    p.add_argument("--stage1_mode", type=str, default="full",
-                   choices=["full", "first"],
-                   help="阶段 1 口径：full（默认，对齐 v2 的 A 相）= 单步但"
-                        "**一次读完整段 z**（960 行）、一步出全片、loss 覆盖全部帧；"
-                        "first = 只读第一组 z、只监督前 group 帧（旧口径）")
-    p.add_argument("--stage2_epochs", type=float, default=0.0,
-                   help="阶段 2（全 30 步循环）训几个 epoch；>0 时按 epoch 反推 "
-                        "max_steps（覆盖 --max_steps）")
     p.add_argument("--amp", type=int, default=1, help="bf16（CPU 自动关闭）")
     # DeepSpeed
     p.add_argument("--deepspeed", type=str, default="",
@@ -208,14 +171,11 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         rate_tokens=a.rate_tokens, rate_dim=a.rate_dim,
         target_tokens=a.target_tokens, chunk_tokens=a.chunk_tokens,
         mid_dim=a.mid_dim, mid_depth=a.mid_depth, mid_heads=a.mid_heads,
-        mid_ratio=a.mid_ratio, mid_mode=a.mid_mode,
+        mid_ratio=a.mid_ratio,
         dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
-        step_gate=bool(a.step_gate), step_weights=a.step_weights,
-        carry_ln=bool(a.carry_ln), readout_mask=bool(a.readout_mask),
-        mem_mode=a.mem_mode, loss_read=bool(a.loss_read),
-        loss_frame_norm=bool(a.loss_frame_norm),
-        copy_skip=bool(a.copy_skip))
+        step_gate=bool(a.step_gate),
+        readout_mask=bool(a.readout_mask))
 
 
 def collate_clips(batch):
@@ -398,19 +358,11 @@ class V10EvalCallback(TrainerCallback):
     """
 
     def __init__(self, data_root: str, frames: int, img: int, n_clips: int,
-                 every: int, out_dir: str, psnr: bool = True,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1,
-                 stage1_mode: str = "full"):
+                 every: int, out_dir: str, psnr: bool = True):
         self.every = max(1, int(every))
         self.n_clips = max(1, int(n_clips))
         self.out_dir = str(out_dir)
         self.psnr = bool(psnr)
-        # 阶段 1 评测：指标带 `_s1` 后缀、**不更新** best_trainable.pt（选择
-        # 口径始终是阶段 2 的全 30 步 PSNR）。full 口径下单步就能出全片，
-        # 像素 PSNR 有意义；first 口径只监督前 group 帧，不算像素。
-        self.stage1_steps = int(stage1_steps)
-        self.stage1_n_steps = max(1, int(stage1_n_steps))
-        self.stage1_mode = str(stage1_mode).lower()
         self._ds = None
         self._spec = (str(data_root), int(frames), int(img))
         self.best = None
@@ -427,11 +379,6 @@ class V10EvalCallback(TrainerCallback):
             return
         trainer = self.trainer
         raw = trainer.accelerator.unwrap_model(trainer.model)
-        # 阶段 1（单步预热）期间：n_steps=1、不算像素、不存 best
-        in_s1 = bool(self.stage1_steps) and state.global_step <= self.stage1_steps
-        nsfx = "_s1" if in_s1 else ""
-        ns = self.stage1_n_steps if in_s1 else None
-        full = bool(in_s1 and self.stage1_mode == "full")
         was_training = raw.training
         raw.eval()
         self._ensure_ds()
@@ -444,11 +391,7 @@ class V10EvalCallback(TrainerCallback):
                 ctx = (torch.autocast("cuda", dtype=torch.bfloat16) if amp
                        else contextlib.nullcontext())
                 with ctx:
-                    out = raw.evaluate(
-                        x, n_steps=ns, full_read=full,
-                        # 单步全读能出全片 ⇒ 阶段 1 的像素 PSNR 有意义；
-                        # first 口径只监督前 4 帧，PSNR 无意义，不算。
-                        pixel_psnr=self.psnr and (full or not in_s1))
+                    out = raw.evaluate(x, pixel_psnr=self.psnr)
                 for k, v in out.items():
                     acc[k] = acc.get(k, 0.0) + float(v)
                 n += 1
@@ -471,41 +414,10 @@ class V10EvalCallback(TrainerCallback):
 class V10Trainer(Trainer):
     """官方扩展点：无 labels 的 eval loss、丢掉巨型输出、MUSA RNG 适配。"""
 
-    def __init__(self, *args, psnr_eval: bool = False,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1,
-                 stage1_mode: str = "full", **kwargs):
+    def __init__(self, *args, psnr_eval: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.can_return_loss = True
         self.psnr_eval = bool(psnr_eval)
-        self.stage1_steps = int(stage1_steps)
-        self.stage1_n_steps = max(1, int(stage1_n_steps))
-        self.stage1_mode = str(stage1_mode).lower()
-        self._stage_tag = None
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """两阶段切换点：`global_step < stage1_steps` 时只跑 n_steps=1（单步
-        预热），之后放开全 30 步。DDP/accelerate 包装下要改 unwrap 后的裸模型。"""
-        raw = self.accelerator.unwrap_model(model)
-        if self.stage1_steps > 0:
-            in_s1 = self.state.global_step < self.stage1_steps
-            raw.train_steps = self.stage1_n_steps if in_s1 else 0
-            # 阶段 1 的两种口径：full = 单步全读（v2 A 相：memory=整段 z、
-            # loss 覆盖全部帧）；first = 只读第一组 z（旧口径）
-            raw.train_full_read = bool(in_s1 and self.stage1_mode == "full")
-            tag = "s1" if in_s1 else "s2"
-            if tag != self._stage_tag:
-                self._stage_tag = tag
-                if self.accelerator.is_main_process:
-                    self.accelerator.print(
-                        f"[stage] step {self.state.global_step} → 阶段{tag} "
-                        f"(train n_steps={raw.train_steps or 'full'}"
-                        + (f", full_read={raw.train_full_read})"
-                           if in_s1 else ")"))
-        else:
-            raw.train_steps = 0
-            raw.train_full_read = False
-        return super().compute_loss(model, inputs, return_outputs=return_outputs,
-                                    **kwargs)
 
     def evaluate(self, *args, **kwargs):
         raw = self.accelerator.unwrap_model(self.model)
@@ -619,19 +531,6 @@ def main() -> None:
     clips_per_step = max(1, a.batch * a.accum_steps * world)
     steps_per_epoch = (math.ceil(len(tr) / clips_per_step) if len(tr) > 0
                        else max(1, a.max_steps))
-    stage1_steps = 0
-    if a.stage1_epochs > 0 or a.stage2_epochs > 0:
-        stage1_steps = int(round(a.stage1_epochs * steps_per_epoch))
-        if a.stage2_epochs > 0:
-            a.max_steps = stage1_steps + int(round(a.stage2_epochs * steps_per_epoch))
-        else:
-            a.max_steps = max(a.max_steps, stage1_steps + 1)
-        if a.stage1_n_steps > 0 and stage1_steps > 0:
-            print(f"[stage] steps/epoch={steps_per_epoch} (世界={world}, "
-                  f"clips/step={clips_per_step}) 阶段1={a.stage1_epochs}ep="
-                  f"{stage1_steps}st(n_steps={a.stage1_n_steps},"
-                  f"mode={a.stage1_mode}) → "
-                  f"阶段2={a.stage2_epochs}ep 共 {a.max_steps}st", flush=True)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     warmup_steps = int(a.warmup_frac * a.max_steps)
 
@@ -677,9 +576,7 @@ def main() -> None:
         eval_cb = V10EvalCallback(
             data_root=a.data_root, frames=a.frames, img=a.img,
             n_clips=a.val_batches, every=a.val_every, out_dir=a.out,
-            psnr=bool(a.psnr_eval),
-            stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
-            stage1_mode=a.stage1_mode)
+            psnr=bool(a.psnr_eval))
     trainer = V10Trainer(
         model=model,
         args=training_args,
@@ -689,8 +586,6 @@ def main() -> None:
         compute_metrics=None,
         callbacks=[eval_cb] if eval_cb is not None else None,
         psnr_eval=bool(a.psnr_eval),
-        stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
-        stage1_mode=a.stage1_mode,
     )
     if eval_cb is not None:
         eval_cb.trainer = trainer
@@ -706,8 +601,7 @@ def main() -> None:
         with open(os.path.join(a.out, "run_args.json"), "w",
                   encoding="utf-8") as f:
             json.dump(dict(vars(a), cfg=asdict(cfg),
-                           steps_per_epoch=steps_per_epoch,
-                           stage1_steps=stage1_steps), f,
+                           steps_per_epoch=steps_per_epoch), f,
                       ensure_ascii=False, indent=2)
 
     if a.resume:

@@ -87,11 +87,9 @@ def load_model(path: str) -> VideoV10:
         raise RuntimeError("请传 best_trainable.pt（final/ 目录需先转成 pt）")
     blob = torch.load(path, map_location="cpu", weights_only=False)
     cfg_dict = dict(blob.get("cfg") or {})
-    # 2026-11-18 17:xx 之前训练的 ckpt 是「旧口径」读出：carry 有 LN、self-attn
+    # 2026-11-18 17:xx 之前训练的 ckpt 是「旧口径」读出：self-attn
     # 有帧级因果 mask。为让历史 ckpt 仍能严格加载/评测，这里按权重自动还原：
-    if "carry_ln" not in cfg_dict:
-        cfg_dict["carry_ln"] = any(k.startswith("n_in.")
-                                   for k in (blob.get("readout") or {}))
+    # （carry_ln 选项已于 2026-11-19 移除；含 n_in.* 权重的更旧 ckpt 无法再加载）
     if "readout_mask" not in cfg_dict:
         cfg_dict["readout_mask"] = True
     names = {f.name for f in fields(V10Config)}
