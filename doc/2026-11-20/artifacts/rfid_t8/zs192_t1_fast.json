@@ -1,0 +1,25 @@
+{
+ "ckpt": "/root/autodl-tmp/tok448_zs192/s2/ckpt_best.pt",
+ "tag": "zs192_t1",
+ "n_images": 5000,
+ "K": 16,
+ "zs_dim": 192,
+ "recurrent": false,
+ "T": 1,
+ "cum_z_s": [
+  16
+ ],
+ "img_size": 448,
+ "patch": 32,
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)",
+ "per_step": {
+  "1": {
+   "step": 1,
+   "cum_z_s": 16,
+   "values": 3072,
+   "psnr": 25.253649102783204,
+   "l1_255": 9.789226154923439,
+   "rfid": 48.132030064651985
+  }
+ }
+}
