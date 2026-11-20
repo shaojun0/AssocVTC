@@ -17,9 +17,13 @@
 `nn.TransformerDecoderLayer`；本文件只保留模型编排（打包、循环读出、门控），
 不再手写 QKV 投影和两层 MLP。
 
-- middle：`CrossQueryMiddle`（可学 query + E 输出做 KV 的**全双向**交叉注意力
-  重采样）。每帧 4 个位置（不是 33 个 token），等宽 ⇒ **不建 in_proj**。
-  （旧版帧级因果 `TemporalMiddle` 与 prefix 读出已于 2026-11-19 移除。）
+- middle：`V2EncoderMiddle`（2026-11-20 起默认；**v2 编码器同构**）：冻结 E 的
+  120×16×448 先 reshape 成 480×1792，再拼一份同尺寸的可学 query（可加 cls），
+  960 个 token 做**全双向自注意力**（`nn.TransformerEncoder`），取 query 半的
+  输出 reshape 回 (B,120,8,896) 交给读出 ⇒ 读出侧一行不动。
+  `mid_style="crossq"` 保留 2026-11-19 的 `CrossQueryMiddle`（可学 query 对 E
+  做交叉注意力重采样）做对照；旧版帧级因果 `TemporalMiddle` 与 prefix 读出
+  已于 2026-11-19 移除。
 - readout：`nn.TransformerDecoder`。121 帧 × 9 行 = 1089 个位置，帧级因果。
   等宽 ⇒ **不建 kv_proj**；special 侧**也不建 head**（8 行 1792 直接 reshape
   成 32×448），只有 z_cls 那一行需要 `cls_head`（1792→448）。
@@ -39,7 +43,9 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
     x            (B, 120, 3, 448, 448)                  视频片段 15 s @ 8 fps
     E（冻结）    每帧独立前向 → z_cls (B,120,1,448), z_s (B,120,32,448)
     rate         前缀截断前 16 个 special → reshape (B,120,8,896)（纯 reshape）
-    middle       960 个位置，帧级因果 + 6 层 Transformer → (B,120,8,896)
+    middle       2026-11-20 起默认 v2enc：480×1792 的 E 行 + 480×1792 可学 query
+                 → 960 token 全双向自注意力 → 取 query 半 → (B,120,8,896)
+                 （mid_style="crossq" 时是 960 个 query 对 E 行的交叉注意力）
                  reshape → z (B,30,32,896)（4 帧 × 8 行 = 每步 32 行）
     readout      Q（可学习，随机初始化）(1,1089,896)；γ_0 = 0
                  for t in 0..29:
@@ -70,7 +76,14 @@ rate_dim        单个 token 宽度（= 分词器 zs_dim，448）
 chunk_tokens    一个向量拼几个 token（默认 2 ⇒ 宽度 896，不允许改宽度）
 target_tokens   目标 special 数；本版必须等于 num_specials（冻结 R 要全量）
 group           z 步覆盖帧数（4 → 30 步，2 fps 潜在帧）
-mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"投影到别的宽度"
+mid_style       "v2enc"（默认，v2 编码器同构）| "crossq"（2026-11-19 交叉查询）
+mid_hidden      v2enc 编码器宽度（0 = 2×width；正式 = 1792）
+mid_depth/heads/ratio  middle 的层数/头数/FFN 比例（v2enc 建议 depth 2~3、ratio 2）
+mid_cls         v2enc 是否加 1 个 cls（输出广播加到所有 rate 行；默认关）
+mid_skip        v2enc 是否加 E 行残差（非 v2 口径的恒等保险；默认关）
+mid_gate        v2enc 是否用零初始化门控残差（rate = E行 + tanh(g)·enc；g=0 起点即恒等，
+                这是 v2enc 失败后 2026-11-20 加的判别开关，默认关）
+mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"读出再投影到别的宽度"
 step_gate       是否用零初始化门控 γ（默认关 = w≡1，carry 与 v2 等权相加）
 readout_mask     读出 self-attn 是否帧级因果（默认 0 = 全双向，同 v2）
 
@@ -90,7 +103,7 @@ from torch import Tensor
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
 __all__ = ["V10Config", "FrozenTokenizer",
-           "CrossQueryMiddle", "WholeClipDecoder", "VideoV10",
+           "V2EncoderMiddle", "CrossQueryMiddle", "WholeClipDecoder", "VideoV10",
            "patches_to_image", "psnr_from_l1"]
 
 
@@ -125,10 +138,18 @@ class V10Config:
     target_tokens: int = 16    # 目标 special token 数（本分支配方 = num_specials = 16）
     chunk_tokens: int = 2      # 一个可训练向量 = 2 个 token 拼接（2×448 = 896，不填充）
     # ── 中间态
-    mid_dim: int = 0           # 0 = 自动取 width（896），不允许填成别的宽度
+    # "v2enc"    = v2 编码器同构：E 行(480×1792) 拼同尺寸可学 query → 自注意力
+    #              → 取 query 半为 rate（2026-11-20 用户定稿，默认）
+    # "crossq"   = 2026-11-19 的交叉查询重采样（对照）
+    mid_style: str = "v2enc"
+    mid_dim: int = 0           # crossq 宽度；0 = 自动取 width（896）
+    mid_hidden: int = 0        # v2enc 编码器宽度；0 = 2×width（正式 = 1792）
     mid_depth: int = 6
     mid_heads: int = 16
     mid_ratio: float = 4.0
+    mid_cls: bool = False      # v2enc：拼 1 个可学 cls，输出广播加到所有 rate 行
+    mid_skip: bool = False     # v2enc：rate 行额外加 E 行残差（非 v2 口径的恒等保险，默认关）
+    mid_gate: bool = False     # v2enc：零初始化门控恒等残差 rate = E行 + tanh(g)·enc(g=0 起点即恒等)
     # ── 读出（整片段循环）
     dec_dim: int = 0           # 0 = 自动取 width（896）
     dec_depth: int = 4
@@ -272,6 +293,84 @@ class FrozenTokenizer(nn.Module):
         super().train(False)
         self.tok.eval()
         return self
+
+
+# ═══════════════════════════════════════════════════════════ v2 同构编码器中间态
+class V2EncoderMiddle(nn.Module):
+    """(B,F,Rr,width) → 同形状：**v2 编码器同构**的 rate 变换（2026-11-20 定稿）。
+
+    口径（用户 2026-11-20 指示，对齐 v2 的 `SRPhase1V2` 编码器）：
+      · 冻结 E 的输出 120×16×448（每帧 16 个 special，448 宽）先纯 reshape 成
+        480×1792（1792 = 4 token × 448 = 2 个打包行 896），**不做投影**；
+      · 再拼一份与输入等大的**可学 query**（480×1792；可选加 1 个 cls token）；
+      · 960 个 token 走 `nn.TransformerEncoder`：全双向自注意力，**无 mask**
+        （v2 的编码器是在整帧 token 序列上做全局自注意力，不是因果的）；
+      · 取 **query 半**的输出（480×1792）reshape 回 (B,120,8,896) 当 rate，
+        读出侧（`WholeClipDecoder`）一行不改。
+
+    与 v2 的差别必须记住：v2 的 E+R 是**联合训练**的，rate 空间怎么方便由 R
+    反向决定；本模型 R 冻结且只用于评测渲染，middle 是在**冻结 E 的现有码空间**
+    上再学一层重采样 —— 恒等/近恒等映射得靠训练自己学出来（不像 v2 天然
+    同构）。`mid_skip=True` 给一条 E 行残差当保险，但那不是 v2 口径。
+
+    位置信息：reshape 后帧号与块号都被打散，必须显式加回。输入行用可学
+    `in_pos`（480×1792）编码 (帧, 块)，query 本身就是逐位置可学参数
+    （等价 v2 的 special token bank = 共享 token + 位置嵌入）。
+
+    代价：中间态是全片的全局混合 ⇒ **不再是流式/帧级因果的**；逐档读出的语义
+    从"第 t 步只含前 4(t+1) 帧"变成 v2 那种"读多少行 token 的质量"。
+    """
+
+    def __init__(self, dim: int, depth: int, heads: int, ratio: float,
+                 frames: int, rows_rate: int, width: int,
+                 drop: float = 0.0, use_cls: bool = False, skip: bool = False,
+                 use_gate: bool = False):
+        super().__init__()
+        self.dim = int(dim)
+        self.frames = int(frames)
+        self.rows_rate = int(rows_rate)
+        self.width = int(width)
+        n_in = (self.frames * self.rows_rate * self.width) // self.dim
+        assert n_in * self.dim == self.frames * self.rows_rate * self.width, (
+            f"mid_hidden={self.dim} 不能整除 rate 值总数 "
+            f"{self.frames * self.rows_rate * self.width}")
+        self.n_in = int(n_in)
+        assert self.dim % int(heads) == 0, (self.dim, heads)
+        self.in_pos = nn.Parameter(torch.randn(1, self.n_in, self.dim) * 0.02)
+        self.q = nn.Parameter(torch.randn(1, self.n_in, self.dim) * 0.02)
+        self.cls = (nn.Parameter(torch.randn(1, 1, self.dim) * 0.02)
+                    if use_cls else None)
+        self.skip = bool(skip)
+        # 零初始化门控恒等残差：rate = x + tanh(g)·enc，g=0 时起点严格恒等
+        # （2026-11-20 判别实验：v2enc 全局重编码把逐位置身份洗掉后，L1 模板
+        #  解吸收梯度；给一条起点恒等的通路把学到的混合作为增量）。
+        self.gate = nn.Parameter(torch.zeros(())) if use_gate else None
+        layer = nn.TransformerEncoderLayer(
+            d_model=self.dim, nhead=int(heads), dim_feedforward=int(self.dim * ratio),
+            dropout=drop, activation="gelu", batch_first=True, norm_first=True)
+        # 末层 norm 交给 TransformerEncoder（norm_first 的推荐用法）
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=int(depth), norm=nn.LayerNorm(self.dim),
+            enable_nested_tensor=False)
+
+    def forward(self, packed: Tensor) -> Tensor:
+        """packed (B,F,Rr,width) → 同形状。内部纯 reshape，不引入投影。"""
+        B = packed.shape[0]
+        assert packed.shape[1:] == (self.frames, self.rows_rate, self.width), (
+            tuple(packed.shape), (self.frames, self.rows_rate, self.width))
+        x = packed.reshape(B, self.n_in, self.dim)          # 480×1792
+        seq = torch.cat([x + self.in_pos, self.q.expand(B, -1, -1)], dim=1)
+        if self.cls is not None:
+            seq = torch.cat([seq, self.cls.expand(B, -1, -1)], dim=1)
+        h = self.encoder(seq)
+        out = h[:, self.n_in:2 * self.n_in]                 # 取 query 半
+        if self.cls is not None:                            # 全局摘要广播到所有行
+            out = out + h[:, -1:]
+        if self.gate is not None:                           # 零初始化门控恒等残差
+            out = x + torch.tanh(self.gate) * out
+        elif self.skip:                                     # 非 v2 口径的恒等保险
+            out = out + x
+        return out.reshape(B, self.frames, self.rows_rate, self.width)
 
 
 # ═══════════════════════════════════════════════════════════ 交叉查询中间态
@@ -481,18 +580,35 @@ class VideoV10(nn.Module):
         assert cfg.target_tokens == K, (
             f"target_tokens={cfg.target_tokens} 必须等于分词器 num_specials={K}；"
             "少预测会让冻结 R 的 render 直接 assert 失败")
-        # ── 唯一宽度：chunk_tokens 个 token 拼成一个向量（4×448 = 1792）。
-        # mid_dim / dec_dim 只接受 0（自动）或与它相等，杜绝"再投影到别的宽度"。
+        # ── 宽度：chunk_tokens 个 token 拼成一个向量（默认 2×448 = 896）。
+        # dec_dim 只接受 0（自动）或等于 width，杜绝"读出再投影到别的宽度"。
         cfg.mid_dim = int(cfg.mid_dim or cfg.width)
         cfg.dec_dim = int(cfg.dec_dim or cfg.width)
-        assert cfg.mid_dim == cfg.dec_dim == cfg.width, (
-            f"mid_dim={cfg.mid_dim} dec_dim={cfg.dec_dim} 必须都等于 "
-            f"chunk_tokens×rate_dim={cfg.width}；换宽度只会引入填充冗余")
-        self.cfg = cfg
-        self.middle = CrossQueryMiddle(
-            dim=cfg.width, depth=cfg.mid_depth, heads=cfg.mid_heads,
-            ratio=cfg.mid_ratio, frames=cfg.frames,
-            tokens_per_frame=cfg.rows_rate)
+        assert cfg.dec_dim == cfg.width, (
+            f"dec_dim={cfg.dec_dim} 必须等于 chunk_tokens×rate_dim={cfg.width}；"
+            "换宽度只会引入填充冗余")
+        style = str(cfg.mid_style).lower()
+        if style == "v2enc":
+            # v2 同构编码器：编码器宽度 mid_hidden 默认 = 2×width（正式 1792），
+            # 与读出宽度解耦（输入/输出仍 reshape 回 (B,F,rows_rate,width)）。
+            hidden = int(cfg.mid_hidden or 2 * cfg.width)
+            self.middle = V2EncoderMiddle(
+                dim=hidden, depth=cfg.mid_depth, heads=cfg.mid_heads,
+                ratio=cfg.mid_ratio, frames=cfg.frames,
+                rows_rate=cfg.rows_rate, width=cfg.width,
+                use_cls=bool(cfg.mid_cls), skip=bool(cfg.mid_skip),
+                use_gate=bool(cfg.mid_gate))
+            cfg.mid_hidden = int(self.middle.dim)
+        elif style == "crossq":
+            assert cfg.mid_dim == cfg.width, (
+                f"crossq 的 mid_dim={cfg.mid_dim} 必须等于 width={cfg.width}")
+            self.middle = CrossQueryMiddle(
+                dim=cfg.width, depth=cfg.mid_depth, heads=cfg.mid_heads,
+                ratio=cfg.mid_ratio, frames=cfg.frames,
+                tokens_per_frame=cfg.rows_rate)
+            cfg.mid_style = "crossq"
+        else:
+            raise ValueError(f"未知 mid_style={cfg.mid_style!r}（只支持 v2enc/crossq）")
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
         # 两阶段训练：阶段 1（单步全读，v2 A 相）由 trainer 把窗口换成
         # `readout.full_windows`，训练态 forward 就走「1 步 + 整段 memory」。
@@ -625,6 +741,29 @@ if __name__ == "__main__":
     assert all(not p.requires_grad for p in m.tokenizer.parameters()), "分词器应冻结"
     # 零填充：码率侧每帧的数值量 = 向量数 × 宽度，一点不多
     assert cfg.rows_rate * cfg.width == cfg.values_per_frame()
+
+    # ── middle 口径：默认 v2enc（960 token 拼接自注意力），输出形状与输入一致
+    assert isinstance(m.middle, V2EncoderMiddle), type(m.middle)
+    assert m.middle.dim == 2 * cfg.width == 64, m.middle.dim
+    assert (m.middle.n_in == cfg.frames * cfg.rows_rate * cfg.width // m.middle.dim
+            == 4), m.middle.n_in
+    print("[middle]", type(m.middle).__name__, "dim", m.middle.dim,
+          "n_in", m.middle.n_in, "seq", 2 * m.middle.n_in)
+    with torch.no_grad():
+        pk = torch.randn(2, cfg.frames, cfg.rows_rate, cfg.width)
+        mo = m.middle(pk)
+    assert mo.shape == pk.shape, (mo.shape, pk.shape)
+    # v2enc 变体：+cls、+skip、crossq 对照，都必须保持输入/输出同形
+    for extra in ({"mid_cls": True}, {"mid_skip": True}, {"mid_gate": True}):
+        mc = VideoV10(V10Config(**{**asdict(cfg), **extra})).eval()
+        with torch.no_grad():
+            assert mc.middle(pk).shape == pk.shape, extra
+    cfg_cq = V10Config(**{**asdict(cfg), "mid_style": "crossq"})
+    mcq = VideoV10(cfg_cq).eval()
+    assert isinstance(mcq.middle, CrossQueryMiddle)
+    with torch.no_grad():
+        assert mcq.middle(pk).shape == pk.shape
+    print("[middle] v2enc(+cls/+skip) 与 crossq 对照均同形 ✓")
 
     B = 2
     x = torch.rand(B, cfg.frames, 3, 32, 32)

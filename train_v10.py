@@ -37,12 +37,14 @@ DeepSpeed 的 stage / bf16 / offload 全部在 `ds_zero2_v10.json` 里改。
 * 冻结分词器：E 与 R 都是同一个 `SRPhase1LinAttn` ckpt（`--tok_ckpt`）；
   Trainer 的默认优化器只会拿到 `requires_grad=True` 的 middle / readout，
   冻结分词器不会进 optimizer。
-* 宽度：`--chunk_tokens 4 × --rate_dim 448 = 1792` 是唯一宽度，`--mid_dim /`
-  `--dec_dim` 留 0 自动取它；填别的值会被 assert 拒绝（那是纯填充冗余）。
-* 率 / 目标：率 = 每帧前 `--rate_tokens` 个 special token（默认 16 → 4×1792），
-  目标 = 全部 `--target_tokens` + z_cls（默认 32+1 → 8×1792 + 1 行）。
-  率 < 目标是故意的；`--target_tokens` 必须等于分词器 num_specials，
-  否则冻结 R 的 `render` 会 assert 失败。
+* 宽度：读出宽度 = `--chunk_tokens × --rate_dim`（正式 = 2×448 = 896），
+  `--dec_dim` 留 0 自动取它。middle 宽度（`--mid_hidden`）与它解耦：
+  默认 v2enc 把 120×16×448 reshape 成 480×1792 与同尺寸可学 query 拼接后
+  做 960 token 自注意力，再 reshape 回 896 行交给读出（README/§1.10）。
+* 率 / 目标：率 = 每帧前 `--rate_tokens` 个 special token（正式 16 个 =
+  7,168 值/帧），目标 = 全部 `--target_tokens` + z_cls（正式 16+1）。
+  `--target_tokens` 必须等于分词器 num_specials，否则冻结 R 的 `render`
+  会 assert 失败。
 * 损失：每步 pred 对**全部帧** latent L1 的平权均值（v2 直接预测口径，无开关），
   深监督全部 30 步。
 * 两阶段（`--stage1_epochs/--stage2_epochs`）：阶段 1 只跑 1 步、但 memory =
@@ -106,11 +108,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--target_tokens", type=int, default=32)
     p.add_argument("--chunk_tokens", type=int, default=4,
                    help="一个 1792 向量拼几个 token（宽度 = chunk_tokens × rate_dim）")
+    p.add_argument("--mid_style", type=str, default="v2enc",
+                   choices=["v2enc", "crossq"],
+                   help="v2enc（默认）= v2 编码器同构：E 行(480×1792) 拼同尺寸可学 "
+                        "query → 960 token 自注意力 → 取 query 半；crossq = 2026-11-19 交叉查询")
     p.add_argument("--mid_dim", type=int, default=0,
-                   help="0 = 自动取 chunk_tokens×rate_dim；填别的宽度会被 assert 拒绝")
+                   help="crossq 的宽度；0 = 自动取 chunk_tokens×rate_dim（v2enc 忽略）")
+    p.add_argument("--mid_hidden", type=int, default=0,
+                   help="v2enc 编码器宽度；0 = 2×chunk_tokens×rate_dim（正式 = 1792）")
     p.add_argument("--mid_depth", type=int, default=6)
     p.add_argument("--mid_heads", type=int, default=16)
     p.add_argument("--mid_ratio", type=float, default=4.0)
+    p.add_argument("--mid_cls", type=int, default=0,
+                   help="v2enc 是否拼 1 个可学 cls（输出广播加到所有 rate 行）")
+    p.add_argument("--mid_skip", type=int, default=0,
+                   help="v2enc 是否加 E 行残差（非 v2 口径的恒等保险；默认关）")
+    p.add_argument("--mid_gate", type=int, default=0,
+                   help="v2enc 是否用零初始化门控恒等残差 rate=E行+tanh(g)·enc"
+                        "（g=0 起点即恒等；2026-11-20 判别开关）")
     p.add_argument("--dec_dim", type=int, default=0,
                    help="0 = 自动取 chunk_tokens×rate_dim")
     p.add_argument("--dec_depth", type=int, default=4)
@@ -181,8 +196,10 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         tok_ckpt=a.tok_ckpt, frames=a.frames, group=a.group,
         rate_tokens=a.rate_tokens, rate_dim=a.rate_dim,
         target_tokens=a.target_tokens, chunk_tokens=a.chunk_tokens,
-        mid_dim=a.mid_dim, mid_depth=a.mid_depth, mid_heads=a.mid_heads,
-        mid_ratio=a.mid_ratio,
+        mid_style=a.mid_style, mid_dim=a.mid_dim, mid_hidden=a.mid_hidden,
+        mid_depth=a.mid_depth, mid_heads=a.mid_heads,
+        mid_ratio=a.mid_ratio, mid_cls=bool(a.mid_cls), mid_skip=bool(a.mid_skip),
+        mid_gate=bool(a.mid_gate),
         dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
         step_gate=bool(a.step_gate),
