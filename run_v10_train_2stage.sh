@@ -31,7 +31,7 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --mid_ratio 2 --mid_depth 6 --mid_heads 16 \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
   --step_gate "$STEPGATE" --readout_mask "$MASK" \
-  --stage1_epochs "$S1E" --stage1_n_steps 1 --stage2_epochs "$S2E" \
+  --stage1_epochs "$S1E" --stage2_epochs "$S2E" \
   --batch 2 --accum_steps 2 \
   --lr "$LR" --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
   --max_steps 8000 --amp 1 --log_every 20 \

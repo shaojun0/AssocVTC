@@ -45,10 +45,10 @@ DeepSpeed 的 stage / bf16 / offload 全部在 `ds_zero2_v10.json` 里改。
   否则冻结 R 的 `render` 会 assert 失败。
 * 损失：每步 pred 对**全部帧** latent L1 的平权均值（v2 直接预测口径，无开关），
   深监督全部 30 步。
-* 两阶段（`--stage1_epochs/--stage2_epochs`）：阶段 1 用 `full_read` 只跑 1 步
-  但 memory = 整段 30 组 z（960 行）、一步出全片（对齐 v2 的 A 相
-  `--warm_steps`）；阶段 2 切回全 S 步渐进读出（每步只读当步 z_t）。
-  阶段 1 不更新 `best_trainable.pt`。
+* 两阶段（`--stage1_epochs/--stage2_epochs`）：阶段 1 只跑 1 步、但 memory =
+  整段 30 组 z（960 行），一步出全片（对齐 v2 的 A 相 `--warm_steps`；
+  实现 = 把读出窗口换成 `readout.full_windows`）；阶段 2 切回全 S 步渐进
+  读出（每步只读当步 z_t）。阶段 1 不更新 `best_trainable.pt`。
 * 评测：`--psnr_eval 1` 时，`V10Trainer.evaluate` 临时给裸模型设
   `eval_pixel=True`，`VideoV10.forward` 就额外返回 `psnr` / `psnr_tok_full`；
   `prediction_step` 会丢掉 `pix/pred/target/z`，避免 eval 把整段特征堆到 CPU。
@@ -133,10 +133,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_steps", type=int, default=20000)
     # ── 两阶段（2026-11-19 重加；架构/损失不动，只切读出步数）
     p.add_argument("--stage1_epochs", type=float, default=0.0,
-                   help="阶段 1（n_steps=1 单步【全读】，对齐 v2 A 相）训几个 epoch；"
+                   help="阶段 1（单步全读，对齐 v2 A 相）训几个 epoch；"
                         "0 = 关（单阶段训练）")
-    p.add_argument("--stage1_n_steps", type=int, default=1,
-                   help="阶段 1 的 n_steps（保持 1 = 单步；full_read 会强制 1）")
     p.add_argument("--stage2_epochs", type=float, default=0.0,
                    help="阶段 2（全 S 步循环）训几个 epoch；>0 时按 epoch 反推 "
                         "max_steps（覆盖 --max_steps）")
@@ -372,7 +370,7 @@ class V10EvalCallback(TrainerCallback):
 
     def __init__(self, data_root: str, frames: int, img: int, n_clips: int,
                  every: int, out_dir: str, psnr: bool = True,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1):
+                 stage1_steps: int = 0):
         self.every = max(1, int(every))
         self.n_clips = max(1, int(n_clips))
         self.out_dir = str(out_dir)
@@ -381,10 +379,9 @@ class V10EvalCallback(TrainerCallback):
         self._spec = (str(data_root), int(frames), int(img))
         self.best = None
         self.best_step = 0
-        # 阶段 1（单步全读）：评测也走 full_read + n_steps=1（能出全片，PSNR
-        # 有意义），指标带 `_s1` 后缀，且**不更新** best_trainable.pt。
+        # 阶段 1（单步全读）：评测也走 `readout.full_windows`（一步出全片，
+        # PSNR 有意义），指标带 `_s1` 后缀，且**不更新** best_trainable.pt。
         self.stage1_steps = int(stage1_steps)
-        self.stage1_n_steps = max(1, int(stage1_n_steps))
 
     def _ensure_ds(self):
         if self._ds is None:
@@ -399,8 +396,7 @@ class V10EvalCallback(TrainerCallback):
         raw = trainer.accelerator.unwrap_model(trainer.model)
         in_s1 = bool(self.stage1_steps) and state.global_step <= self.stage1_steps
         nsfx = "_s1" if in_s1 else ""
-        full = bool(in_s1)
-        ns = self.stage1_n_steps if in_s1 else None
+        win = raw.readout.full_windows if in_s1 else None
         was_training = raw.training
         raw.eval()
         self._ensure_ds()
@@ -413,7 +409,7 @@ class V10EvalCallback(TrainerCallback):
                 ctx = (torch.autocast("cuda", dtype=torch.bfloat16) if amp
                        else contextlib.nullcontext())
                 with ctx:
-                    out = raw.evaluate(x, n_steps=ns, full_read=full,
+                    out = raw.evaluate(x, windows=win,
                                        pixel_psnr=self.psnr if not in_s1 else True)
                 for k, v in out.items():
                     acc[k] = acc.get(k, 0.0) + float(v)
@@ -438,30 +434,30 @@ class V10Trainer(Trainer):
     """官方扩展点：无 labels 的 eval loss、丢掉巨型输出、MUSA RNG 适配。"""
 
     def __init__(self, *args, psnr_eval: bool = False,
-                 stage1_steps: int = 0, stage1_n_steps: int = 1, **kwargs):
+                 stage1_steps: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
         self.can_return_loss = True
         self.psnr_eval = bool(psnr_eval)
         self.stage1_steps = int(stage1_steps)
-        self.stage1_n_steps = max(1, int(stage1_n_steps))
         self._stage_tag = None
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """两阶段切换点：`global_step < stage1_steps` 时打开 `train_full_read`
-        （单步 + 整段 memory，v2 A 相），之后切回全 S 步渐进读出。"""
+        """两阶段切换点：`global_step < stage1_steps` 时把读出窗口换成
+        `readout.full_windows`（单步 + 整段 memory，v2 A 相），之后切回
+        默认窗口（全 S 步渐进读出）。"""
         raw = self.accelerator.unwrap_model(model)
         if self.stage1_steps > 0:
             in_s1 = self.state.global_step < self.stage1_steps
-            raw.train_full_read = bool(in_s1)
+            raw.train_windows = raw.readout.full_windows if in_s1 else None
             tag = "s1" if in_s1 else "s2"
             if tag != self._stage_tag:
                 self._stage_tag = tag
                 if self.accelerator.is_main_process:
                     self.accelerator.print(
                         f"[stage] step {self.state.global_step} → 阶段{tag} "
-                        f"(full_read={raw.train_full_read})")
+                        f"(windows={'full' if in_s1 else 'default'})")
         else:
-            raw.train_full_read = False
+            raw.train_windows = None
         return super().compute_loss(model, inputs, return_outputs=return_outputs,
                                     **kwargs)
 
@@ -634,7 +630,7 @@ def main() -> None:
             data_root=a.data_root, frames=a.frames, img=a.img,
             n_clips=a.val_batches, every=a.val_every, out_dir=a.out,
             psnr=bool(a.psnr_eval),
-            stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps)
+            stage1_steps=stage1_steps)
     trainer = V10Trainer(
         model=model,
         args=training_args,
@@ -644,7 +640,7 @@ def main() -> None:
         compute_metrics=None,
         callbacks=[eval_cb] if eval_cb is not None else None,
         psnr_eval=bool(a.psnr_eval),
-        stage1_steps=stage1_steps, stage1_n_steps=a.stage1_n_steps,
+        stage1_steps=stage1_steps,
     )
     if eval_cb is not None:
         eval_cb.trainer = trainer
