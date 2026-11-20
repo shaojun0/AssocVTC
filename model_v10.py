@@ -32,12 +32,6 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
 每步多读一组 z（4 帧 = 0.5 s），读出逐步细化。因为 self-attn 是帧级因果的，
 整条链严格 streaming：第 t 档 = 只读前 t+1 组 z，等价于论文里「读前 κ 个 token」。
 
-读出读哪些 memory 由 **memory_plan**（每步一个平坦 memory 的连续窗口
-`(lo, hi)`，与 v2 `OutputQueryDecoder` 的 `step_windows()` 同构）决定：
-默认 plan = 第 t 步读第 t 组 P 行（`default_memory_plan`，= 上面这条渐进读出）；
-两阶段训练的阶段 1 = 单步全读 `[(0, S*P)]`（`full_memory_plan`，= v2 的
-`steps=[K]` 口径，没有 boolean 开关）。
-
 数据流（数字口径：448² / patch 32 / N=196 / K=32 / zs_dim=448）
 --------------------------------------------------------------
 ::
@@ -48,23 +42,21 @@ v8/v9 是「逐帧读出 + 帧间状态」；v10 反过来：**每一步都把�
     middle       960 个位置，帧级因果 + 6 层 Transformer → (B,120,8,896)
                  reshape → z (B,30,32,896)（4 帧 × 8 行 = 每步 32 行）
     readout      Q（可学习，随机初始化）(1,1089,896)；γ_0 = 0
-                 plan = 每步读平坦 memory (S*P 行) 的一个连续窗口 [(lo,hi), …]
-                        默认 = 第 t 步读第 t 组 P 行；阶段 1 全读 = [(0,S*P)] 单步
-                 for t, (lo, hi) in enumerate(plan):
+                 for t in 0..29:
                      h    = Q + γ_t·Y_{t-1} + step_emb[t]   # carry 同 v2：无 LN
-                     Y_t  = Decoder(h, memory[lo:hi])  全双向 self-attn + cross-attn
+                     Y_t  = Decoder(h, z_t)     全双向 self-attn + cross-attn(32×896)
                      pred = LN(Y_t) → 后 120 帧 × 9 行
                           8 行 reshape 成 16×448；第 9 行过 cls_head（896→448）成 z_cls
                  loss = mean_t L1(pred_t, 冻结编码器给的全量 17 行)
-    R（冻结）    用末档 pred 的 (z_cls, 32 special) 还原像素，用于 PSNR
+    R（冻结）    用 pred_30 的 (z_cls, 32 special) 还原像素，用于 PSNR
 
 2026-11-18 与 v2 对齐（远端 946226d 口径）
 ------------------------------------------
 循环骨架与 `model_v2.OutputQueryDecoder` 保持一致：
   * carry = `Q + Y_{t-1}`（裸加，**无 LN**；默认也没有 γ 门控，即等权相加；
     Y 本身已被 decoder 末层 norm 归一化，状态有界）；
-  * 读出侧 self-attn **全双向、无 tgt_mask**（streaming 由「默认 memory_plan 下
-    第 t 步 memory 只有前 t+1 组 z」保证，不靠 self-attn mask）。
+  * 读出侧 self-attn **全双向、无 tgt_mask**（streaming 由「第 t 步 memory 只有
+    前 t+1 组 z」保证，不靠 self-attn mask）。
 
 为什么「率 < 目标」
 ------------------
@@ -337,20 +329,11 @@ class CrossQueryMiddle(nn.Module):
 
 # ═══════════════════════════════════════════════════════════ 整片段循环读出
 class WholeClipDecoder(nn.Module):
-    """(frames+1) 行 × rows_pred 列的 896 向量 + 多步循环：每步按 `memory_plan`
-    读平坦 memory 的一个连续窗口、重出整段。
-
-    读出哪些 memory 由 `memory_plan`（= 每步一个 `(lo, hi)` 窗口，v2
-    `OutputQueryDecoder` + `step_windows()` 的同构口径）决定，**没有 boolean
-    开关**：
-      * `default_memory_plan()`：第 t 步读平坦 memory 的第 t 组 P 行
-        `[t·P, (t+1)·P)`（= 现行 v10 渐进读出）；
-      * `full_memory_plan()`：单步 `[(0, S·P)]` 一步读完全部行（= v2 的
-        `steps=[K]`，两阶段训练的阶段 1）。
+    """(frames+1) 行 × rows_pred 列的 896 向量 + 30 步循环：每步读一组 z、重出整段。
 
     每步结构：
         h      = Q + γ_t·Y_{t-1} + step_emb[t]       carry 同 v2：无 LN、默认 w≡1
-        Y      = TransformerDecoder(h, mem[lo:hi])   全双向 self-attn（无 tgt_mask）+ cross-attn
+        Y      = TransformerDecoder(h, z_t)          全双向 self-attn（无 tgt_mask）+ cross-attn
         pred_t = Y + MLP(Y) 拆成 8 个 chunk（32 个 special）+ 1 行 z_cls
 
     位置数 = 121 × 9 = 1089：120 帧 + 1 个随机初始化起始槽，每帧 9 行 896
@@ -363,8 +346,8 @@ class WholeClipDecoder(nn.Module):
         混合一次；
       * 不建 special 的 head —— 8 行 896 直接 reshape 成 16×448，只有
         z_cls 那一行需要 `cls_head`（896→448）；
-      * 不复制 memory —— 整段是一条 batch，cross-attn 直接对窗口内的 key，
-        不需要 `repeat_interleave` 出 120 份副本。
+      * 不复制 memory —— 整段是一条 batch，cross-attn 直接对这一步的 16 个
+        key，不需要 `repeat_interleave` 出 120 份副本。
     """
 
     def __init__(self, cfg: V10Config, code_dim: int, num_specials: int):
@@ -404,9 +387,8 @@ class WholeClipDecoder(nn.Module):
         )
         self.cls_head = nn.Linear(self.d, self.code_dim)    # 只有 z_cls 需要投影
         # 读出 self-attn：默认**全双向、无 tgt_mask**（同 v2 的 OutputQueryDecoder，
-        # 946226d 口径）；streaming 由「默认 memory_plan 下第 t 步 memory 只有
-        # 前 t+1 组 z」保证，不靠 self-attn mask。cfg.readout_mask=True 时才加
-        # 旧版帧级因果 mask。
+        # 946226d 口径）；streaming 由「第 t 步 memory 只有前 t+1 组 z」保证，
+        # 不靠 self-attn mask。cfg.readout_mask=True 时才加旧版帧级因果 mask。
         if cfg.readout_mask:
             fi = torch.arange(L) // self.R                  # 位置 → 帧号（0=起始槽）
             allowed = fi[None, :] <= fi[:, None]            # True = 可看
@@ -424,95 +406,53 @@ class WholeClipDecoder(nn.Module):
         cls = self.cls_head(Y[:, :, self.R - 1]).unsqueeze(2)
         return spec, cls
 
-    # ── memory plan：每步读平坦 memory（S×P 行）的一个连续窗口 ──────────
-    def default_memory_plan(self, n_steps: Optional[int] = None) -> List[Tuple[int, int]]:
-        """默认 plan：第 t 步读平坦 memory 的 `[t*P, (t+1)*P)`（= 现行 v10 行为）。
-
-        `n_steps` 只控制档数（评测逐档曲线用）；None = 全 S 步。
-        """
-        n = self.S if n_steps is None else int(n_steps)
-        return [(t * self.P, (t + 1) * self.P) for t in range(n)]
-
-    def full_memory_plan(self) -> List[Tuple[int, int]]:
-        """单步全读（v2 的 `steps=[K]` 口径）：一步读完全部 S*P 行。"""
-        return [(0, self.S * self.P)]
-
     def forward(self, z: Tensor, n_steps: Optional[int] = None,
                 return_step_preds: bool = False,
-                memory_plan: Optional[List[Tuple[int, int]]] = None,
-                ) -> Dict[str, Tensor]:
-        """z (B,S,P,d) → dict(pred (B,F,1+K,c), feats, n_steps, preds 可选)。
+                full_read: bool = False) -> Dict[str, Tensor]:
+        """z (B,S,P,d) → dict(pred (B,F,1+K,c), feats, preds 可选 (B,S,F,1+K,c))。
 
-        与 v2 的 `OutputQueryDecoder` 同构：**循环体无分支**，每步读哪个窗口
-        完全由 `memory_plan`（平坦 memory 的连续窗口 `(lo, hi)`，左闭右开）
-        决定；返回的 `preds` 形状是 (B, len(plan), F, 1+K, c)。
+        与 v2 的 `OutputQueryDecoder` 同构：循环体无分支。第 t 步 memory =
+        当步 P 行（kv_pos 只含行位置）；`n_steps` 只控制渐进读出的档数
+        （评测逐档曲线用），训练恒走全 S 步。
 
-        * `memory_plan=None` → `default_memory_plan(n_steps)`：第 t 步只读自己
-          那组 P 行 `[t·P, (t+1)·P)`。`n_steps` 只控制渐进读出的档数
-          （评测逐档曲线用），训练恒走全 S 步。
-        * `memory_plan=[(lo, hi), …]` → 显式计划；此时必须 `n_steps=None`
-          （两者互斥，plan 自己就是档数）。单步全读 = `full_memory_plan()`
-          = `[(0, S*P)]`，即 v2 的 `steps=[K]`（两阶段训练的阶段 1 / v2 A 相
-          `--warm_steps`）：**一步**读完整段全部 S×P 行、一步出全片。
-
-        位置编码与「逐位等价」：memory 的扁平 index = 步 t·P + 组内行 p。
-
-        * **行位置** `kv_pos` 永远加（每一行都属于某个「组内行号」）。
-        * **z 步位置** `step_emb[s]` 只在读窗口**跨多个 z 步**时才加：它用来
-          区分不同 z 步的行（全读 plan 一定要加，否则 S 组 z 在 memory 里无法
-          区分先后）。窗口只落在一组 z 步内时**不加**。
-        * 之所以不能在默认 plan（第 t 步只读自己那组 P 行）上也加：本模型的
-          cross-attn 用**同一个 memory 张量同时当 K 和 V**，key 侧的常数偏移
-          虽然被 softmax 消掉，但 V 侧会把常数项原样带进输出（实测非零）。
-        * 因此：默认 plan 与 2026-11-19 重构版「`memory = kv[:, t]`」**逐位
-          一致**；`full_memory_plan()` 与旧「单步全读」分支**逐位一致**（旧全读
-          的 memory 本来就含 `step_emb`）。逐位对照见 `tools/verify_memory_plan_equiv.py`。
+        `full_read=True`（两阶段训练的阶段 1，对齐 v2 的 A 相
+        `--warm_steps`：`decoder.steps=[K]` 一步读完 `[z_cls; z_s]`）：只跑
+        **1 步**，memory = **整段 z 的全部 S×P 行**（位置 = 行位置 `kv_pos`
+        + z 步位置 `step_emb`，不新增任何参数）。
         """
         B, S, P, _ = z.shape
         assert P == self.P, (P, self.P)
-        if memory_plan is None:
-            n = self.S if n_steps is None else int(n_steps)
-            assert 1 <= n <= S, (n, S)
-            plan = self.default_memory_plan(n)
-        else:
-            assert n_steps is None, (n_steps, "memory_plan 与 n_steps 互斥")
-            plan = [(int(lo), int(hi)) for lo, hi in memory_plan]
-        assert 1 <= len(plan) <= self.S, (len(plan), self.S)
-        for lo, hi in plan:
-            assert 0 <= lo < hi <= S * P, (lo, hi, S * P)
+        n = self.S if n_steps is None else int(n_steps)
+        if full_read:
+            assert n == 1, (n, "full_read 只跑 1 步")
+        assert 1 <= n <= S, (n, S)
         # 加性 mask 必须与注意力权重同 dtype：bf16 下 muDNN/MUSA 的 SDPA 拒绝
         # "BF16 + FLOAT" 的加法（实测报 NOT_SUPPORTED in RunMath）。
         mask = None if self._mask is None else self._mask.to(dtype=z.dtype)
-        # memory 位置：行位置 kv_pos 永远加；z 步位置 step_emb 只在窗口**跨
-        # 多个 z 步**时才加（见 docstring「逐位等价」；默认 plan 逐位保持旧行为）。
-        kv_plain = (z + self.kv_pos.reshape(1, 1, self.P, self.d)).reshape(
-            B, S * P, self.d)
-        kv_step = None
-        mems: List[Tensor] = []
-        for lo, hi in plan:
-            if lo // P == (hi - 1) // P:                     # 窗口落在一组 z 步内
-                mems.append(kv_plain[:, lo:hi])
-            else:                                            # 跨步窗口才需要步位置
-                if kv_step is None:
-                    kv_step = (z + self.kv_pos.reshape(1, 1, self.P, self.d)
-                               + self.step_emb.reshape(1, S, 1, self.d)
-                               ).reshape(B, S * P, self.d)
-                mems.append(kv_step[:, lo:hi])
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
+        if full_read:
+            # 一步全读：把 30 步 × 32 行拼成 960 行 memory（v2 A 相口径）
+            kv_all = (z + self.kv_pos.reshape(1, 1, self.P, self.d)
+                      + self.step_emb.reshape(1, S, 1, self.d))
+            kv_all = kv_all.reshape(B, S * P, self.d)
+        else:
+            kv = z + self.kv_pos                             # (B,S,P,d)，等宽投影
         specs: List[Tensor] = []
         clss: List[Tensor] = []
-        for t, (lo, hi) in enumerate(plan):
+        for t in range(n):
             w = 1.0 if self.gate is None else self.gate[t]   # γ 零初始化 ⇒ 起点=单步
             carry = Q + w * Y                                # = v2 的 query_base + Y
             h = carry + self.step_emb[:, t]
-            Y = self.decoder(tgt=h, memory=mems[t], tgt_mask=mask)
+            Y = self.decoder(tgt=h,
+                             memory=(kv_all if full_read else kv[:, t]),
+                             tgt_mask=mask)
             spec, cls = self._split(Y + self.mlp_out(Y))
             specs.append(spec)
             clss.append(cls)
         out = dict(pred=torch.cat([clss[-1], specs[-1]], dim=2),
                    feats=Y.view(B, self.F + 1, self.R, self.d)[:, 1:],
-                   n_steps=len(plan))
+                   n_steps=n)
         if return_step_preds:
             out["preds"] = torch.cat([torch.stack(clss, 1),
                                       torch.stack(specs, 1)], dim=3)
@@ -521,12 +461,7 @@ class WholeClipDecoder(nn.Module):
 
 # ═══════════════════════════════════════════════════════════ 总模型
 class VideoV10(nn.Module):
-    """冻结分词器 + 中间态 + 整片段循环读出。训练只更新中间态与读出侧。
-
-    读出读哪些 memory 由 `memory_plan` 决定（见 `WholeClipDecoder`）：默认 =
-    第 t 步读第 t 组 P 行（渐进读出）；阶段 1 全读 = 单步 `[(0, S*P)]`
-    （训练态由 `self.train_memory_plan` 承载，evaluate/forward 也可显式传）。
-    """
+    """冻结分词器 + 中间态 + 整片段循环读出。训练只更新中间态与读出侧。"""
 
     def __init__(self, cfg: V10Config):
         super().__init__()
@@ -557,10 +492,9 @@ class VideoV10(nn.Module):
             ratio=cfg.mid_ratio, frames=cfg.frames,
             tokens_per_frame=cfg.rows_rate)
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
-        # 两阶段训练：阶段 1（单步全读，v2 A 相）由 trainer 把这里设成
-        # `readout.full_memory_plan()`（= [(0, S*P)]），训练态 forward 就会
-        # 用「1 步 + 整段 memory」；None = 默认 plan（第 t 步读第 t 组 P 行）。
-        self.train_memory_plan: Optional[List[Tuple[int, int]]] = None
+        # 两阶段训练：阶段 1（单步全读，v2 A 相）由 trainer 把这个开关打开，
+        # 训练态 forward 就会把 readout 换成「1 步 + 整段 memory」。
+        self.train_full_read = False
 
     # ── 目标：全量 special + z_cls（冻结编码器给）
     def target_latents(self, z_cls: Tensor, z_s: Tensor) -> Tensor:
@@ -595,23 +529,21 @@ class VideoV10(nn.Module):
                 return_pix: bool = False,
                 z_cls: Optional[Tensor] = None,
                 z_s: Optional[Tensor] = None,
-                memory_plan: Optional[List[Tuple[int, int]]] = None,
-                ) -> Dict[str, Tensor]:
+                full_read: Optional[bool] = None) -> Dict[str, Tensor]:
         """x (B,F,3,H,W) ∈[0,1]，或已缓存的 (z_cls (B,F,1,c), z_s (B,F,K,c))。
 
         → dict(loss, pred, l1, step_l1, z, target)；像素 PSNR 只在给了 x 时算。
+        `n_steps` 只用于评测逐档曲线（渐进读出）；训练恒走全 S 步。
         损失 = 每步 pred 对全部帧 latent L1 的平权均值（v2 的直接预测口径）。
 
-        `memory_plan` = 读出每步读平坦 memory 的哪个连续窗口（见
-        `WholeClipDecoder.forward`）：默认（None）= 第 t 步读第 t 组 P 行；
-        `[(0, S*P)]` = 单步全读（两阶段训练的阶段 1，一步出全片）。
-        `memory_plan=None` 时由训练态属性 `self.train_memory_plan` 决定
-        （trainer 在阶段 1 把它设为 `readout.full_memory_plan()`）。
-        `n_steps` 只用于评测逐档曲线，且**只在 `memory_plan is None` 时有意义**
-        （两者互斥）。
+        `full_read=None` 时由训练态属性 `self.train_full_read` 决定（两阶段
+        训练的阶段 1）；True = 单步全读（一步读完整段 z、一步出全片）。
         """
-        if memory_plan is None and self.training:
-            memory_plan = self.train_memory_plan
+        if full_read is None:
+            full_read = bool(self.training and
+                             getattr(self, "train_full_read", False))
+        if full_read:
+            n_steps = 1
         if x is not None:
             enc = self.encode_rate(x)
         else:
@@ -619,7 +551,7 @@ class VideoV10(nn.Module):
             enc = self.encode_rate_latents(z_cls, z_s)
         target = self.target_latents(enc["z_cls"], enc["z_s"])   # (B,F,1+T,c) 冻结
         out = self.readout(enc["z"], n_steps=n_steps, return_step_preds=True,
-                           memory_plan=memory_plan)
+                           full_read=full_read)
         preds = out["preds"]                                     # (B,S',F,T,c)
         # 与 v2 同口径：reduction="none" 保留步维，再按帧/token/通道求均值 ⇒ (B,S')
         per_step = F.l1_loss(preds, target.unsqueeze(1),
@@ -647,10 +579,9 @@ class VideoV10(nn.Module):
     @torch.no_grad()
     def evaluate(self, x: Tensor, n_steps: Optional[int] = None,
                  pixel_psnr: bool = True,
-                 memory_plan: Optional[List[Tuple[int, int]]] = None,
-                 ) -> Dict[str, float]:
+                 full_read: bool = False) -> Dict[str, float]:
         res = self.forward(x, n_steps=n_steps, return_pix=False,
-                           memory_plan=memory_plan)
+                           full_read=full_read)
         out = {"latent_l1": float(res["l1"])}
         if pixel_psnr:
             pc = res["pred"][:, :, :1].contiguous()
@@ -735,31 +666,6 @@ if __name__ == "__main__":
     print("[causal] per-step max|Δ|", [round(float(v), 4) for v in d])
     assert all(float(d[t]) == 0.0 for t in range(k)), d
     assert float(d[k]) > 1e-6 and float(d[-1]) > 1e-6, d
-
-    # memory_plan 与旧布尔开关同构（v2 的「步集 + 窗口」口径，无 boolean）：
-    #   * 默认 plan(2 档) 必须与 n_steps=2 逐位一致；
-    #   * 全读 plan = 单步 [(0, S*P)]，preds 形状 (B,1,F,1+K,c)。
-    with torch.no_grad():
-        p_n = m.readout(z, n_steps=2, return_step_preds=True)
-        p_d = m.readout(z, memory_plan=m.readout.default_memory_plan(2),
-                        return_step_preds=True)
-        assert p_n["n_steps"] == 2 and p_d["n_steps"] == 2, (
-            p_n["n_steps"], p_d["n_steps"])
-        assert torch.equal(p_n["preds"], p_d["preds"]), \
-            "default_memory_plan(2) 与 n_steps=2 不逐位一致"
-        p_full = m.readout(z, memory_plan=m.readout.full_memory_plan(),
-                           return_step_preds=True)
-        print("[plan] default==n_steps ✓; full-read preds",
-              tuple(p_full["preds"].shape), "n_steps", p_full["n_steps"])
-        assert p_full["preds"].shape == (
-            1, 1, cfg.frames, 1 + cfg.target_tokens, cfg.rate_dim), \
-            p_full["preds"].shape
-        assert p_full["n_steps"] == 1, p_full["n_steps"]
-        assert (m.readout.default_memory_plan() ==
-                [(t * cfg.chunks_per_step, (t + 1) * cfg.chunks_per_step)
-                 for t in range(cfg.n_steps)])
-        assert m.readout.full_memory_plan() == [(0, cfg.n_steps * cfg.chunks_per_step)]
-    print("[plan] full_memory_plan = [(0,S*P)] 单步 ✓")
 
     # 默认 = v2 对齐口径：carry 无 LN、无 γ 门控、读出 self-attn 全双向无 mask
     assert not hasattr(m.readout, "n_in"), "carry_ln 已移除，不该再有 n_in"
