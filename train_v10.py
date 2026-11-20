@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--chunk_tokens", type=int, default=4,
                    help="一个 1792 向量拼几个 token（宽度 = chunk_tokens × rate_dim）")
     p.add_argument("--mid_style", type=str, default="v2enc",
-                   choices=["v2enc", "crossq"],
+                   choices=["v2enc", "crossq", "identity"],
                    help="v2enc（默认）= v2 编码器同构：E 行(480×1792) 拼同尺寸可学 "
                         "query → 960 token 自注意力 → 取 query 半；crossq = 2026-11-19 交叉查询")
     p.add_argument("--mid_dim", type=int, default=0,
@@ -123,9 +123,6 @@ def parse_args() -> argparse.Namespace:
                    help="v2enc 是否拼 1 个可学 cls（输出广播加到所有 rate 行）")
     p.add_argument("--mid_skip", type=int, default=0,
                    help="v2enc 是否加 E 行残差（非 v2 口径的恒等保险；默认关）")
-    p.add_argument("--mid_gate", type=int, default=0,
-                   help="v2enc 是否用零初始化门控恒等残差 rate=E行+tanh(g)·enc"
-                        "（g=0 起点即恒等；2026-11-20 判别开关）")
     p.add_argument("--dec_dim", type=int, default=0,
                    help="0 = 自动取 chunk_tokens×rate_dim")
     p.add_argument("--dec_depth", type=int, default=4)
@@ -135,6 +132,8 @@ def parse_args() -> argparse.Namespace:
                    help="1 = carry 处零初始化 γ 门控（旧版）；默认 0 = w≡1（v2 口径）")
     p.add_argument("--readout_mask", type=int, default=0,
                    help="1 = 读出 self-attn 帧级因果 mask（旧版）；默认 0 = 全双向（v2 口径）")
+    p.add_argument("--readout_copy", type=int, default=0,
+                   help="1 = 恢复已读帧的 rate 行直抄残差（copy_skip；2026-11-20 判别用）")
     p.add_argument("--init_trainable", type=str, default="",
                    help="只加载 middle/readout 的 trainable ckpt（best_trainable.pt）"
                         "做热启动/课程学习")
@@ -199,11 +198,11 @@ def build_cfg(a: argparse.Namespace) -> V10Config:
         mid_style=a.mid_style, mid_dim=a.mid_dim, mid_hidden=a.mid_hidden,
         mid_depth=a.mid_depth, mid_heads=a.mid_heads,
         mid_ratio=a.mid_ratio, mid_cls=bool(a.mid_cls), mid_skip=bool(a.mid_skip),
-        mid_gate=bool(a.mid_gate),
         dec_dim=a.dec_dim, dec_depth=a.dec_depth,
         dec_heads=a.dec_heads, dec_ratio=a.dec_ratio,
         step_gate=bool(a.step_gate),
-        readout_mask=bool(a.readout_mask))
+        readout_mask=bool(a.readout_mask),
+        readout_copy=bool(a.readout_copy))
 
 
 def collate_clips(batch):

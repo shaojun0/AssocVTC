@@ -25,8 +25,9 @@ LR=${LR:-8e-4}
 MIDDEPTH=${MIDDEPTH:-2}   # v2enc 编码器层数（算力：2 层 ≈ 旧 crossq 6 层）
 MIDRATIO=${MIDRATIO:-2}
 MIDCLS=${MIDCLS:-0}       # 1 = middle 加 1 个 cls（输出广播加到所有 rate 行）
+MIDSTYLE=${MIDSTYLE:-v2enc} # v2enc | identity（零参数对照）| crossq
+READOUTCOPY=${READOUTCOPY:-0}  # 1 = 已读帧 rate 行直抄（copy_skip；判别用）
 MIDSKIP=${MIDSKIP:-0}     # 1 = rate 行加 E 行残差（非 v2 口径的恒等保险）
-MIDGATE=${MIDGATE:-0}     # 1 = 零初始化门控恒等残差 rate = E行 + tanh(g)·enc
 MAXSTEPS=${MAXSTEPS:-8000}
 INIT=${INIT:-}
 RESUME=${RESUME:-}
@@ -39,11 +40,11 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --out "$OUT" ${RESUME:+--resume "$RESUME"} ${INIT:+--init_trainable "$INIT"} \
   --frames 120 --img 448 --group 4 \
   --rate_tokens 16 --rate_dim 448 --target_tokens 16 --chunk_tokens 2 \
-  --mid_style v2enc --mid_hidden 1792 --mid_depth "$MIDDEPTH" \
+  --mid_style "$MIDSTYLE" --mid_hidden 1792 --mid_depth "$MIDDEPTH" \
   --mid_heads 16 --mid_ratio "$MIDRATIO" --mid_cls "$MIDCLS" \
-  --mid_skip "$MIDSKIP" --mid_gate "$MIDGATE" \
+  --mid_skip "$MIDSKIP" \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
-  --step_gate "$STEPGATE" --readout_mask "$MASK" \
+  --step_gate "$STEPGATE" --readout_mask "$MASK" --readout_copy "$READOUTCOPY" \
   --stage1_epochs "$S1E" --stage2_epochs "$S2E" \
   --batch 2 --accum_steps 2 \
   --lr "$LR" --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
