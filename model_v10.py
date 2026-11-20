@@ -80,13 +80,9 @@ mid_style       "v2enc"（默认，v2 编码器同构）| "crossq"（2026-11-19 
 mid_hidden      v2enc 编码器宽度（0 = 2×width；正式 = 1792）
 mid_depth/heads/ratio  middle 的层数/头数/FFN 比例（v2enc 建议 depth 2~3、ratio 2）
 mid_cls         v2enc 是否加 1 个 cls（输出广播加到所有 rate 行；默认关）
-mid_skip        v2enc 是否加 E 行残差（非 v2 口径的恒等保险；默认关）
 mid_dim/dec_dim 只接受 0（自动）或等于 width，防止"读出再投影到别的宽度"
 step_gate       是否用零初始化门控 γ（默认关 = w≡1，carry 与 v2 等权相加）
 readout_mask     读出 self-attn 是否帧级因果（默认 0 = 全双向，同 v2）
-readout_copy     已读帧 rate 行直抄残差（copy_skip；默认关。2026-11-20 判别用：
-                 赢家配方里它给 middle 提供直达 loss 的恒等梯度，被 635e90c 删掉后
-                 任何 middle 都塌，故以开关形式恢复，默认不影响其它路径）
 
 自检：``python model_v10.py``（CPU 可跑，不需要 ckpt）
 """
@@ -104,7 +100,7 @@ from torch import Tensor
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn
 
 __all__ = ["V10Config", "FrozenTokenizer",
-           "V2EncoderMiddle", "IdentityMiddle", "CrossQueryMiddle",
+           "V2EncoderMiddle", "CrossQueryMiddle",
            "WholeClipDecoder", "VideoV10",
            "patches_to_image", "psnr_from_l1"]
 
@@ -150,7 +146,6 @@ class V10Config:
     mid_heads: int = 16
     mid_ratio: float = 4.0
     mid_cls: bool = False      # v2enc：拼 1 个可学 cls，输出广播加到所有 rate 行
-    mid_skip: bool = False     # v2enc：rate 行额外加 E 行残差（非 v2 口径的恒等保险，默认关）
     # ── 读出（整片段循环）
     dec_dim: int = 0           # 0 = 自动取 width（896）
     dec_depth: int = 4
@@ -159,7 +154,6 @@ class V10Config:
     dec_drop: float = 0.0
     step_gate: bool = False    # γ 零初始化门控（默认关 = w≡1，同 v2 的 query_base + Y）
     readout_mask: bool = False # 读出 self-attn 是否用帧级因果 mask（默认关 = 全双向，同 v2）
-    readout_copy: bool = False # 已读帧 rate 行直抄残差（copy_skip；默认关）
     # loss 侧无开关：每步 pred 对全部帧 latent L1 平权均值（v2 直接预测口径）
 
 
@@ -313,7 +307,7 @@ class V2EncoderMiddle(nn.Module):
     与 v2 的差别必须记住：v2 的 E+R 是**联合训练**的，rate 空间怎么方便由 R
     反向决定；本模型 R 冻结且只用于评测渲染，middle 是在**冻结 E 的现有码空间**
     上再学一层重采样 —— 恒等/近恒等映射得靠训练自己学出来（不像 v2 天然
-    同构）。`mid_skip=True` 给一条 E 行残差当保险，但那不是 v2 口径。
+    同构）。
 
     位置信息：reshape 后帧号与块号都被打散，必须显式加回。输入行用可学
     `in_pos`（480×1792）编码 (帧, 块)，query 本身就是逐位置可学参数
@@ -325,7 +319,7 @@ class V2EncoderMiddle(nn.Module):
 
     def __init__(self, dim: int, depth: int, heads: int, ratio: float,
                  frames: int, rows_rate: int, width: int,
-                 drop: float = 0.0, use_cls: bool = False, skip: bool = False):
+                 drop: float = 0.0, use_cls: bool = False):
         super().__init__()
         self.dim = int(dim)
         self.frames = int(frames)
@@ -341,7 +335,6 @@ class V2EncoderMiddle(nn.Module):
         self.q = nn.Parameter(torch.randn(1, self.n_in, self.dim) * 0.02)
         self.cls = (nn.Parameter(torch.randn(1, 1, self.dim) * 0.02)
                     if use_cls else None)
-        self.skip = bool(skip)
         layer = nn.TransformerEncoderLayer(
             d_model=self.dim, nhead=int(heads), dim_feedforward=int(self.dim * ratio),
             dropout=drop, activation="gelu", batch_first=True, norm_first=True)
@@ -363,24 +356,10 @@ class V2EncoderMiddle(nn.Module):
         out = h[:, self.n_in:2 * self.n_in]                 # 取 query 半
         if self.cls is not None:                            # 全局摘要广播到所有行
             out = out + h[:, -1:]
-        if self.skip:                                       # 非 v2 口径的恒等保险
-            out = out + x
         return out.reshape(B, self.frames, self.rows_rate, self.width)
 
 
 # ═══════════════════════════════════════════════════════════ 交叉查询中间态
-# ═══════════════════════════════════════════════════════════ 恒等中间态（对照）
-class IdentityMiddle(nn.Module):
-    """no-op：rate = E 的打包行，**零参数**（2026-11-20 判别实验的对照）。
-
-    用途：把"middle 完全不动"这个下界跑出来 —— 在 rate==target 的 v10 设定里，
-    它配合 `readout_copy=True` 就是"读到的帧直抄"的极限（上界 ≈ 24.76 dB，
-    缺 z_cls）。它回答：塌缩到底来自 middle 的重编码，还是来自读出。
-    """
-
-    def forward(self, packed: Tensor) -> Tensor:
-        return packed
-
 
 class CrossQueryMiddle(nn.Module):
     """(B,F,T_f,d) → (B,F,T_f,d)：可学 query 对编码器输出做**全双向**重采样。
@@ -468,11 +447,6 @@ class WholeClipDecoder(nn.Module):
         self.R = int(cfg.rows_pred)                        # 9
         self.d = int(cfg.dec_dim)
         assert self.d == int(cfg.width), (self.d, cfg.width)
-        # 直抄残差（copy_skip）：已读帧的 rate 行原样加回输出行；要求行按帧
-        # 连续排布（rate 行 = 帧主序），所以 P = group × rows_rate。
-        self.Rr = int(cfg.rows_rate)
-        self.copy = bool(getattr(cfg, "readout_copy", False))
-        assert int(cfg.group) * self.Rr == self.P, (cfg.group, self.Rr, self.P)
         L = (self.F + 1) * self.R                          # 1089
         # 查询与状态（整片段一条序列）
         self.Q = nn.Parameter(torch.randn(1, L, self.d) * 0.02)
@@ -514,18 +488,10 @@ class WholeClipDecoder(nn.Module):
         self.windows = [(t * self.P, (t + 1) * self.P) for t in range(self.S)]
         self.full_windows = [(0, self.S * self.P)]
 
-    def _split(self, Y: Tensor, resid: Optional[Tensor] = None
-               ) -> Tuple[Tensor, Tensor]:
-        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。
-
-        `resid` (B,F,R,d)：已读帧的 rate 行直抄残差（copy_skip）。行 r 原样加回，
-        未读帧为 0 ⇒ 已读帧输出 = 模型预测 + rate 行，梯度可直达 middle 输出
-        （把 rate 逼成 ≈ 目标），不需要读出"学会抄"。
-        """
+    def _split(self, Y: Tensor) -> Tuple[Tensor, Tensor]:
+        """(B,L,d) → specials (B,F,K,c) / z_cls (B,F,1,c)。"""
         B = Y.shape[0]
         Y = Y.view(B, self.F + 1, self.R, self.d)[:, 1:]    # 丢掉随机起始槽
-        if resid is not None:
-            Y = Y + resid
         spec = Y[:, :, :self.R - 1].reshape(B, self.F, self.K, self.code_dim)
         cls = self.cls_head(Y[:, :, self.R - 1]).unsqueeze(2)
         return spec, cls
@@ -560,8 +526,6 @@ class WholeClipDecoder(nn.Module):
         # 行位置 kv_pos + z 步位置 step_emb；窗口只做切片。
         mem = (z + self.kv_pos.reshape(1, 1, self.P, self.d)
                + self.step_emb.reshape(1, S, 1, self.d)).reshape(B, S * P, self.d)
-        # 直抄残差的源：z 按 (帧, rate 行) 重排；只有前缀窗口（行按帧主序）
-        zr = (z.reshape(B, self.F, self.Rr, self.d) if self.copy else None)
         Q = self.Q.expand(B, -1, -1)                         # 随机初始化、可学习
         Y = torch.zeros_like(Q)                              # 状态初值 0（第 0 步只看 Q）
         specs: List[Tensor] = []
@@ -571,12 +535,7 @@ class WholeClipDecoder(nn.Module):
             carry = Q + w * Y                                # = v2 的 query_base + Y
             h = carry + self.step_emb[:, t]
             Y = self.decoder(tgt=h, memory=mem[:, lo:hi], tgt_mask=mask)
-            resid = None
-            if zr is not None:
-                nf = min(self.F, int(hi) // self.Rr)         # 已读帧数
-                resid = z.new_zeros(B, self.F, self.R, self.d)
-                resid[:, :nf, :self.Rr] = zr[:, :nf]
-            spec, cls = self._split(Y + self.mlp_out(Y), resid)
+            spec, cls = self._split(Y + self.mlp_out(Y))
             specs.append(spec)
             clss.append(cls)
         out = dict(pred=torch.cat([clss[-1], specs[-1]], dim=2),
@@ -624,7 +583,7 @@ class VideoV10(nn.Module):
                 dim=hidden, depth=cfg.mid_depth, heads=cfg.mid_heads,
                 ratio=cfg.mid_ratio, frames=cfg.frames,
                 rows_rate=cfg.rows_rate, width=cfg.width,
-                use_cls=bool(cfg.mid_cls), skip=bool(cfg.mid_skip))
+                use_cls=bool(cfg.mid_cls))
             cfg.mid_hidden = int(self.middle.dim)
         elif style == "crossq":
             assert cfg.mid_dim == cfg.width, (
@@ -634,12 +593,8 @@ class VideoV10(nn.Module):
                 ratio=cfg.mid_ratio, frames=cfg.frames,
                 tokens_per_frame=cfg.rows_rate)
             cfg.mid_style = "crossq"
-        elif style == "identity":
-            self.middle = IdentityMiddle()                   # 零参数对照（判别用）
-            cfg.mid_style = "identity"
         else:
-            raise ValueError(
-                f"未知 mid_style={cfg.mid_style!r}（支持 v2enc/crossq/identity）")
+            raise ValueError(f"未知 mid_style={cfg.mid_style!r}（只支持 v2enc/crossq）")
         self.readout = WholeClipDecoder(cfg, code_dim=code, num_specials=K)
         # 两阶段训练：阶段 1（单步全读，v2 A 相）由 trainer 把窗口换成
         # `readout.full_windows`，训练态 forward 就走「1 步 + 整段 memory」。
@@ -785,22 +740,10 @@ if __name__ == "__main__":
         mo = m.middle(pk)
     assert mo.shape == pk.shape, (mo.shape, pk.shape)
     # v2enc 变体：+cls、+skip、crossq 对照，都必须保持输入/输出同形
-    for extra in ({"mid_cls": True}, {"mid_skip": True}):
+    for extra in ({"mid_cls": True},):
         mc = VideoV10(V10Config(**{**asdict(cfg), **extra})).eval()
         with torch.no_grad():
             assert mc.middle(pk).shape == pk.shape, extra
-    # identity middle + readout_copy（判别对照）：零参数、输出=输入；copy 后
-    # 已读帧输出行 = 模型预测 + rate 行，形状与梯度都要通
-    cfg_id = V10Config(**{**asdict(cfg), "mid_style": "identity",
-                          "readout_copy": True})
-    mi = VideoV10(cfg_id).eval()
-    assert isinstance(mi.middle, IdentityMiddle)
-    assert mi.readout.copy and mi.readout.Rr == cfg.rows_rate
-    with torch.no_grad():
-        assert mi.middle(pk) is pk
-        z0 = torch.randn(2, cfg.n_steps, cfg.chunks_per_step, cfg.width)
-        r0 = mi.readout(z0, windows=mi.readout.full_windows)
-        assert r0["pred"].shape == (2, cfg.frames, 1 + cfg.target_tokens, cfg.rate_dim)
     cfg_cq = V10Config(**{**asdict(cfg), "mid_style": "crossq"})
     mcq = VideoV10(cfg_cq).eval()
     assert isinstance(mcq.middle, CrossQueryMiddle)

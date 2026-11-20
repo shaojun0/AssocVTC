@@ -9,7 +9,7 @@
 #         reshape 回 (B,120,8,896) 给读出；读出侧一行不改。
 #
 # 环境变量：S1E=2 S2E=2（epoch 数）、STEPGATE/MASK（默认 0=上一轮同口径）、
-#           LR、MIDDEPTH=2 MIDRATIO=2 MIDCLS=0 MIDSKIP=0（middle 变体开关）、
+#           LR、MIDDEPTH=2 MIDRATIO=2 MIDCLS=0（middle 变体开关）、
 #           OUT/NAME、PORT、INIT/RESUME、MAXSTEPS（0=按 epoch 反推）
 set -u
 cd /root/AssocVTC_v10
@@ -25,9 +25,6 @@ LR=${LR:-8e-4}
 MIDDEPTH=${MIDDEPTH:-2}   # v2enc 编码器层数（算力：2 层 ≈ 旧 crossq 6 层）
 MIDRATIO=${MIDRATIO:-2}
 MIDCLS=${MIDCLS:-0}       # 1 = middle 加 1 个 cls（输出广播加到所有 rate 行）
-MIDSTYLE=${MIDSTYLE:-v2enc} # v2enc | identity（零参数对照）| crossq
-READOUTCOPY=${READOUTCOPY:-0}  # 1 = 已读帧 rate 行直抄（copy_skip；判别用）
-MIDSKIP=${MIDSKIP:-0}     # 1 = rate 行加 E 行残差（非 v2 口径的恒等保险）
 MAXSTEPS=${MAXSTEPS:-8000}
 INIT=${INIT:-}
 RESUME=${RESUME:-}
@@ -40,11 +37,10 @@ exec torchrun --nproc_per_node=4 --master_port=$PORT train_v10.py \
   --out "$OUT" ${RESUME:+--resume "$RESUME"} ${INIT:+--init_trainable "$INIT"} \
   --frames 120 --img 448 --group 4 \
   --rate_tokens 16 --rate_dim 448 --target_tokens 16 --chunk_tokens 2 \
-  --mid_style "$MIDSTYLE" --mid_hidden 1792 --mid_depth "$MIDDEPTH" \
+  --mid_style v2enc --mid_hidden 1792 --mid_depth "$MIDDEPTH" \
   --mid_heads 16 --mid_ratio "$MIDRATIO" --mid_cls "$MIDCLS" \
-  --mid_skip "$MIDSKIP" \
   --dec_ratio 2 --dec_depth 4 --dec_heads 16 \
-  --step_gate "$STEPGATE" --readout_mask "$MASK" --readout_copy "$READOUTCOPY" \
+  --step_gate "$STEPGATE" --readout_mask "$MASK" \
   --stage1_epochs "$S1E" --stage2_epochs "$S2E" \
   --batch 2 --accum_steps 2 \
   --lr "$LR" --weight_decay 0.05 --warmup_frac 0.02 --grad_clip 1.0 \
