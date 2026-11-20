@@ -1,9 +1,14 @@
 # v10 ×「v2 编码器同构 middle」：实现、跑挂、归因（2026-11-20）
 
 > 对应提交：本文件所在 commit（代码 = `model_v10.py` 的 `V2EncoderMiddle` +
-> `train_v10.py --mid_style/--mid_hidden/--mid_cls/--mid_skip/--mid_gate` +
+> `train_v10.py --mid_style/--mid_hidden/--mid_cls` +
 > `run_v10_train_2stage_v2enc.sh`）。失败运行的完整日志在
-> `doc/2026-11-20/artifacts/v10_120f_2stage_v2enc/{train.log,probe_stage1_v2enc.log,run_args.json}`。
+> `doc/2026-11-20/artifacts/v10_120f_2stage_v2enc/`。
+>
+> **代码状态（2026-11-20 13:55 用户指示）**：本报告只保留 **v2 拼接编码器
+> middle** 的代码；§3/§10 里用于判别的 `--mid_skip`、`--mid_gate`、
+> `--readout_copy`、`--mid_style identity` 等开关**已全部从代码删除**
+> （历史 commit `7818822`、`b4df1a6` 可查），结果与日志保留在报告/artifacts。
 
 ## 0. TL;DR
 
@@ -57,11 +62,12 @@
   默认 2 层 / 16 头（head_dim 112）/ FFN ratio 2，末层 `LayerNorm(1792)`。
 * 输出：取 query 半 `(B,480,1792)` → reshape `(B,120,8,896)` → 原样喂
   `WholeClipDecoder`（读出侧一行未改）。
-* 可复用的判别开关（默认全关）：
-  * `--mid_skip 1`：`rate = enc + x`（普通 E 行残差，非 v2 口径）；
-  * `--mid_gate 1`：`rate = x + tanh(g)·enc`，`g` 零初始化 ⇒ **起点严格恒等**（本次判别用）；
-  * `--mid_cls 1`：加 cls 并广播；
-  * `--mid_style crossq`：保留 2026-11-19 的交叉查询 middle 做对照。
+* 可复用开关（默认关）：`--mid_cls 1`（加 cls 并广播）、
+  `--mid_style crossq`（保留 2026-11-19 的交叉查询 middle 做对照）。
+* 说明：§3/§10 的判别实验曾用 `--mid_skip`、`--mid_gate`、`--readout_copy`、
+  `--mid_style identity` 四个临时开关；它们**已按用户要求从代码删除**
+  （`mid_gate` 还因为 `g=0` 时 `∂rate/∂enc=0` 会饿死 encoder，见 §9-9）。
+  复现那两节需要从历史 commit `7818822`/`b4df1a6` 临时加回。
 
 ### 1.3 规模与算力
 
@@ -186,7 +192,7 @@ bash run_v10_train_2stage_v2enc.sh          # 默认 OUT=/root/autodl-tmp/tok448
 # 阶段 1-only 判别（三种口径）
 MIDGATE=1 MAXSTEPS= ...  # 见 probe_stage1_v2enc.sh（remote /root/AssocVTC_v10/）
 # 关键开关：--mid_style v2enc --mid_hidden 1792 --mid_depth 2 --mid_heads 16
-#           --mid_ratio 2 [--mid_cls 1] [--mid_skip 1] [--mid_gate 1]
+#           --mid_ratio 2 [--mid_cls 1]
 ```
 
 产物：
@@ -322,3 +328,13 @@ MIDGATE=1 MAXSTEPS= ...  # 见 probe_stage1_v2enc.sh（remote /root/AssocVTC_v10
 3. 因此"赢家 = 直抄 + 常数 z_cls"不完整：常数 z_cls 只到 23.58；
    要 24.76 需要 z_cls 比"逐位置常数"更好（内容相关），或 stage2 训练带来
    的表示收益。下一实验（identity+copy+loss_read 两阶段）可以直接二分这两项。
+
+## 11. 代码状态与后续（2026-11-20 14:00）
+
+* **保留**：`V2EncoderMiddle`（你给的 480×1792 + 可学 query 拼接自注意力口径）、
+  `--mid_style v2enc|crossq`、`--mid_hidden/--mid_depth/--mid_heads/--mid_ratio`、
+  `--mid_cls`，以及 `run_v10_train_2stage_v2enc.sh`。
+* **删除**（本次判别用、偏离原始目的）：`--mid_skip`、`--mid_gate`、`--readout_copy`、
+  `IdentityMiddle`；代码回到"v2 拼接编码器 + 原读出"。
+* 结论只作为**负结果/边界**记录（§3/§10），不改变当前代码方向。
+* 机器已关机，等用户对齐信息后再定下一步。
