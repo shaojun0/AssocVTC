@@ -301,3 +301,24 @@ MIDGATE=1 MAXSTEPS= ...  # 见 probe_stage1_v2enc.sh（remote /root/AssocVTC_v10
      给 z_cls 单独的像素辅助监督 / 从多帧率预测 z_cls。
 
 产物：`artifacts/v10_120f_2stage_v2enc/probe3_idcopy_2ep_stage1.log`。
+
+### 10.2 60-clip 评测（identity+copy 阶段1 末档，单进程全读）
+
+| 指标（60 val clips） | identity+copy（本实验，阶段1） | 赢家 packed+copy（两阶段末档） |
+|---|---:|---:|
+| PSNR 整片 | **23.58 ± 3.49**（17.55 ~ 34.66） | **24.76 ± 3.28**（18.87 ~ 35.89） |
+| latent L1 | 0.0235 | 0.0351 |
+| z_cls L1 | 0.3817 | 0.3743 |
+| special L1 | **0.0011** | 0.0139 |
+| 冻结分词器上界 | 30.055 | 30.055 |
+
+**解读（收紧 §10.1 的结论）**
+1. 拿掉整个 middle、只留"冻结码 + 直抄 + 单步全读"，60-clip 是 23.58 dB，
+   比赢家 24.76 低 **1.18 dB**——**middle 可以拿掉，但还差约 1 dB**。
+2. 差的不是 special（我们 0.0011，比赢家 0.0139 更准），也不是 latent L1
+   （我们 0.0235 更好）；z_cls L1 两者都≈天花板（0.3817 vs 0.3743）。
+   ⇒ 差距来自 **z_cls 的误差结构 / 内容相关性**，以及**赢家多出来的 stage2
+   （30 步 carry + loss_read）**这两项，而不是 middle 容量。
+3. 因此"赢家 = 直抄 + 常数 z_cls"不完整：常数 z_cls 只到 23.58；
+   要 24.76 需要 z_cls 比"逐位置常数"更好（内容相关），或 stage2 训练带来
+   的表示收益。下一实验（identity+copy+loss_read 两阶段）可以直接二分这两项。
