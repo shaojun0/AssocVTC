@@ -477,6 +477,21 @@ def parse_args():
                     help="clip 前 grad_norm 超过该值就跳过本步更新（0=关）; "
                          "线性注意力低精度间歇爆炸的护栏, 见模型 docstring")
     ap.add_argument("--amp", type=int, default=1)
+    # ── 批次 rFID（重建 FID）辅助损失（2026-11-20; 默认 0 = 关, 旧路径逐位不变）──
+    #    参考会话 session-0389af9d 结论: rFID 可微/可当损失（FastFID 2009.14075）,
+    #    但是分布级统计量 ⇒ 只作 L1 的辅助项, 小权重 + ramp + 监控 raw rFID。
+    ap.add_argument("--rfid_weight", type=float, default=0.0,
+                    help="批次 rFID 辅助损失权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--rfid_dim", type=int, default=2048,
+                    help="InceptionV3 特征维（默认 pool3=2048, 与 eval rFID 同口径）")
+    ap.add_argument("--rfid_every", type=int, default=1,
+                    help="每 k 个优化步计算一次 rFID 损失（默认 1 = 每步）")
+    ap.add_argument("--rfid_start_frac", type=float, default=0.1,
+                    help="从总步数的哪个比例开始启用 rFID（默认 0.1）")
+    ap.add_argument("--rfid_ramp_frac", type=float, default=0.1,
+                    help="rFID 权重线性 ramp 占总步数的比例（默认 0.1）")
+    ap.add_argument("--rfid_norm_dim", type=int, default=1,
+                    help="1=rFID 除以特征维（量纲稳定, 默认）; 0=用原始 rFID")
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--val_per_class", type=int, default=50)
     ap.add_argument("--val_batches", type=int, default=40)
@@ -737,6 +752,19 @@ def main():
           f"steps={cfg.refiner_steps or 'T'})", flush=True)
     _p(f"[params] {pc}", flush=True)
 
+    # ── 批次 rFID 辅助损失（2026-11-20; --rfid_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    rfid_fn = None
+    if float(getattr(args, "rfid_weight", 0.0)) > 0:
+        from rfid_loss import BatchRFIDLoss
+        rfid_fn = BatchRFIDLoss(
+            dim=int(getattr(args, "rfid_dim", 2048)),
+            normalize_by_dim=bool(getattr(args, "rfid_norm_dim", 1))).to(_DEVICE)
+        rfid_fn.eval()
+        _p(f"[rfid] batch rFID loss: InceptionV3 pool3(dim={args.rfid_dim}) "
+              f"weight={args.rfid_weight} every={args.rfid_every} "
+              f"start_frac={args.rfid_start_frac} ramp_frac={args.rfid_ramp_frac} "
+              f"norm_by_dim={bool(args.rfid_norm_dim)}", flush=True)
+
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
     use_manual_ddp = False
     if ddp:
@@ -864,6 +892,15 @@ def main():
                 opt.zero_grad(set_to_none=True)
                 loss_sum, rec_sum = 0.0, 0.0
             last_micro = ((bi + 1) % accum == 0)
+            # rFID 权重调度（rfid_fn=None 或未到启动步 ⇒ 0, 下方分支不进）
+            rfid_lam = 0.0
+            if rfid_fn is not None:
+                _st = max(1, int(args.rfid_start_frac * total_steps))
+                _rp = max(1, int(args.rfid_ramp_frac * total_steps))
+                if step >= _st:
+                    rfid_lam = float(args.rfid_weight) * min(
+                        1.0, (step - _st + 1) / _rp)
+            rfid_raw = None
             # DDP 梯度累积: 只有本优化步的最后一次 micro 才 allreduce, 其余 no_sync
             # （否则每个 micro 都同步一次, 通信量 ×accum 且语义不等价）。
             sync_ctx = (model.no_sync() if ddp and not last_micro
@@ -872,8 +909,23 @@ def main():
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
                     out = model(x)
                     loss = out["loss"]
+                    base_loss = loss
+                    # 批次 rFID: 末步重建 F_hat vs target, 作 L1 的辅助项（小权重）
+                    if (rfid_fn is not None and rfid_lam > 0.0
+                            and step % max(1, int(args.rfid_every)) == 0):
+                        _pred01 = patches_to_image(
+                            out["F_hat"], cfg.img_size, cfg.img_size, cfg.patch,
+                            IMAGENET_MEAN, IMAGENET_STD,
+                            clamp_255=False).clamp(0.0, 1.0)
+                        _tgt01 = patches_to_image(
+                            out["target_pix"], cfg.img_size, cfg.img_size, cfg.patch,
+                            IMAGENET_MEAN, IMAGENET_STD,
+                            clamp_255=False).clamp(0.0, 1.0)
+                        _r = rfid_fn(_pred01, _tgt01)
+                        loss = loss + rfid_lam * _r["loss"]
+                        rfid_raw = float(_r["raw"].detach())
                 (loss / accum).backward()      # accum=1 时与原行为逐位相同
-            loss_sum += float(loss.item())
+            loss_sum += float(base_loss.item())
             rec_sum += float(out["recon"].item())
             if not last_micro:
                 continue                    # 累积未满 ⇒ 不做优化步
@@ -920,10 +972,16 @@ def main():
                     "eta_h": round(eta_h, 2),
                     "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
                 }
+                _rfid_txt = ""
+                if rfid_fn is not None:
+                    rec["rfid"] = (None if rfid_raw is None else round(rfid_raw, 3))
+                    rec["rfid_lam"] = round(rfid_lam, 6)
+                    if rfid_raw is not None:
+                        _rfid_txt = f" rfid={rfid_raw:.2f}(λ={rfid_lam:.4f})"
                 _p(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
                       f"loss={loss_avg:.4f} recon={rec_avg:.4f} "
                       f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
-                      f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h", flush=True)
+                      f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h" + _rfid_txt, flush=True)
                 log_jsonl(log_path, rec)
                 write_status(status_path, {**rec, "best_psnr": best_psnr,
                                            "running": True})

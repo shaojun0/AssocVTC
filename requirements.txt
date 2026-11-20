@@ -9,3 +9,5 @@ Pillow>=9.0.0
 tqdm>=4.64.0
 bitsandbytes>=0.41.0
 datasets>=2.14.0
+# 可选: train_linattn.py --rfid_weight>0（批次 rFID 辅助损失）时需要
+pytorch-fid>=0.3.0
