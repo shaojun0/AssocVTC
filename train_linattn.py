@@ -492,6 +492,12 @@ def parse_args():
                     help="rFID 权重线性 ramp 占总步数的比例（默认 0.1）")
     ap.add_argument("--rfid_norm_dim", type=int, default=1,
                     help="1=rFID 除以特征维（量纲稳定, 默认）; 0=用原始 rFID")
+    ap.add_argument("--perc_weight", type=float, default=0.0,
+                    help="VGG16 感知损失权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--perc_layer", default="3,8,15",
+                    help="VGG16 features 下标（逗号分隔, 默认 3,8,15 = relu1_2/2_2/3_3）")
+    ap.add_argument("--perc_resize", type=int, default=224,
+                    help="送入 VGG 的尺寸（默认 224）")
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--val_per_class", type=int, default=50)
     ap.add_argument("--val_batches", type=int, default=40)
@@ -610,6 +616,13 @@ def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
     with torch.no_grad():
         if key in sd:
             W = sd[key].float()                       # (dec_dim, enc_dim)
+            # 2026-11-22 fix: ckpt 本身已是瓶颈结构（mem_proj in_dim == zs_dim，说明源模型
+            # 早就带 zs_proj），此时 zs_proj/mem_proj 已由 load_state_dict 原样加载，
+            # 再做一次 SVD 会把 (d,d) 的 Vh_d 拷进 (d,enc_dim) 的 FC → 尺寸不符崩溃。
+            if int(W.shape[1]) == d:
+                _p(f"[init_from] zs_dim={d}: 源 ckpt 已是瓶颈结构 "
+                     f"(mem_proj {tuple(W.shape)})，跳过 SVD warm start", flush=True)
+                return
             U, S, Vh = torch.linalg.svd(W, full_matrices=False)
             Vh_d = Vh[:d].contiguous()                # (d, enc_dim)
             U_d = (U[:, :d] * S[:d]).contiguous()     # (dec_dim, d)
@@ -765,6 +778,17 @@ def main():
               f"start_frac={args.rfid_start_frac} ramp_frac={args.rfid_ramp_frac} "
               f"norm_by_dim={bool(args.rfid_norm_dim)}", flush=True)
 
+    # ── VGG16 感知损失（2026-11-21; --perc_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    perc_fn = None
+    if float(getattr(args, "perc_weight", 0.0)) > 0:
+        from perc_loss import VGGPerceptualLoss
+        _pl = [int(v) for v in str(args.perc_layer).split(",") if str(v).strip()]
+        perc_fn = VGGPerceptualLoss(layers=_pl,
+                                    resize=int(args.perc_resize)).to(_DEVICE)
+        perc_fn.eval()
+        _p(f"[perc] VGG16 感知损失: weight={args.perc_weight} layers={_pl} "
+              f"resize={args.perc_resize}", flush=True)
+
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
     use_manual_ddp = False
     if ddp:
@@ -901,6 +925,8 @@ def main():
                     rfid_lam = float(args.rfid_weight) * min(
                         1.0, (step - _st + 1) / _rp)
             rfid_raw = None
+            perc_lam = float(getattr(args, "perc_weight", 0.0))
+            perc_raw = None
             # DDP 梯度累积: 只有本优化步的最后一次 micro 才 allreduce, 其余 no_sync
             # （否则每个 micro 都同步一次, 通信量 ×accum 且语义不等价）。
             sync_ctx = (model.no_sync() if ddp and not last_micro
@@ -910,9 +936,11 @@ def main():
                     out = model(x)
                     loss = out["loss"]
                     base_loss = loss
-                    # 批次 rFID: 末步重建 F_hat vs target, 作 L1 的辅助项（小权重）
-                    if (rfid_fn is not None and rfid_lam > 0.0
-                            and step % max(1, int(args.rfid_every)) == 0):
+                    # 末步重建 F_hat vs target 的辅助项（rFID / 感知损失, 小权重）
+                    _need_rfid = (rfid_fn is not None and rfid_lam > 0.0
+                                  and step % max(1, int(args.rfid_every)) == 0)
+                    _need_perc = perc_fn is not None and perc_lam > 0.0
+                    if _need_rfid or _need_perc:
                         _pred01 = patches_to_image(
                             out["F_hat"], cfg.img_size, cfg.img_size, cfg.patch,
                             IMAGENET_MEAN, IMAGENET_STD,
@@ -921,9 +949,15 @@ def main():
                             out["target_pix"], cfg.img_size, cfg.img_size, cfg.patch,
                             IMAGENET_MEAN, IMAGENET_STD,
                             clamp_255=False).clamp(0.0, 1.0)
+                    if _need_rfid:
                         _r = rfid_fn(_pred01, _tgt01)
                         loss = loss + rfid_lam * _r["loss"]
                         rfid_raw = float(_r["raw"].detach())
+                    if _need_perc:
+                        with torch.autocast("cuda", enabled=False):
+                            _pv = perc_fn(_pred01.float(), _tgt01.float())
+                        loss = loss + perc_lam * _pv
+                        perc_raw = float(_pv.detach())
                 (loss / accum).backward()      # accum=1 时与原行为逐位相同
             loss_sum += float(base_loss.item())
             rec_sum += float(out["recon"].item())
