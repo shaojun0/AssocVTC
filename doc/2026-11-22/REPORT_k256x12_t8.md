@@ -226,7 +226,15 @@ G lr 3e-5、D lr 1e-4、10% 步数 ramp、4 卡 DDP、1.5h（1100 步 ≈ 1.16 e
 
 ---
 
-## 6. 复现
+## 6. 下一步计划（见 `doc/2026-11-22/PLAN_refiner_roadmap.md`）
+
+本报告的三次"技巧"尝试（感知损失 / rFID-loss / PatchGAN）均为负结果或未完成，差距归因清楚后，下一阶段路线定为
+**解码端 refiner（post-filter）**：冻结主干、用 6–10M 参数的小 refiner + hinge PatchGAN + VGG 感知（对抗作用在 refiner 输出，
+不再触碰主解码器），一个 refiner 服务全部 8 个速率点。计划含 P0（FID 分解 + 预训练后处理天花板实验，1–2h 无训练）、
+P1（refiner 训练，4–6h）、P2（主干长训练）、P3（补 LPIPS/DISTS 与 RDP 三联图）、P4（消融与写作），
+以及 MUSA 踩坑清单与资产路径。
+
+## 7. 复现
 
 ```bash
 # 阶段 1：从零 L1，14ep
