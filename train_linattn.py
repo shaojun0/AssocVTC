@@ -498,6 +498,21 @@ def parse_args():
                     help="VGG16 features 下标（逗号分隔, 默认 3,8,15 = relu1_2/2_2/3_3）")
     ap.add_argument("--perc_resize", type=int, default=224,
                     help="送入 VGG 的尺寸（默认 224）")
+    # ── PatchGAN 对抗微调（2026-11-22）──
+    ap.add_argument("--gan_weight", type=float, default=0.0,
+                    help="PatchGAN 对抗损失目标权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--gan_ndf", type=int, default=64, help="判别器基础通道")
+    ap.add_argument("--gan_layers", type=int, default=3,
+                    help="判别器下采样层数（3 ⇒ 70×70 感受野）")
+    ap.add_argument("--gan_d_lr", type=float, default=1e-4, help="判别器 lr")
+    ap.add_argument("--gan_start_frac", type=float, default=0.0,
+                    help="从训练进度百分之几开始加对抗项")
+    ap.add_argument("--gan_ramp_frac", type=float, default=0.05,
+                    help="对抗权重线性 ramp 的进度占比")
+    ap.add_argument("--gan_adaptive", type=int, default=1,
+                    help="1=VQGAN 自适应权重 λ=‖∇_pred L_rec‖/‖∇_pred L_adv‖×gan_weight;"
+                         " 0=固定权重")
+
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--val_per_class", type=int, default=50)
     ap.add_argument("--val_batches", type=int, default=40)
@@ -811,6 +826,24 @@ def main():
             if is_musa:
                 _patch_ddp_pre_forward_musa(model)
 
+    # ── PatchGAN 判别器（2026-11-22; --gan_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    gan = None
+    if float(getattr(args, "gan_weight", 0.0)) > 0:
+        from patchgan import PatchGANTrainer
+        gan = PatchGANTrainer(ndf=int(args.gan_ndf), n_layers=int(args.gan_layers),
+                              lr=float(args.gan_d_lr), device=_DEVICE,
+                              ddp=ddp, world=world, rank=rank)
+        _gan_w = gan.last_layer_weight(raw_model)
+        _p(f"[gan] adaptive 基准层 = "
+              f"{'pixel_head.last_weight' if _gan_w is not None else 'None(退回固定权重)'}",
+              flush=True)
+        _p(f"[gan] PatchGAN ndf={args.gan_ndf} layers={args.gan_layers} "
+              f"weight={args.gan_weight} d_lr={args.gan_d_lr} "
+              f"start_frac={args.gan_start_frac} ramp_frac={args.gan_ramp_frac} "
+              f"adaptive={bool(int(args.gan_adaptive))} "
+              f"（D {sum(p.numel() for p in gan.D.parameters())/1e6:.2f}M 参数, "
+              f"{'独立于 DDP/手动 allreduce' if ddp else '单卡'}）", flush=True)
+
     accum = max(1, int(args.accum_steps))
     # ★ `--batch_size` 恒为**全局等效批量**: 每卡 micro = batch_size/(accum×world)。
     #   单卡时 world=1 ⇒ micro = batch_size/accum, 与改造前逐位相同。
@@ -893,6 +926,7 @@ def main():
     run_imgs, run_t0 = 0, time.time()
     n_skipped = 0
     loss_sum, rec_sum = 0.0, 0.0     # 一个优化步内 accum 个 micro-batch 的累计
+    gan_lam_state = None             # 自适应 λ 的跨 micro-batch 共享值（同一步内一致）
     model.train()
     step = start_step
     stop = False
@@ -915,6 +949,7 @@ def main():
             if bi % accum == 0:
                 opt.zero_grad(set_to_none=True)
                 loss_sum, rec_sum = 0.0, 0.0
+                _dstat = None            # 本次优化步的判别器监控量（GAN 关闭时恒 None）
             last_micro = ((bi + 1) % accum == 0)
             # rFID 权重调度（rfid_fn=None 或未到启动步 ⇒ 0, 下方分支不进）
             rfid_lam = 0.0
@@ -927,6 +962,21 @@ def main():
             rfid_raw = None
             perc_lam = float(getattr(args, "perc_weight", 0.0))
             perc_raw = None
+            # PatchGAN 对抗权重调度（ramp 避免开局把已收敛的模型打乱）
+            adv_raw = None
+            lam_ratio = None
+            if gan is not None:
+                # 自适应模式下同一优化步内所有 micro-batch 用同一个 λ（上一次算出的值），
+                # 只有最后一次 micro 才重新按梯度比值更新它。
+                if gan_lam_state is not None:
+                    gan_lam = gan_lam_state
+                else:
+                    gan_lam = gan.lam_at(step,
+                                         int(args.gan_start_frac * total_steps),
+                                         int(args.gan_ramp_frac * total_steps),
+                                         float(args.gan_weight))
+            else:
+                gan_lam = 0.0
             # DDP 梯度累积: 只有本优化步的最后一次 micro 才 allreduce, 其余 no_sync
             # （否则每个 micro 都同步一次, 通信量 ×accum 且语义不等价）。
             sync_ctx = (model.no_sync() if ddp and not last_micro
@@ -940,7 +990,8 @@ def main():
                     _need_rfid = (rfid_fn is not None and rfid_lam > 0.0
                                   and step % max(1, int(args.rfid_every)) == 0)
                     _need_perc = perc_fn is not None and perc_lam > 0.0
-                    if _need_rfid or _need_perc:
+                    _need_gan = gan is not None and gan_lam > 0.0
+                    if _need_rfid or _need_perc or _need_gan:
                         _pred01 = patches_to_image(
                             out["F_hat"], cfg.img_size, cfg.img_size, cfg.patch,
                             IMAGENET_MEAN, IMAGENET_STD,
@@ -958,6 +1009,26 @@ def main():
                             _pv = perc_fn(_pred01.float(), _tgt01.float())
                         loss = loss + perc_lam * _pv
                         perc_raw = float(_pv.detach())
+                    if _need_gan:
+                        _adv = gan.g_adv_loss(_pred01)
+                        # VQGAN 自适应权重: 让对抗项对**末端重建张量**的梯度范数与
+                        # 重建损失同量级（否则 L1 已收敛时对抗项要么无效要么炸掉模型）。
+                        # autograd.grad 只从 loss 反传到 pred（图很小）⇒ 开销可忽略。
+                        if bool(int(args.gan_adaptive)) and last_micro:
+                            try:
+                                _r = gan.grad_ratio(base_loss, _adv, _gan_w)
+                                if _r is None:
+                                    raise RuntimeError("grad_ratio=None")
+                                gan_lam = gan.lam_at(
+                                    step, int(args.gan_start_frac * total_steps),
+                                    int(args.gan_ramp_frac * total_steps),
+                                    float(args.gan_weight) * _r)
+                                gan_lam_state = gan_lam
+                                lam_ratio = _r
+                            except RuntimeError as e:
+                                _p(f"[gan] adaptive λ 失败({e}), 用固定权重", flush=True)
+                        adv_raw = float(_adv.detach())
+                        loss = loss + gan_lam * _adv
                 (loss / accum).backward()      # accum=1 时与原行为逐位相同
             loss_sum += float(base_loss.item())
             rec_sum += float(out["recon"].item())
@@ -982,6 +1053,10 @@ def main():
                 opt.zero_grad(set_to_none=True)
             else:
                 opt.step()
+            # 判别器更新（G 步之后；G 的对抗项会把梯度写进 D, 这里 zero_grad 后重算）
+            if gan is not None and gan_lam > 0.0:
+                _d = gan.update_d(_tgt01, _pred01)
+                _dstat = _d
             step += 1
             if args.stop_at_step > 0 and step >= args.stop_at_step:
                 _p(f"[stop] 达到 stop_at_step={args.stop_at_step}"
@@ -1012,6 +1087,20 @@ def main():
                     rec["rfid_lam"] = round(rfid_lam, 6)
                     if rfid_raw is not None:
                         _rfid_txt = f" rfid={rfid_raw:.2f}(λ={rfid_lam:.4f})"
+                if gan is not None:
+                    rec["gan_lam"] = round(gan_lam, 6)
+                    if adv_raw is not None:
+                        rec["adv"] = round(adv_raw, 4)
+                    if lam_ratio is not None:
+                        rec["lam_ratio"] = round(lam_ratio, 3)
+                    if _dstat:
+                        rec["d"] = {k: round(v, 3) for k, v in _dstat.items()}
+                        _rfid_txt += (f" gan(λ={gan_lam:.4f}"
+                                      f" r={lam_ratio if lam_ratio is None else round(lam_ratio,2)}"
+                                      f" adv={adv_raw:.3f}"
+                                      f" d_real={_dstat['d_real']:.2f}"
+                                      f" d_fake={_dstat['d_fake']:.2f}"
+                                      f" acc_f={_dstat['acc_fake']:.2f})")
                 _p(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
                       f"loss={loss_avg:.4f} recon={rec_avg:.4f} "
                       f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
