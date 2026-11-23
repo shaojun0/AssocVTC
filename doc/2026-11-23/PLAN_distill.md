@@ -9,6 +9,13 @@
 
 ## 0. 先分清：ALIT 里的"蒸馏"指的是什么
 
+> **⚠️ 2026-11-23 更正（读官方代码后）**：本节的"ALIT **没有** teacher-student 知识蒸馏"是**错的**。
+> ALIT 的 stage-1（`train_stage="latent_distillation_pretrain"`）就是标准蒸馏：把 **frozen base
+> tokenizer 的 latent / codebook index 当回归目标**，像素用 **teacher 自己的 decoder** 渲染，
+> 且 stage-1 里**没有任何像素损失**（stage-2 才用 GAN+LPIPS+L1 渲染微调）。
+> 逐行对比、我们这一臂为什么白跑、以及改进点见 `NOTES_kd_vs_alit_code_20261123.md`。
+> 下文 §1–§2 的"跨模型输出蒸馏"路线判断仍然成立，但"ALIT 不做蒸馏"这个前提作废。
+
 ALIT（Duggal et al., *Adaptive Length Image Tokenization via Recurrent Allocation*,
 arXiv:2411.02393 / ICLR 2025）**没有 teacher-student 知识蒸馏**。它被称作 "distillation" 的是
 **stage-1 的 2D→1D token 转置机制**：
