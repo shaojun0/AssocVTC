@@ -18,10 +18,10 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 |---|---|
 | `adaptive_tokenizers/adaptive_vae.py:282-284` | `forward_loss(gt_code, decoded_code) = MSELoss(gt_code, decoded_code)`，`gt_code` 来自 **frozen base tokenizer** 的 encoder |
 | `adaptive_tokenizers/adaptive_vae.py:120-122` | `reconstruct_images()` = `self.base_tokenizer.vae.decode(decoded_code)` ⇒ **像素由 teacher 的 decoder 渲染** |
-| `adaptive_tokenizers/adaptive_vqgan.py:301-316` | VQGAN 版：`nll_loss` = label-smoothing CE 对 **teacher 的 codebook index** + `code_loss` = MSE(teacher code embedding, soft-expected student embedding) |
+| `adaptive_tokenizers/adaptive_vqgan.py:301-316` | VQGAN 版：`nll_loss` = **普通 NLL**（1024 类）对 **teacher 的 codebook index** + `code_loss` = MSE(teacher code embedding, soft-expected student embedding)。⚠️ 所谓 label smoothing 并不生效：`modules/losses/nll.py:18-19` 里平滑项那行被注释、返回 `(nll, smooth)` 但调用方 `adaptive_vqgan.py:306` 只取第一个返回值 |
 | `adaptive_tokenizers/adaptive_vae.py:247-250` | stage-1 的 loss **只有** `Σ_t lambda[t]·code_loss`（+ 量化器项），**没有任何像素损失** |
 | `modules/base_tokenizers.py:52-60` | stage-1 时 base tokenizer `requires_grad=False` 且 `forward` 在 `no_grad` 内，latent 乘 `0.2325` 做尺度归一 |
-| `main_full_finetuning.py:127-131` | stage-2 才把 base tokenizer 设成 `is_requires_grad=True`，用 `VQLPIPSWithDiscriminator`（L1+LPIPS+GAN，`disc_weight=0.2`）在 **渲染出来的像素 vs GT** 上训 |
+| `main_full_finetuning.py:127-131` | stage-2 才把 base tokenizer 设成 `is_requires_grad=True`，用 `VQLPIPSWithDiscriminator`（L1+LPIPS+GAN）在 **渲染出来的像素 vs GT** 上训。⚠️ GAN 权重不是固定 0.2：`engines/full_finetuning.py:36-38` 前 21 epoch 为 **0（GAN 关闭）**、21–100 为 0.2、之后 0.8，再乘自适应梯度比（`modules/losses/vqperceptual.py:66-68`） |
 | `run_scripts/latent_distillation_pretrain.sh` | stage-1：200 epoch、`blr 1.5e-4`、`bs 32×8GPU`、warmup 20 |
 | `run_scripts/full_finetuning.sh` | stage-2：200 epoch、`blr 1e-4`、`bs 12×?GPU` |
 
@@ -41,13 +41,13 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 |---|---|---|---|
 | teacher | frozen LDM KL-VAE（`vae.ckpt`） | frozen VQGAN（72.1M） | frozen `sd-vae-ft-mse`（83.7M） |
 | **蒸馏对象** | **latent `z`（16×16×16=4096 值）** | **codebook index（CE）+ soft code（MSE）**，teacher latent 16×16×256=**65536 值** | **像素 `D(E(x))`（3×256×256）** |
-| 损失度量 | `MSE(z_t, z_hat)`，`z` 先乘 0.2325 | CE(1024 类, label smoothing 0.1) + MSE(embedding) | `L1(pred01, t01)`，`t01∈[0,1]` |
+| 损失度量 | `MSE(z_t, z_hat)`，`z` 先乘 0.2325 | NLL(1024 类，无平滑) + MSE(embedding) | `L1(pred01, t01)`，`t01∈[0,1]` |
 | 像素损失 | stage-1 **没有**；stage-2 有（vs GT） | 同 | 与 KD **同时**存在（vs GT） |
 | 渲染器（测试时） | **teacher 的 VAE decoder（stage-1 冻结）** | **teacher 的 VQGAN decoder** | 我们自己的 decoder（从零用像素 L1 训出来，无预训练先验） |
-| 监督的步数 | **每一步都算**，权重 `[2.5,2.0,1.5,1.25,1.0,1.0,1.0,1.0]` | 同 | **只末步**，λ 常数（ramp 后 =1.0） |
+| 监督的步数 | **每一步都算**；`[2.5,2.0,1.5,1.25,1.0,1.0,1.0,1.0]` 只乘 CE（VQGAN）/ code-MSE（VAE）那一项，code-MSE / 量化器项固定 1.0 | 同 | **只末步**，λ 常数（ramp 后 =1.0） |
 | 目标冲突 | 无（单一目标） | 无 | **有**（`L1(x)` 与 `L1(t)` 稳定点 = 二者平均） |
 | 学生输入 | teacher tokens 与 patch-embed 拼接后 `F.normalize` | 同 | 原图 patches |
-| 正则 | dynamic halting（已近猜对的 image token 换 mask） | 同（按 GT 概率阈值 0.55） | 无 |
+| 正则 | dynamic halting（已近猜对的 image token 换 mask） | 同（按 GT 概率阈值 0.55）；⚠️ 它的守卫 `if iter!=max_iter-1` 里 `iter` 未定义、解析到内建 `iter` 函数⇒**恒真**，注释说的"最后一步跳过"实际没跳过（`adaptive_vqgan.py:114`、`adaptive_vae.py:108`） | 无 |
 | 目标噪声 | `.sample()`（随机采样 latent） | 硬 index | `.mode()`（确定性） |
 | EMA | 有（eval/可视化用 ema） | 有 | 无 |
 | 预算 | stage-1 200ep + stage-2 200ep，IN-100，从零 | 同 | 2 epoch 续训（14ep 收敛点上） |
@@ -70,6 +70,17 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 `W[gt_idx]` 的距离）。**不需要 PCA、也不需要任何降维** —— 3072 bit 的 payload 比 2560 bit 的
 目标还宽裕 1.2×，最大档基本是**无损转写**。
 
+⚠️ 三个必须加限定的地方（独立核查后补）：
+
+- **2560 bit 是"CE 目标"的信息量**（256 个硬 index），**不是"喂给学生的张量"的信息量**：学生
+  encoder 的输入里拼的是 teacher 的**连续** `z`（16×16×256 floats，`adaptive_vqgan.py:194-198`），
+  那一侧信息远多于 2560 bit——但它只在编码端、不进比特流；
+- **12 bit/token 只在"按 indices 传输"时成立**：`encode()` 返回的 `latent_tokens` 是**量化前**的
+  连续向量（`adaptive_vqgan.py:235`），官方 `evaluate_rfid.py:127` 是直接整个前向跑、**从未把
+  payload 落成比特流**；所以"3072 bit"是设计上的码率，不是被实测的传输量；
+- "近无损"只对 **CE 目标**成立，不代表像素无损：像素质量的第二个上限是 teacher decoder 自己的
+  重建误差（VQGAN f16 的 8.25 / SD-VAE 的 3.44）。
+
 三个直接推论：
 
 1. **ALIT 256-token 档的 8.25 ≈ 它 teacher VQGAN decoder 自己的 FID**（转写近无损 ⇒ 图像质量
@@ -83,9 +94,12 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 
 **两个"人无我有"的讽刺点**：
 
-- 我们已经有 ALIT 那套"逐步加权 + 随机抽步"的设施（`model_v2_linattn.py:1485-1512` 的
-  `_aggregate_loss`、`--loss_weights`、`--sample_grad_iters`，注释里就写着 "ALIT/FID protocol"），
-  但 KD 这一臂**一个都没用**；
+- 我们已经有 ALIT 那套"逐步加权 + 随机抽步"的设施，而且是**完整接线**的
+  （`train_linattn.py:584-586` 参数→cfg，`model_v2_linattn.py:1485-1499` 的 `_aggregate_loss`；
+  我先前写成"实现了但没接线"是错的）——`kd1` 只是**没传** `--loss_weights/--sample_grad_iters`。
+  更关键的是：**它们只作用于基础 8 步 L1**，而 `F_hat` 永远取末步
+  （`model_v2_linattn.py:1572`）、KD 也永远只读末步 ⇒ 就算开了也**不会**给 KD 加权，
+  要逐步 KD 必须改代码（`out["Y_pix"]` 是 `(B,T,N,pp)`，改起来只是加一个循环）；
 - ALIT 的 stage-1 反而**不**用像素损失，而我们花了一半的梯度预算在像素 L1 上。
 
 ---
@@ -273,3 +287,31 @@ I2 是真正的"ALIT 复刻"，但它改评测路径（decoder 归属变了）�
 | I2（6–8 epoch，latent 主目标，decoder 冻结；仅从图像预测 z） | rFID **8–25**（若 >40 说明 z 预测误差主导） |
 | I2b（编码端也给 z：z→payload→z_hat→冻结 decoder） | rFID **4–10**（近无损重压缩；上限 = teacher 3.44） |
 | kd1（像素 L1，2 epoch） | rFID **75–95**，与 86.5 同噪声内（已在跑，17:24 截断） |
+
+---
+
+## 7. 独立核查记录（2026-11-23，只读子智能体）
+
+本文档的 18 条关键断言由独立子智能体**只读核查**（不改文件、不联网、不跑 GPU），逐条要求
+`file:line` 证据。结论：12 条确认、5 条"部分错误"、1 条"错误"。已按核查结果就地改正的有：
+
+| 原断言 | 核查结论 | 正确事实 |
+|---|---|---|
+| 我们"逐步加权/抽步设施已实现但没接线" | **错误** | 已完整接线（参数→cfg→`_aggregate_loss`）；`kd1` 只是没传参；且它们只作用于基础 8 步 L1，KD 永远只读末步，开了也不给 KD 加权 |
+| ALIT VQGAN 版用 "label-smoothing CE" | 部分错误 | 平滑项被注释、调用方只取第一个返回值 ⇒ 实际是**普通 NLL** |
+| stage-2 "GAN disc 权重 0.2" | 部分错误 | 分阶段：前 21 epoch **0（关闭）**、21–100 为 0.2、之后 0.8，再乘自适应梯度比 |
+| 逐步权重 `[2.5,…]` 乘整个迭代损失 | 部分错误 | 只乘 CE / code-MSE 那一项；code-MSE / 量化器项固定 1.0 |
+| dynamic halting"最后一步跳过" | 部分错误 | 守卫里 `iter` 是内建函数 ⇒ 恒真，最后一步**也**做 halting（ALIT 自己的小 bug） |
+| "65536 值的真实信息量 2560 bit" | 部分错误 | 2560 bit 只描述 **CE 目标**；学生输入侧的连续 z 信息量远大于此，且它不传输 |
+
+**静态无法确认、需要运行才能定的**（不要在论文里当事实写）：
+
+1. SD-VAE 的 `4×32×32` 是在本机无权重情况下的推导（可用 kd1 日志里 `[kd] ... latent=4x32x32`
+   那行或 `sdvae_fast.json` 的 `teacher_rate_values=4096` 佐证）；
+2. KD 梯度**运行时**确实非零：静态链路无 detach/no_grad，但没跑 backward；
+3. `kd1` 是否真的跨过 `_kst` 阈值（需要 `s2.log` 里有 `kd=...`，实测有）；
+4. ALIT **VAE 版 stage-1 是否真跑过**：`run_scripts/` 只有 vqgan 的启动脚本，240M 脚本也是 vqgan，
+   VAE 分支只在代码里；
+5. ALIT 的 `0.2325` 尺度：encode 乘了，`decode` 没有除回 1/0.2325，是否与 `vae.ckpt` 口径一致
+   无法静态判定；
+6. "≈7.8k bit 的 SD latent 熵"是 iid-高斯**粗估**，不是测量值。
