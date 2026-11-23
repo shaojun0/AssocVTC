@@ -450,6 +450,9 @@ def parse_args():
                     help="编码器末端 FC 瓶颈维数（2026-10-26; 0=关）。zs_dim=448 ⇒ "
                          "每个 z_s token 从 enc_dim 压到 448 维、每步 2×448=896 个数、"
                          "每图 32×448=14,336 个值（= 旧 63M 宽度）")
+    ap.add_argument("--recon_loss", default="l1", choices=["l1", "l2"],
+                    help="重建损失形式（2026-11-23）: l1=逐像素 L1（默认/主线口径）; "
+                         "l2=逐像素 MSE（直接优化 PSNR）")
     ap.add_argument("--init_from", default="",
                     help="warm start ckpt（循环版可从单步版 ckpt 热启动, 只缺零初始化 mem_pos）")
     # 解码器
@@ -498,6 +501,23 @@ def parse_args():
                     help="VGG16 features 下标（逗号分隔, 默认 3,8,15 = relu1_2/2_2/3_3）")
     ap.add_argument("--perc_resize", type=int, default=224,
                     help="送入 VGG 的尺寸（默认 224）")
+    # ── SD-VAE 输出蒸馏（2026-11-23; 见 PLAN_distill_20261123.md）──
+    #    目标: t = D(E(gt)),  loss += w·L1(F_hat, t)（只挂末步）。
+    #    动机: 同值数下 ALIT rFID 8.25 vs 我们 86.50 ⇒ 瓶颈是解码器先验, 用 teacher 输出当监督。
+    ap.add_argument("--kd_weight", type=float, default=0.0,
+                    help="SD-VAE 输出蒸馏权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--kd_teacher", default="stabilityai/sd-vae-ft-mse",
+                    help="teacher 的 diffusers 模型 id 或本地目录")
+    ap.add_argument("--kd_local_only", type=int, default=1,
+                    help="1=只从本地 HF 缓存加载（默认; 机器访问不了 huggingface.co）")
+    ap.add_argument("--kd_loss", default="l1",
+                    help="蒸馏损失: l1（默认）| l2")
+    ap.add_argument("--kd_start_frac", type=float, default=0.05,
+                    help="从总步数的哪个比例开始启用蒸馏（默认 0.05）")
+    ap.add_argument("--kd_ramp_frac", type=float, default=0.05,
+                    help="蒸馏权重线性 ramp 占总步数的比例（默认 0.05）")
+    ap.add_argument("--kd_every", type=int, default=1,
+                    help="每 k 个优化步算一次蒸馏损失（默认 1）")
     # ── PatchGAN 对抗微调（2026-11-22）──
     ap.add_argument("--gan_weight", type=float, default=0.0,
                     help="PatchGAN 对抗损失目标权重; 0=关（默认, 旧路径逐位不变）")
@@ -519,6 +539,8 @@ def parse_args():
     ap.add_argument("--log_interval", type=int, default=20)
     ap.add_argument("--sample_interval", type=int, default=2000)
     ap.add_argument("--save_every_epochs", type=int, default=1)
+    ap.add_argument("--save_epoch_ckpts", type=int, default=0,
+                    help=">0 时每个 epoch 额外存 ckpt_ep{N}.pt（逐 epoch 评测/续训用）")
     # 控制
     ap.add_argument("--max_steps", type=int, default=0, help=">0 时提前停（冒烟）")
     ap.add_argument("--stop_at_step", type=int, default=0,
@@ -566,7 +588,8 @@ def build_cfg(args) -> LinAttnConfig:
         refiner_heads=int(args.refiner_heads),
         refiner_mlp_ratio=float(args.refiner_mlp_ratio),
         refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps),
-        zs_dim=int(getattr(args, "zs_dim", 0)))
+        zs_dim=int(getattr(args, "zs_dim", 0)),
+        recon_loss=str(getattr(args, "recon_loss", "l1")))
 
 
 def _init_zs_bottleneck_ortho(model: nn.Module) -> None:
@@ -778,6 +801,8 @@ def main():
           f"refiner={type(model.refiner).__name__ if model.refiner else 'off'} "
           f"(layers={cfg.refiner_layers} dim={cfg.refiner_dim} grow={cfg.refiner_grow} "
           f"steps={cfg.refiner_steps or 'T'})", flush=True)
+    _p(f"[loss] recon_loss={getattr(cfg, 'recon_loss', 'l1')} "
+          f"(l1=逐像素 L1, l2=MSE；监控 recon 恒为 L1)", flush=True)
     _p(f"[params] {pc}", flush=True)
 
     # ── 批次 rFID 辅助损失（2026-11-20; --rfid_weight 0 = 关 ⇒ 旧路径逐位不变）──
@@ -803,6 +828,17 @@ def main():
         perc_fn.eval()
         _p(f"[perc] VGG16 感知损失: weight={args.perc_weight} layers={_pl} "
               f"resize={args.perc_resize}", flush=True)
+
+    # ── SD-VAE 输出蒸馏 teacher（2026-11-23; --kd_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    kd_fn = None
+    if float(getattr(args, "kd_weight", 0.0)) > 0:
+        from kd_loss import SDVAETeacher
+        kd_fn = SDVAETeacher(model_id=str(args.kd_teacher),
+                             local_files_only=bool(int(args.kd_local_only))).to(_DEVICE)
+        kd_fn.eval()
+        _p(f"[kd] SD-VAE 蒸馏: weight={args.kd_weight} loss={args.kd_loss} "
+              f"start_frac={args.kd_start_frac} ramp_frac={args.kd_ramp_frac} "
+              f"every={args.kd_every} | {kd_fn.describe(int(args.img_size))}", flush=True)
 
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
     use_manual_ddp = False
@@ -962,6 +998,15 @@ def main():
             rfid_raw = None
             perc_lam = float(getattr(args, "perc_weight", 0.0))
             perc_raw = None
+            # SD-VAE 蒸馏权重调度（与 rFID 同款 start_frac + ramp）
+            kd_lam = 0.0
+            if kd_fn is not None:
+                _kst = max(1, int(args.kd_start_frac * total_steps))
+                _krp = max(1, int(args.kd_ramp_frac * total_steps))
+                if step >= _kst:
+                    kd_lam = float(args.kd_weight) * min(
+                        1.0, (step - _kst + 1) / _krp)
+            kd_raw = None
             # PatchGAN 对抗权重调度（ramp 避免开局把已收敛的模型打乱）
             adv_raw = None
             lam_ratio = None
@@ -991,7 +1036,9 @@ def main():
                                   and step % max(1, int(args.rfid_every)) == 0)
                     _need_perc = perc_fn is not None and perc_lam > 0.0
                     _need_gan = gan is not None and gan_lam > 0.0
-                    if _need_rfid or _need_perc or _need_gan:
+                    _need_kd = (kd_fn is not None and kd_lam > 0.0
+                                and step % max(1, int(args.kd_every)) == 0)
+                    if _need_rfid or _need_perc or _need_gan or _need_kd:
                         _pred01 = patches_to_image(
                             out["F_hat"], cfg.img_size, cfg.img_size, cfg.patch,
                             IMAGENET_MEAN, IMAGENET_STD,
@@ -1009,6 +1056,16 @@ def main():
                             _pv = perc_fn(_pred01.float(), _tgt01.float())
                         loss = loss + perc_lam * _pv
                         perc_raw = float(_pv.detach())
+                    if _need_kd:
+                        # teacher 目标只由 GT 生成（no_grad, fp32）; 梯度只经 _pred01 反传
+                        _kt01 = kd_fn(_tgt01)
+                        with torch.autocast("cuda", enabled=False):
+                            if str(args.kd_loss).lower() == "l2":
+                                _kdl = F.mse_loss(_pred01.float(), _kt01)
+                            else:
+                                _kdl = F.l1_loss(_pred01.float(), _kt01)
+                        loss = loss + kd_lam * _kdl
+                        kd_raw = float(_kdl.detach())
                     if _need_gan:
                         _adv = gan.g_adv_loss(_pred01)
                         # VQGAN 自适应权重: 让对抗项对**末端重建张量**的梯度范数与
@@ -1087,6 +1144,11 @@ def main():
                     rec["rfid_lam"] = round(rfid_lam, 6)
                     if rfid_raw is not None:
                         _rfid_txt = f" rfid={rfid_raw:.2f}(λ={rfid_lam:.4f})"
+                if kd_fn is not None:
+                    rec["kd_lam"] = round(kd_lam, 6)
+                    if kd_raw is not None:
+                        rec["kd"] = round(kd_raw, 5)
+                        _rfid_txt += f" kd={kd_raw:.4f}(λ={kd_lam:.4f})"
                 if gan is not None:
                     rec["gan_lam"] = round(gan_lam, 6)
                     if adv_raw is not None:
@@ -1160,6 +1222,9 @@ def main():
         if _IS_MAIN and args.save_every_epochs and epoch % args.save_every_epochs == 0:
             save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"),
                       step, epoch, best_psnr, "last")
+            if getattr(args, "save_epoch_ckpts", 0):
+                save_ckpt(os.path.join(args.output_dir, f"ckpt_ep{epoch:03d}.pt"),
+                          step, epoch, best_psnr, f"ep{epoch}")
 
     # 收尾: 只 rank0 落盘/打日志; 其它 rank 先 barrier 等落盘完再退出。
     if ddp:

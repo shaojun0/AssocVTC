@@ -1288,6 +1288,12 @@ class LinAttnConfig:
     #   截断恒等，`mem_proj` 取旧权重前 zs_dim 列 ⇒ 初始行为 = 丢掉 z_s 的后 800 维。
     zs_dim: int = 0
 
+    # ── 重建损失形式（2026-11-23）──
+    #   "l1"（默认, 主线口径, 与改造前逐位相同）: 逐步 |pred−target| 平均;
+    #   "l2" = MSE: 逐步 (pred−target)^2 平均（直接优化 PSNR）。
+    #   监控量 `recon` 仍固定为 L1, 保证日志/跨实验口径可比。
+    recon_loss: str = "l1"
+
     @property
     def num_patches(self) -> int:
         return (self.img_size // self.patch) ** 2
@@ -1554,9 +1560,12 @@ class SRPhase1LinAttn(nn.Module):
         if pix.dim() == 3:
             pix = pix.unsqueeze(1)                           # (B,1,N,pp)
         if self.dh_mode == 0:
-            # ★默认路径（逐位不变）: 平权全图逐步 L1
-            per_step = F.l1_loss(pix, target_pix.unsqueeze(1).expand_as(pix),
-                                 reduction="none").mean(dim=(0, 2, 3))   # (T,)
+            # ★默认路径（逐位不变）: 平权全图逐步 L1；recon_loss="l2" 时改用 MSE。
+            tgt = target_pix.unsqueeze(1).expand_as(pix)
+            if getattr(self.cfg, "recon_loss", "l1") == "l2":
+                per_step = F.mse_loss(pix, tgt, reduction="none").mean(dim=(0, 2, 3))
+            else:
+                per_step = F.l1_loss(pix, tgt, reduction="none").mean(dim=(0, 2, 3))
         else:
             per_step = self._dh_step_loss(pix, target_pix)
         loss = self._aggregate_loss(per_step)

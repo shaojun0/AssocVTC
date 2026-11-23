@@ -8,15 +8,22 @@
 > 远端机器目录（`/root/autodl-tmp/srdiff_*`、`/data/srdiff-20260926/…`）、模块名 `srdiff_runtime.py`、环境变量 `SRDIFF_*`、
 > 看板变量 `SRDASH_ROOT`（改它们会断代码与在跑的实验，且会篡改历史证据）。
 
-## 目录速查（2026-11-17 更新）
+## 目录速查（2026-11-23 更新：仓库只保留 v2 家族代码）
+
+> **2026-11-23 仓库整理**：删除 v1（`model.py`）、v3（`model_v3*`）、v9/v10（视频线）、multi（多分辨率线）
+> 的代码，只保留 v2 家族。被删代码与对应实验记录都在 **git 历史**里（`git log --all --oneline -- <path>` 可取回，
+> 提交 `fb3c1f5` 及更早均可查），`doc/` 下的实验文档**全部保留**。
+> 仍引用已删模块的历史脚本只有 5 个（`tools/{count_params,prep_data,plan_batch,diag_carry_norm,diag_mid_identity}.py`），
+> 属 multi/v10 时代遗留，保留作历史证据但**不再可运行**。
 
 | 入口 | 说明 |
 |---|---|
-| `model_v10.py` | **v10 全片段循环读出视频模型**（唯一宽度 1792 = 4 token × 448，零填充；每步读一组 z、重出整段 120 帧；率 7,168 值/帧、目标全量 token）。`V10Config`/`VideoV10` 是 `PretrainedConfig`/`PreTrainedModel` 且带 `auto_map`，checkpoint 可直接 `AutoModel.from_pretrained(dir, trust_remote_code=True)`。自检 `python model_v10.py`（含一次 save→AutoModel 往返）；训练见 `train_v10.py`（HF Trainer，`--deepspeed ds_zero2_v10.json` 可多卡） |
-| `train_v10.py` / `data_v10.py` | v10 训练脚本 / 120 帧（15 s @8 fps, 448²）片段数据集 |
-| `doc/2026-11-16/DESIGN_v10_video_whole_clip.md` | v10 设计定稿：决策记录、形状与值数、为什么"率 < 目标"、编码器重训方案、诚实边界 |
-| `doc/2026-11-17/FEATURE_v10_stream_embodied.md` | **v10 流式化（具身组件）feature 提案**：把 `TemporalMiddle` 从"攒满 120 帧"改成"帧到即算"。帧级因果 ⇒ 历史 KV 可缓存 ⇒ 增量与全量**实测等价 7.2e-07**，P0 零训练；含 P1 时间偏置 / P2 有界记忆 / P3 动作条件与资源账。**设计稿，未实现** |
-| `model_v2_linattn.py` / `train_linattn.py` | 图像分词器（论文三阶段 A/B/S3），v10 冻结的上游；含并行读出 `--dec_parallel` 与 `--stop_at_step` |
+| `model_v2_linattn.py` / `train_linattn.py` | **主线：图像分词器**（论文三阶段 A/B/S3）。线性注意力编码器 + 循环读出去解码器（`--dec_recurrent`、`--step_plan`、`--stop_at_step`）；重建损失 `--recon_loss {l1,l2}` |
+| `data_linattn.py` / `eval_linattn.py` / `eval_stepwise_linattn.py` / `metrics_linattn.py` | v2 数据管线与评测（逐 step 重建、PSNR/SSIM/LPIPS/rFID） |
+| `model_v2.py` / `model_v2_1.py` / `train_v2.py` / `data_v2.py` / `infer_v2_test.py` | v2 早期实现（拼接编码器 middle、方案A 离线循环精炼），保留作对照 |
+| `rfid_loss.py` / `perc_loss.py` / `patchgan.py` / `fast_rfid.py` | 重建质量的三条辅助目标（batch rFID / VGG 感知 / PatchGAN）+ 统一 rFID 评测脚本 |
+| `kd_loss.py` | **SD-VAE 输出蒸馏**的 teacher 包装（`stabilityai/sd-vae-ft-mse`，冻结、eval、no_grad）；设计与判据见 `doc/2026-11-23/PLAN_distill.md` |
+| `musa.py` / `tvmini.py` / `srdiff_runtime.py` | 平台适配层：MUSA（MTT S4000）、torchvision 最小替身、设备/分布式后端抽象 |
 
 ## 0. 项目目标与核心思路
 

@@ -1,0 +1,35 @@
+{
+ "teacher": "stabilityai/sd-vae-ft-mse",
+ "n_images": 5000,
+ "img_size": 256,
+ "teacher_params_M": 83.7,
+ "teacher_rate_values": 4096,
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)",
+ "results": {
+  "sdvae": {
+   "psnr": 25.927212930297852,
+   "l1_255": 9.305163525134326,
+   "rfid": 3.4374620633878408
+  },
+  "blur0.5": {
+   "psnr": 37.57432901611328,
+   "l1_255": 2.362069660708308,
+   "rfid": 0.9064387899557005
+  },
+  "blur1.0": {
+   "psnr": 28.650869625854494,
+   "l1_255": 6.455611838400364,
+   "rfid": 9.149208360483215
+  },
+  "blur2.0": {
+   "psnr": 24.559413079833984,
+   "l1_255": 10.313536141455174,
+   "rfid": 27.19840257504103
+  }
+ },
+ "ref_ours_l1": {
+  "psnr": 22.666,
+  "rfid": 86.5,
+  "note": "k256x12_t8 L1 14ep, 同 5000 张评测（报告口径）"
+ }
+}
