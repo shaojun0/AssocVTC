@@ -67,6 +67,13 @@ def main():
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=8)
     ap.add_argument("--amp", type=int, default=1)
+    # P0-d 决策门（2026-11-23）：把重建图塞回 SD-VAE 流形 D(E(recon)) 再算一遍
+    # ⇒ 量"latent 路线"的天花板代理（见 doc/2026-11-23/NOTES_kd_vs_alit_code_20261123.md §3-P0-d）。
+    # 默认 0 ⇒ 本脚本行为与提交前逐位相同。
+    ap.add_argument("--vae_roundtrip", type=int, default=0,
+                    help="1=额外评测 D(E(recon)) 这一臂（慢 ~1.6×，建议配 --num_images 2000）")
+    ap.add_argument("--teacher_vae", default="stabilityai/sd-vae-ft-mse")
+    ap.add_argument("--teacher_local_only", type=int, default=1)
     args = ap.parse_args()
     dev = "cuda"
 
@@ -101,6 +108,17 @@ def main():
               "ss": np.zeros((D, D), np.float64)}
     psnr_sum = [0.0] * T
     l1_sum = [0.0] * T
+    if args.vae_roundtrip:
+        from diffusers import AutoencoderKL
+        vae = AutoencoderKL.from_pretrained(
+            args.teacher_vae,
+            local_files_only=bool(args.teacher_local_only)).to(dev).eval()
+        for p in vae.parameters():
+            p.requires_grad_(False)
+        rt_acc = [{"n": 0, "s": np.zeros(D, np.float64),
+                   "ss": np.zeros((D, D), np.float64)} for _ in range(T)]
+        rt_psnr, rt_l1 = [0.0] * T, [0.0] * T
+        print(f"[fast] P0-d vae_roundtrip=on teacher={args.teacher_vae}", flush=True)
     seen = 0
 
     with torch.no_grad():
@@ -130,6 +148,16 @@ def main():
                 ps = psnr(rec01[:, t], tgt01)
                 psnr_sum[t] += float(ps.sum())
                 l1_sum[t] += float((rec01[:, t] - tgt01).abs().mean(dim=(1, 2, 3)).sum())
+                if args.vae_roundtrip:
+                    with torch.autocast("cuda", enabled=False):
+                        z = vae.encode(rec01[:, t].float() * 2.0 - 1.0).latent_dist.mode()
+                        y = vae.decode(z).sample
+                    r01 = ((y.float() + 1.0) * 0.5).clamp(0.0, 1.0)
+                    rq = (r01 * 255.0).round() / 255.0
+                    frt = inc(rq)[0].flatten(1).float().cpu().numpy().astype(np.float64)
+                    add_feats(rt_acc[t], frt)
+                    rt_psnr[t] += float(psnr(r01, tgt01).sum())
+                    rt_l1[t] += float((r01 - tgt01).abs().mean(dim=(1, 2, 3)).sum())
             seen += B
             if seen % 640 == 0:
                 print(f"[fast] {seen}/{len(va)} …", flush=True)
@@ -149,9 +177,19 @@ def main():
             "l1_255": l1_sum[t] / n * 255.0,
             "rfid": fid,
         }
-        print(f"[fast] step{t+1} cum_z={cum_z[t]:3d} "
-              f"PSNR={psnr_sum[t]/n:.3f} L1_255={l1_sum[t]/n*255:.3f} rFID={fid:.3f}",
-              flush=True)
+        line = (f"[fast] step{t+1} cum_z={cum_z[t]:3d} "
+                f"PSNR={psnr_sum[t]/n:.3f} L1_255={l1_sum[t]/n*255:.3f} rFID={fid:.3f}")
+        if args.vae_roundtrip:
+            mu_t, sig_t = stats(rt_acc[t])
+            fidt = float(calculate_frechet_distance(mu_t, sig_t, mu_gt, sig_gt, eps=1e-6))
+            per_step[t + 1].update({
+                "psnr_vae_rt": rt_psnr[t] / n,
+                "l1_255_vae_rt": rt_l1[t] / n * 255.0,
+                "rfid_vae_rt": fidt,
+            })
+            line += (f" | D(E(·)): PSNR={rt_psnr[t]/n:.3f} "
+                     f"L1_255={rt_l1[t]/n*255:.3f} rFID={fidt:.3f}")
+        print(line, flush=True)
 
     res = {
         "ckpt": args.ckpt, "tag": args.tag, "n_images": n,
@@ -160,6 +198,8 @@ def main():
         "img_size": int(cfg.img_size), "patch": int(cfg.patch),
         "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], "
                          "uint8-quantized in-memory (pytorch-fid equivalent)",
+        "vae_roundtrip": bool(args.vae_roundtrip),
+        "teacher_vae": (str(args.teacher_vae) if args.vae_roundtrip else None),
         "per_step": {str(k): v for k, v in per_step.items()},
     }
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
