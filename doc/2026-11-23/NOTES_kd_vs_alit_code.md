@@ -40,8 +40,8 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 | 维度 | ALIT（VAE 版 stage-1/2） | ALIT（VQGAN 版 stage-1/2） | 我们（`kd1`） |
 |---|---|---|---|
 | teacher | frozen LDM KL-VAE（`vae.ckpt`） | frozen VQGAN（72.1M） | frozen `sd-vae-ft-mse`（83.7M） |
-| **蒸馏对象** | **latent `z`（16×16×16=4096 值）** | **codebook index（CE）+ soft code（MSE）** | **像素 `D(E(x))`（3×256×256）** |
-| 损失度量 | `MSE(z_t, z_hat)`，`z` 先乘 0.2325 | CE(16384 类, label smoothing 0.1) + MSE(embedding) | `L1(pred01, t01)`，`t01∈[0,1]` |
+| **蒸馏对象** | **latent `z`（16×16×16=4096 值）** | **codebook index（CE）+ soft code（MSE）**，teacher latent 16×16×256=**65536 值** | **像素 `D(E(x))`（3×256×256）** |
+| 损失度量 | `MSE(z_t, z_hat)`，`z` 先乘 0.2325 | CE(1024 类, label smoothing 0.1) + MSE(embedding) | `L1(pred01, t01)`，`t01∈[0,1]` |
 | 像素损失 | stage-1 **没有**；stage-2 有（vs GT） | 同 | 与 KD **同时**存在（vs GT） |
 | 渲染器（测试时） | **teacher 的 VAE decoder（stage-1 冻结）** | **teacher 的 VQGAN decoder** | 我们自己的 decoder（从零用像素 L1 训出来，无预训练先验） |
 | 监督的步数 | **每一步都算**，权重 `[2.5,2.0,1.5,1.25,1.0,1.0,1.0,1.0]` | 同 | **只末步**，λ 常数（ramp 后 =1.0） |
@@ -51,6 +51,30 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 | 目标噪声 | `.sample()`（随机采样 latent） | 硬 index | `.mode()`（确定性） |
 | EMA | 有（eval/可视化用 ema） | 有 | 无 |
 | 预算 | stage-1 200ep + stage-2 200ep，IN-100，从零 | 同 | 2 epoch 续训（14ep 收敛点上） |
+
+### 1.1 速率口径：先分清"payload"和"蒸馏目标"（别混）
+
+这两件事在 ALIT 里是**不同的张量**，很容易看成同一个：
+
+| | ALIT（VQGAN 版，论文主结果） | ALIT（VAE 版） | 我们 `k256x12_t8` |
+|---|---|---|---|
+| **payload（真正传输的）** | 1D latent token，最多 **256 × 12 维**（每 token = 4096 级联合码本中一个 = **12 bit**）⇒ **3072 bit/图** | 同 | **256 × 12 维 bf16 = 3072 值 ⇒ 49152 bit/图** |
+| **蒸馏目标（teacher latent）** | **16×16×256 = 65536 值** | 16×16×16 = 4096 值 | 像素 3×256×256 |
+| payload → 目标的扩张比 | **21×**（3072 值 → 65536 值） | 1.33× | — |
+| IN-100 val rFID | **8.25**（256 token 档；32 token = 384 值时 22.57） | 论文未报主表 | 86.50（3072 值） |
+
+**所以"同 rate"指的是 payload 值数同：ALIT 最大档 256 token × 12 维 = 3072 值 = 我们末步 3072 值**
+（这正是 `PLAN_distill.md` §1.1 那张对照表的换算：ALIT-equiv token = values / 12）。
+我们文档里出现的 4096 / 65536 是**teacher 的 latent 维度**，不是 payload；两者差一个数量级。
+
+两点直接推论：
+
+1. **ALIT 的任务比"我们照搬 latent 蒸馏"要难得多**：它把 65536 值 teacher latent 压到 3072 值
+   payload（21× 扩张）还能拿 8.25；我们要预测的只是 4096 值（1.33× 扩张），且 teacher 自己的
+   上限是 3.44 ⇒ I2 的"8–15"预期不是激进，而是保守。
+2. **比特率上我们其实更宽裕**：同 payload 值数下我们花 49152 bit、ALIT 只花 3072 bit（16×）。
+   也就是说 ALIT 8.25 是在**比特少 16×** 的条件下拿到的。（`PLAN_distill.md` §1.1 原文写
+   "60 bit/token ⇒ 我们多 3.2×"是错的，已在那份文档里更正。）
 
 **两个"人无我有"的讽刺点**：
 
@@ -140,10 +164,11 @@ recon_t = sdvae.decode(z_hat_t).sample   # 冻结, fp32, no_grad 之外可微
 loss   = MSE(z_hat_t*0.18215, z_t*0.18215)   (+ 可选 LPIPS(recon_t, x))
 ```
 
-- **rate 不变**：payload 仍是 16×192 = 3072 值（step1 = 384）；
-- **上限** = teacher 的 3.44 + latent 预测误差。参考 ALIT：它在**完全同 rate**（256 token × 12 维
-  = 3072 值）下 rFID 8.25 —— 它的 payload 比我们小、teacher（VQGAN）也不比 SD-VAE 强，所以
-  **"同 rate 下 8–15" 是一个有依据的预期**，而不是 3.44；
+- **rate 不变**：payload 仍是 **256 token × 12 维 = 3072 值**（step1 = 32 token × 12 = 384）；
+- **上限** = teacher 的 3.44 + latent 预测误差。参考 ALIT：**同 payload 值数**（256 token × 12 维
+  = 3072 值，见 §1.1）下 rFID 8.25；而它要预测的是 **65536 值** teacher latent（21× 扩张）、
+  payload 只花 12 bit/token，我们只需预测 **4096 值**（1.33× 扩张）且比特宽裕 16×
+  ⇒ **"同 rate 下 8–15" 是有依据的预期，甚至偏保守**，而不是 3.44；
 - 对我们的 R-D 阶梯天然友好：8 步各自有 `z_hat_t`，逐速率点直接 `decode(z_hat_t)` 即可；
 - 成本：先做"最小改动版"（保留现有解码器主干，加一个 `z_head` 从 `Y_pix` 上做 stride-8 卷积下采样），
   跑通后再考虑把像素头整个换掉（更 ALIT，但也更侵入）；
@@ -223,8 +248,8 @@ I2 是真正的"ALIT 复刻"，但它改评测路径（decoder 归属变了）�
   而 ALIT 直接 **reuse 一个预训练 decoder**；同 rate 下这不是"tokenizer 设计"的差距，
   所以论文里不能把两者放进同一张"方法对比"表就完事，必须标注 decoder 来源；
 - 一旦按 I2 做，我们的卖点从"完全自研的端到端 tokenizer"变成"**可变速率、连续 12 维 token 的
-  latent 重压缩层** + 冻结强 decoder"——这仍然是有故事的（ALIT 只有离散且 token 数只能取 2 的幂，
-  我们是连续 12 维 + 任意 8 档速率），但必须在文中如实交代。
+  latent 重压缩层** + 冻结强 decoder"——这仍然是有故事的（ALIT 的 1D token 是量化过的联合码本、
+  档位只能取 32 的倍数：32/64/…/256；我们是连续 12 维、速率档位自由），但必须在文中如实交代。
 
 ---
 
