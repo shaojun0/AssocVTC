@@ -1,0 +1,7 @@
+[kd2] start Mon Nov 23 17:49:13 CST 2026 src=/root/autodl-tmp/tok256x12_t8/s2/ckpt_best.pt epochs=2 lr=2e-5 kd_weight=1.0 scale=0.18215 smoke=0
+[kd2] GPU free Mon Nov 23 17:57:13 CST 2026
+[kd2] train rc=0 Mon Nov 23 20:51:41 CST 2026
+[val] ep1 step950 l1=0.1733 psnr=13.65dB ssim=0.3358 (mean基线 11.83dB, patchDC基线 18.63dB) [val-render=sdvae]
+[val] ep2 step1878 l1=0.1737 psnr=13.66dB ssim=0.3416 (mean基线 11.83dB, patchDC基线 18.63dB) [val-render=sdvae]
+[done] steps=1878 epochs=2 best_val_psnr=13.66 wall=174.0min
+[kd2] eval ckpt_ep001 rc=0 Mon Nov 23 21:24:07 CST 2026

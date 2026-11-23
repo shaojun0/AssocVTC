@@ -154,7 +154,8 @@ def main():
             if args.render == "sdvae":
                 # ── I2 投放路径: z_hat → 冻结 teacher decoder（像素头不参与）──
                 #   z_hat 是**归一化** latent（训练时乘过 scale 再算 MSE）⇒ 反缩放回去。
-                zs = out["z_hat"].float() / float(args.kd_latent_scale)
+                # ⚠️ z_hat 是**未缩放** latent（见 kd_loss.latent_mse 的语义）⇒ 不除 scale
+                zs = out["z_hat"].float()
                 rec01 = torch.stack([
                     ((vae.decode(zs[:, t]).sample.float() + 1.0) * 0.5
                      ).clamp(0.0, 1.0) for t in range(T)], dim=1)

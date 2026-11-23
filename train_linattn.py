@@ -941,10 +941,12 @@ def main():
     #    默认 render=pixel ⇒ val_render_fn=None ⇒ val 与改造前逐位相同。
     val_render_fn, val_render_tag = None, ""
     if kd_render == "sdvae":
-        val_render_fn = (lambda o: kd_fn.decode_latent(
-            o["z_hat"][:, -1].float() / kd_scale))
+        # ⚠️ 2026-11-23 修: z_hat 的语义是**未缩放** latent（loss=MSE(z_hat*s, z_t*s)
+        #    的最优解是 z_hat=z_t, s 只改尺度不改目标）⇒ 渲染必须 decode(z_hat)，
+        #    绝不能 /scale（那样 latent 被放大 1/s≈5.5 倍 ⇒ 出图约等于均值图）。
+        val_render_fn = (lambda o: kd_fn.decode_latent(o["z_hat"][:, -1].float()))
         val_render_tag = " [val-render=sdvae]"
-        _p(f"[val] 出图走 z_hat[:,-1]/{kd_scale} → teacher.decode ⇒ **非**自身像素头: "
+        _p(f"[val] 出图走 z_hat[:,-1] → teacher.decode ⇒ **非**自身像素头: "
               f"下面的 val PSNR/SSIM 与 best ckpt 选择都按这条投放路径", flush=True)
 
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
