@@ -52,29 +52,34 @@ PLAN 里写"ALIT **没有** teacher-student 知识蒸馏，它被称作 distilla
 | EMA | 有（eval/可视化用 ema） | 有 | 无 |
 | 预算 | stage-1 200ep + stage-2 200ep，IN-100，从零 | 同 | 2 epoch 续训（14ep 收敛点上） |
 
-### 1.1 速率口径：先分清"payload"和"蒸馏目标"（别混）
-
-这两件事在 ALIT 里是**不同的张量**，很容易看成同一个：
+### 1.1 速率口径：payload、teacher latent、以及"65536 值"到底是什么
 
 | | ALIT（VQGAN 版，论文主结果） | ALIT（VAE 版） | 我们 `k256x12_t8` |
 |---|---|---|---|
-| **payload（真正传输的）** | 1D latent token，最多 **256 × 12 维**（每 token = 4096 级联合码本中一个 = **12 bit**）⇒ **3072 bit/图** | 同 | **256 × 12 维 bf16 = 3072 值 ⇒ 49152 bit/图** |
-| **蒸馏目标（teacher latent）** | **16×16×256 = 65536 值** | 16×16×16 = 4096 值 | 像素 3×256×256 |
-| payload → 目标的扩张比 | **21×**（3072 值 → 65536 值） | 1.33× | — |
-| IN-100 val rFID | **8.25**（256 token 档；32 token = 384 值时 22.57） | 论文未报主表 | 86.50（3072 值） |
+| **payload（真正传输的）** | 1D latent token，最多 **256 × 12 维**，量化到 4096 级**联合**码本 ⇒ 12 bit/token ⇒ **3072 bit/图** | 同 | **256 × 12 值 bf16 = 49152 bit/图**（若按同样 12 bit/token 量化则为 3072 bit） |
+| **teacher latent（浮点口径）** | 16×16×256 = **65536 值** | 16×16×16 = 4096 值 | 像素 3×256×256（我们蒸馏的是像素，`196,608` 维） |
+| **teacher latent（真实信息量）** | 65536 值是**码本查表**：256 个 index × 1024 级码本 ⇒ 256·log2(1024) = **2560 bit** | 连续 4096 值；iid-高斯粗估 ≈1.9 bit/值 ⇒ **≈7.8k bit**（未扣空间相关，偏高） | — |
+| payload 比特 / 目标比特 | 3072/2560 = **1.2×（近无损转写）** | 3072/7800 ≈ **0.4×（有损）** | — |
+| IN-100 val rFID | **8.25**（256 token 档；32 token = 384 bit 时 22.57） | 论文未报主表 | 86.50（3072 值） |
 
-**所以"同 rate"指的是 payload 值数同：ALIT 最大档 256 token × 12 维 = 3072 值 = 我们末步 3072 值**
-（这正是 `PLAN_distill.md` §1.1 那张对照表的换算：ALIT-equiv token = values / 12）。
-我们文档里出现的 4096 / 65536 是**teacher 的 latent 维度**，不是 payload；两者差一个数量级。
+**关键：65536 不是 65536 个自由浮点数，而是 256 个码本下标去查 1024×256 的表。** 真实信息量只有
+2560 bit（`base_tokenizers/configs/vqgan.yaml:5` 的 `n_embed=1024`，由
+`modules/base_tokenizers.py:19` 读进 `codebook_size`；`adaptive_vqgan.py:310` 的
+`gt_code = embedding.weight.data[gt_indices]` 就是这次查表）。所以学生要学的是**对 256 个符号
+做 1024 类分类**（CE 损失），`code_loss` 的 MSE 只是它的平滑版（`softmax(logits) @ W` 到
+`W[gt_idx]` 的距离）。**不需要 PCA、也不需要任何降维** —— 3072 bit 的 payload 比 2560 bit 的
+目标还宽裕 1.2×，最大档基本是**无损转写**。
 
-两点直接推论：
+三个直接推论：
 
-1. **ALIT 的任务比"我们照搬 latent 蒸馏"要难得多**：它把 65536 值 teacher latent 压到 3072 值
-   payload（21× 扩张）还能拿 8.25；我们要预测的只是 4096 值（1.33× 扩张），且 teacher 自己的
-   上限是 3.44 ⇒ I2 的"8–15"预期不是激进，而是保守。
-2. **比特率上我们其实更宽裕**：同 payload 值数下我们花 49152 bit、ALIT 只花 3072 bit（16×）。
-   也就是说 ALIT 8.25 是在**比特少 16×** 的条件下拿到的。（`PLAN_distill.md` §1.1 原文写
-   "60 bit/token ⇒ 我们多 3.2×"是错的，已在那份文档里更正。）
+1. **ALIT 256-token 档的 8.25 ≈ 它 teacher VQGAN decoder 自己的 FID**（转写近无损 ⇒ 图像质量
+   完全由 teacher decoder 决定）。它不能当作"3072 值能重建到什么程度"的上限。
+2. **ALIT 真正的压缩发生在低档**：32 token = 384 bit vs 2560 bit 目标（6.7×）⇒ rFID 22.57；
+   自适应分配这个卖点体现在这条阶梯上，而不是 256 档。
+3. **"同 rate"指 payload 值数同**：ALIT 最大档 256 token × 12 维 = 3072 值 = 我们末步 3072 值
+   （即 `PLAN_distill.md` §1.1 的换算 ALIT-equiv token = values/12）。但**在值数相同的轴上，
+   我们的比特预算是它的 16×**（49152 vs 3072），这点在论文的 R-D 对比里必须写明，否则"同 values
+   赢 ALIT"是拿 16 倍比特换的。
 
 **两个"人无我有"的讽刺点**：
 
@@ -165,15 +170,21 @@ loss   = MSE(z_hat_t*0.18215, z_t*0.18215)   (+ 可选 LPIPS(recon_t, x))
 ```
 
 - **rate 不变**：payload 仍是 **256 token × 12 维 = 3072 值**（step1 = 32 token × 12 = 384）；
-- **上限** = teacher 的 3.44 + latent 预测误差。参考 ALIT：**同 payload 值数**（256 token × 12 维
-  = 3072 值，见 §1.1）下 rFID 8.25；而它要预测的是 **65536 值** teacher latent（21× 扩张）、
-  payload 只花 12 bit/token，我们只需预测 **4096 值**（1.33× 扩张）且比特宽裕 16×
-  ⇒ **"同 rate 下 8–15" 是有依据的预期，甚至偏保守**，而不是 3.44；
+- **上限** = teacher 的 3.44 + latent 预测误差。**别把 §1.1 里 ALIT 的 8.25 当"同 rate 上限"**：
+  那一档 payload（3072 bit）≥ 目标码本信息量（2560 bit），是近无损转写，8.25 ≈ 它 teacher decoder
+  自己的 FID。我们要回归的是**连续** z（≈7.8k bit），bf16 payload 49152 bit 有 6× 富余 ⇒ 信息量
+  不是瓶颈，瓶颈是"z 能不能从图像里被预测出来"。这正是 P0-d 要先量的东西；
 - 对我们的 R-D 阶梯天然友好：8 步各自有 `z_hat_t`，逐速率点直接 `decode(z_hat_t)` 即可；
 - 成本：先做"最小改动版"（保留现有解码器主干，加一个 `z_head` 从 `Y_pix` 上做 stride-8 卷积下采样），
   跑通后再考虑把像素头整个换掉（更 ALIT，但也更侵入）；
 - 风险（须诚实写进论文）：**解码器不再是我们自己的**。但 ALIT 同样借 VQGAN decoder（stage-2 还
   一起微调），这条"借 decoder"在同类工作里是标配；我们要在对比表里写清 teacher/decoder 的归属。
+- **I2b（更 ALIT、也更容易，推荐先试）**：编码端**也跑 SD-VAE encoder**（它是确定性 codec 的一
+  部分，ALIT 就这么干：`adaptive_vqgan.py:196` 把 teacher 的连续 z 直接拼进学生 encoder 输入），
+  我们的网络只学"z(4096 值) → payload(3072 值)"的重压缩，解码端"payload → z_hat → SD-VAE decoder"。
+  payload 49152 bit 对 7.8k bit 的目标是 6× 富余 ⇒ 理论上可近无损，rFID 应直接逼近 3.44；研究问题
+  变成"每一档速率下 z 掉多少 FID"——**这才是和 ALIT 同构的对比**。代价：编码端多一个 34M 的
+  SD-VAE encoder（论文里要写明"编码端可用 teacher encoder"，ALIT 同样如此）。
 - 评测落点：`fast_rfid.py` 加一条 `--render sdvae` 路径（把 `recon_t` 换成 `decode(z_hat_t)`），
   与 I2 一起改。
 
@@ -259,5 +270,6 @@ I2 是真正的"ALIT 复刻"，但它改评测路径（decoder 归属变了）�
 |---|---|
 | P0-d `rFID(real, D(E(ours)))` | **20–45**（若 >60，则我上面的归因错，latent 路线要重估） |
 | I1（2 epoch 辅助项，latent MSE） | PSNR −0.2±0.3 dB，rFID **60–80**（比 kd1 好，但远不到 ≤30） |
-| I2（6–8 epoch，latent 主目标，decoder 冻结） | rFID **8–25**（ALIT 同 rate 是 8.25；若 >40 说明 z 预测误差主导） |
+| I2（6–8 epoch，latent 主目标，decoder 冻结；仅从图像预测 z） | rFID **8–25**（若 >40 说明 z 预测误差主导） |
+| I2b（编码端也给 z：z→payload→z_hat→冻结 decoder） | rFID **4–10**（近无损重压缩；上限 = teacher 3.44） |
 | kd1（像素 L1，2 epoch） | rFID **75–95**，与 86.5 同噪声内（已在跑，17:24 截断） |
