@@ -7,6 +7,11 @@ in memory for each decoding step (and for GT) and call pytorch-fid's exact
 `calculate_frechet_distance`.  Reconstructions are quantized to the uint8 grid
 (round(x*255)/255) to match the PNG path; sole deviation is the 448→299 resize
 (F.interpolate vs PIL), which is sub-0.1 FID.
+
+2026-11-23 I2: `--render sdvae` 把每步的图换成**冻结 teacher decoder 渲染**的
+`decode(z_hat[:,t] / kd_latent_scale)`（需要 ckpt 里 `cfg.z_head=1`）; 其余口径
+（uint8 量化 / Inception 特征 / per-step 统计 / JSON 字段）不变。默认 `pixel` ⇒
+与提交前逐位一致（含 `--vae_roundtrip` 那一臂）。
 """
 import argparse
 import json
@@ -74,7 +79,15 @@ def main():
                     help="1=额外评测 D(E(recon)) 这一臂（慢 ~1.6×，建议配 --num_images 2000）")
     ap.add_argument("--teacher_vae", default="stabilityai/sd-vae-ft-mse")
     ap.add_argument("--teacher_local_only", type=int, default=1)
+    # I2 投放路径（2026-11-23）: 出图 = 冻结 teacher decoder 渲染 z_hat。
+    # 默认 pixel ⇒ 本脚本与提交前逐位一致（含 --vae_roundtrip 那一臂）。
+    ap.add_argument("--render", default="pixel", choices=["pixel", "sdvae"],
+                    help="pixel=自身像素头（默认, 逐位不变）| sdvae=z_hat→teacher.decode(z/scale), "
+                         "需 ckpt 里 cfg.z_head=1")
+    ap.add_argument("--kd_latent_scale", type=float, default=0.18215,
+                    help="z_hat 反缩放的 SD 因子（默认 0.18215, 与训练 --kd_latent_scale 一致）")
     args = ap.parse_args()
+    assert args.render in ("pixel", "sdvae")
     dev = "cuda"
 
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -83,6 +96,10 @@ def main():
     model = SRPhase1LinAttn(cfg).to(dev)
     model.load_state_dict(ck["model"])
     model.eval()
+    if args.render == "sdvae":       # 早失败: 没有潜变量头就没有 z_hat 可渲染
+        assert int(getattr(cfg, "z_head", 0)) == 1, \
+            "--render sdvae 需要 cfg.z_head=1 的 ckpt（当前 cfg.z_head=" \
+            f"{getattr(cfg, 'z_head', 0)}）"
     recurrent = getattr(model, "recurrent", False)
     T = len(model.decoder.steps) if recurrent else 1
     windows = model.decoder.windows if recurrent else [(0, cfg.num_specials)]
@@ -108,17 +125,22 @@ def main():
               "ss": np.zeros((D, D), np.float64)}
     psnr_sum = [0.0] * T
     l1_sum = [0.0] * T
-    if args.vae_roundtrip:
-        from diffusers import AutoencoderKL
+    vae = None
+    if args.vae_roundtrip or args.render == "sdvae":
+        from diffusers import AutoencoderKL     # 惰性 import: pixel 默认路径不碰 diffusers
         vae = AutoencoderKL.from_pretrained(
             args.teacher_vae,
             local_files_only=bool(args.teacher_local_only)).to(dev).eval()
         for p in vae.parameters():
             p.requires_grad_(False)
+    if args.vae_roundtrip:
         rt_acc = [{"n": 0, "s": np.zeros(D, np.float64),
                    "ss": np.zeros((D, D), np.float64)} for _ in range(T)]
         rt_psnr, rt_l1 = [0.0] * T, [0.0] * T
         print(f"[fast] P0-d vae_roundtrip=on teacher={args.teacher_vae}", flush=True)
+    if args.render == "sdvae":
+        print(f"[fast] render=sdvae: 每步图 = teacher.decode(z_hat[:,t]/{args.kd_latent_scale}) "
+              f"teacher={args.teacher_vae}", flush=True)
     seen = 0
 
     with torch.no_grad():
@@ -129,10 +151,18 @@ def main():
             B = x.shape[0]
             pix = out["Y_pix"].float()
             tgt = out["target_pix"].float()
-            rec01 = patches_to_image(
-                pix.reshape(B * T, cfg.num_patches, -1), cfg.img_size, cfg.img_size,
-                cfg.patch, IMAGENET_MEAN, IMAGENET_STD, clamp_255=False
-            ).reshape(B, T, 3, cfg.img_size, cfg.img_size).clamp(0.0, 1.0)
+            if args.render == "sdvae":
+                # ── I2 投放路径: z_hat → 冻结 teacher decoder（像素头不参与）──
+                #   z_hat 是**归一化** latent（训练时乘过 scale 再算 MSE）⇒ 反缩放回去。
+                zs = out["z_hat"].float() / float(args.kd_latent_scale)
+                rec01 = torch.stack([
+                    ((vae.decode(zs[:, t]).sample.float() + 1.0) * 0.5
+                     ).clamp(0.0, 1.0) for t in range(T)], dim=1)
+            else:
+                rec01 = patches_to_image(
+                    pix.reshape(B * T, cfg.num_patches, -1), cfg.img_size, cfg.img_size,
+                    cfg.patch, IMAGENET_MEAN, IMAGENET_STD, clamp_255=False
+                ).reshape(B, T, 3, cfg.img_size, cfg.img_size).clamp(0.0, 1.0)
             tgt01 = patches_to_image(
                 tgt, cfg.img_size, cfg.img_size, cfg.patch,
                 IMAGENET_MEAN, IMAGENET_STD, clamp_255=False
@@ -202,6 +232,11 @@ def main():
         "teacher_vae": (str(args.teacher_vae) if args.vae_roundtrip else None),
         "per_step": {str(k): v for k, v in per_step.items()},
     }
+    if args.render == "sdvae":
+        # 只在 sdvae 臂加这两个键 ⇒ 默认 pixel 臂的 JSON 结构与提交前**逐 key 相同**
+        res["render"] = "sdvae"
+        res["kd_latent_scale"] = float(args.kd_latent_scale)
+        res["teacher_vae"] = str(args.teacher_vae)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(res, f, indent=1, ensure_ascii=False)

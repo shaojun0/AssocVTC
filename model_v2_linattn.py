@@ -1294,6 +1294,17 @@ class LinAttnConfig:
     #   监控量 `recon` 仍固定为 L1, 保证日志/跨实验口径可比。
     recon_loss: str = "l1"
 
+    # ── 潜变量头 z_hat（2026-11-23 I1/I2; 默认 0 = 关 ⇒ 默认路径 state_dict 逐 key 不变）──
+    #   `z_head=1` ⇒ 从**每步的像素预测**下采样出 teacher 的 latent:
+    #     (B,T,N,pp) → `patches_to_image`（不反归一化）→ (B*T,3,H,W)
+    #     → 3 个 stride-2 卷积（合计 8× 下采样, 与 SD-VAE 的 down=8 对齐）+ GELU
+    #     → Conv2d(·, z_channels, 3, 1, 1) ⇒ (B*T,4,H/8,W/8)。
+    #   参数 ≈ 0.30M（hidden=128）≪ 1M; 默认关 ⇒ `self.z_head is None`, 不注册参数,
+    #   旧 ckpt 仍可 `load_state_dict(strict=True)`。
+    z_head: int = 0
+    z_channels: int = 4          # = SD-VAE 的 latent_channels（z_hat 通道数）
+    z_head_hidden: int = 128     # 隐藏通道（0.30M 档; 加到 256 也才 1.2M, 不建议）
+
     @property
     def num_patches(self) -> int:
         return (self.img_size // self.patch) ** 2
@@ -1315,6 +1326,8 @@ class SRPhase1LinAttn(nn.Module):
     · Y_pix:      (B,1,N,3*p*p) 单步直接预测（|T|=1; 见文件头"刻意偏离"）
     · F_hat:      (B,N,3*p*p) = Y_pix[:, -1]（= 唯一那一步）
     · loss = recon = 像素 L1（归一化空间, 直接预测口径）
+    · z_hat:      (B,T,4,H/8,W/8) 仅当 `cfg.z_head=1`（I1/I2 潜变量头; 默认为关 ⇒
+                  该键**不出现**, 旧调用点逐位不变）
     """
 
     def __init__(self, config: Optional[LinAttnConfig] = None, **kwargs):
@@ -1395,6 +1408,10 @@ class SRPhase1LinAttn(nn.Module):
             raise AssertionError(
                 f"未知 dec_attn={cfg.dec_attn!r}; 合法值: ['std', 'linear']")
 
+        # ── 潜变量头 z_hat（I1/I2）: `z_head=0`（默认）⇒ None ⇒ 不进 state_dict ──
+        self.z_channels = int(cfg.z_channels)
+        self.z_head = self._build_z_head(cfg)
+
         # ── E-B2 / E-B1 / E-B4 开关（全是普通 python 属性, **不进 state_dict**）──
         self.loss_weights = parse_loss_weights(cfg.loss_weights)
         self.dh_mode = int(cfg.dh_mode)
@@ -1410,6 +1427,26 @@ class SRPhase1LinAttn(nn.Module):
         self.refiner = self._build_refiner(cfg)               # None = 关（默认）
         if self.refiner is not None:
             assert not self.refiner_steps or self.refiner_steps >= 1
+
+    @staticmethod
+    def _build_z_head(cfg: "LinAttnConfig") -> Optional[nn.Module]:
+        """I1/I2 潜变量头: 像素预测 → teacher latent（stride-8, 与 SD-VAE down=8 对齐）。
+
+        `z_head=0`（默认）⇒ 返回 None ⇒ **不注册任何参数** ⇒ 默认路径 state_dict 逐 key
+        不变、旧 ckpt `strict=True` 可载入。参数量 ≈ 0.30M（hidden=128）:
+        3→128 (3.5k) + 128→128 ×2 (295k) + 128→4 (4.6k)。
+        """
+        kind = int(cfg.z_head)
+        if kind <= 0:
+            return None
+        assert kind == 1, f"z_head={cfg.z_head} 只支持 0（关）/ 1（开）"
+        h, zc = int(cfg.z_head_hidden), int(cfg.z_channels)
+        assert h >= 8 and zc >= 1, f"z_head_hidden={h} z_channels={zc} 太小"
+        return nn.Sequential(
+            nn.Conv2d(3, h, 3, stride=2, padding=1), nn.GELU(),
+            nn.Conv2d(h, h, 3, stride=2, padding=1), nn.GELU(),
+            nn.Conv2d(h, h, 3, stride=2, padding=1), nn.GELU(),
+            nn.Conv2d(h, zc, 3, stride=1, padding=1))
 
     @staticmethod
     def _build_refiner(cfg: "LinAttnConfig") -> Optional[nn.Module]:
@@ -1571,9 +1608,21 @@ class SRPhase1LinAttn(nn.Module):
         loss = self._aggregate_loss(per_step)
         F_pix = pix[:, -1]                                   # 末步 = F_hat
         recon = F.l1_loss(F_pix, target_pix)
-        return {"loss": loss, "recon": recon, "F_hat": F_pix,
-                "Y_pix": pix, "target_pix": target_pix,
-                "step_l1": per_step.detach()}
+        res = {"loss": loss, "recon": recon, "F_hat": F_pix,
+               "Y_pix": pix, "target_pix": target_pix,
+               "step_l1": per_step.detach()}
+        # ── I1/I2 潜变量头: `z_head=0`（默认）⇒ **不出现** "z_hat" 键（旧行为）──
+        zh = getattr(self, "z_head", None)
+        if zh is not None:
+            Bp, Tp, Np, pp = pix.shape
+            assert H % 8 == 0 and W % 8 == 0, \
+                f"z_head 是三段 stride-2（8× 下采样）, H×W={H}×{W} 须被 8 整除"
+            # 输入是**归一化空间**的像素预测 ⇒ 不反归一化（mean=std=None）, 也不截断
+            _img = patches_to_image(pix.reshape(Bp * Tp, Np, pp), H, W, self.patch,
+                                    None, None, clamp_255=False)
+            res["z_hat"] = zh(_img).reshape(
+                Bp, Tp, self.z_channels, H // 8, W // 8)
+        return res
 
     def forward(self, pixel_values: Tensor) -> dict:
         x = pixel_values
@@ -1595,7 +1644,7 @@ class SRPhase1LinAttn(nn.Module):
         # 编码器末端 FC 瓶颈算进"编码器"（它是编码器的一部分）
         enc = n(self.encoder) + n(getattr(self, "zs_proj", None)) \
             + n(getattr(self, "zcls_proj", None))
-        dec = n(self.decoder)
+        dec = n(self.decoder) + n(getattr(self, "z_head", None))   # z_head（I1/I2）
         ref = n(self.refiner)
         return {"encoder": enc, "decoder": dec, "refiner": ref,
                 "enc_fc": n(getattr(self, "zs_proj", None))
@@ -2369,6 +2418,65 @@ if __name__ == "__main__":
     assert not bad12, f"并行臂有参数无梯度/非有限: {bad12[:5]}"
     print(f"    默认回归 → StandardAttentionDecoder OK; 并行臂端到端 T={T12} "
           f"Y_pix{tuple(o12['Y_pix'].shape)} 前向+反向+全参数有限梯度 OK")
+
+    # 13. 潜变量头 z_head（I1/I2）: 默认关逐 key 不变 + 梯度能到 payload
+    print("[13] 潜变量头 z_head: 默认关（state_dict 逐 key 不变）/ 开（z_hat 形状 + 梯度可达）")
+    _zbase = dict(img_size=64, patch=16, num_specials=8, enc_dim=64, enc_depth=2,
+                  enc_heads=4, dec_dim=64, dec_depth=2, dec_heads=4,
+                  pixel_hidden=128, dec_recurrent=True, dec_steps="1,4,8",
+                  zs_dim=12)
+    xz = torch.randn(2, 3, 64, 64)
+
+    # 13a. z_head=0 ⇒ forward 无 z_hat; state_dict 键与"不带该字段"完全相同、互载严格通过
+    m_zh0 = SRPhase1LinAttn(LinAttnConfig(**_zbase, z_head=0))
+    m_zhn = SRPhase1LinAttn(LinAttnConfig(**_zbase))          # 不写该字段（= 旧配置口径）
+    k0, kn = set(m_zh0.state_dict()), set(m_zhn.state_dict())
+    assert k0 == kn, (k0 ^ kn)
+    assert not any(k.startswith("z_head") for k in k0)
+    m_zhn.load_state_dict(m_zh0.state_dict(), strict=True)   # 旧 ckpt strict=True 可载入
+    m_zh0.load_state_dict(m_zhn.state_dict(), strict=True)
+    o_z0 = m_zh0(xz)
+    want13 = {"loss", "recon", "F_hat", "Y_pix", "target_pix", "step_l1"}
+    assert set(o_z0) == want13, set(o_z0) ^ want13
+    assert m_zh0.z_head is None and m_zh0.count_params()["decoder"] == \
+        SRPhase1LinAttn(LinAttnConfig(**_zbase)).count_params()["decoder"]
+    print(f"    z_head=0: keys={len(k0)} 个 与不带该字段逐 key 同、strict=True 互载 OK; "
+          f"forward 无 z_hat OK; 解码器参数量不变 OK")
+
+    # 13b. z_head=1 ⇒ z_hat (B,T,4,H/8,W/8); MSE(z_hat, 随机 z_t) 反传后
+    #      z_head / zs_proj / 编码器梯度全部非零（KD 梯度能到被传输的 payload）
+    m_zh1 = SRPhase1LinAttn(LinAttnConfig(**_zbase, z_head=1))
+    m_zh1.train()
+    o_z1 = m_zh1(xz)
+    assert o_z1["z_hat"].shape == (2, 3, 4, 8, 8), o_z1["z_hat"].shape
+    n_zh = sum(p.numel() for p in m_zh1.z_head.parameters())
+    assert n_zh < 1_000_000, f"z_head 参数 {n_zh:,} 应远小于 1M"
+    torch.manual_seed(7)
+    _z_t = torch.randn_like(o_z1["z_hat"])
+    _zloss = F.mse_loss(o_z1["z_hat"] * 0.18215, _z_t * 0.18215)
+    _zloss.backward()
+
+    def _gmax(mod):
+        gs = [float(p.grad.abs().max()) for p in mod.parameters()
+              if p.grad is not None]
+        return max(gs) if gs else 0.0
+    g_zh, g_zs, g_enc = _gmax(m_zh1.z_head), _gmax(m_zh1.zs_proj), _gmax(m_zh1.encoder)
+    assert g_zh > 0 and g_zs > 0 and g_enc > 0, (g_zh, g_zs, g_enc)
+    print(f"    z_head=1: z_hat{tuple(o_z1['z_hat'].shape)} z_head 参数 {n_zh:,} (<1M) OK; "
+          f"反传后 max|g|: z_head={g_zh:.3e} zs_proj={g_zs:.3e} encoder={g_enc:.3e} "
+          f"（全部 >0 ⇒ KD 梯度可达 payload）OK")
+
+    # 13c. 尺寸泛化: H=64 ⇒ z 8×8（上面那条）; H=128 ⇒ z 16×16（同一 down=8 口径）
+    for _H in (64, 128):
+        m_h = SRPhase1LinAttn(LinAttnConfig(**{**_zbase, "img_size": _H,
+                                               "z_head": 1, "dec_steps": "1,4,8"}))
+        o_h = m_h(torch.randn(2, 3, _H, _H))
+        assert o_h["z_hat"].shape == (2, 3, 4, _H // 8, _H // 8), o_h["z_hat"].shape
+        # 只有 latent 损失才把梯度送到 z_head（重建损失不看 z_hat, 梯度应为 0）
+        F.mse_loss(o_h["z_hat"] * 0.18215,
+                   torch.zeros_like(o_h["z_hat"])).backward()
+        assert _gmax(m_h.z_head) > 0
+    print("    H=64 ⇒ z_hat (2,3,4,8,8) / H=128 ⇒ (2,3,4,16,16); 反传后 z_head 仍有梯度 OK")
 
     print("=" * 78)
     print("ALL CHECKS PASSED")

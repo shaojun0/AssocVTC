@@ -48,6 +48,7 @@ except (ImportError, AttributeError):
     from tvmini import make_grid, save_image
 
 from data_linattn import build_loaders
+from kd_loss import latent_mse          # kd_loss 顶部只 import torch（diffusers 惰性）
 from metrics_linattn import psnr, ssim, per_patch_dc_baseline
 from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
                               SRPhase1LinAttn, patches_to_image,
@@ -310,7 +311,12 @@ def save_pair_grid(inp01: torch.Tensor, rec01: torch.Tensor, path: str, n: int =
 
 @torch.no_grad()
 def evaluate(model, loader, patch: int, img_size: int, amp: bool,
-             max_batches: int = 0, save_grid: str = "", max_images: int = 0):
+             max_batches: int = 0, save_grid: str = "", max_images: int = 0,
+             render_fn=None):
+    """val 指标。`render_fn=None`（默认）⇒ 出图走自身像素头（逐位不变）;
+    给定 `render_fn(out)->(B,3,H,W)∈[0,1]` ⇒ 出图走**投放路径**（I2: z_hat→teacher
+    decoder）。注意: 后者的 PSNR/SSIM 与自身像素头**不可直接比**, 见调用处日志标注。
+    """
     model.eval()
     # 按图数加权（与 eval_linattn 同口径; 早期按批等权会系统性偏低 ~0.06dB）
     tot = {"l1": 0.0, "p": 0.0, "s": 0.0, "dc": 0.0, "c": 0.0}
@@ -326,9 +332,15 @@ def evaluate(model, loader, patch: int, img_size: int, amp: bool,
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             out = model(x)
         Bb = x.shape[0]
-        tot["l1"] += float(F.l1_loss(out["F_hat"].float(),
-                                     out["target_pix"].float())) * Bb
-        rec01 = denorm01(out["F_hat"].float(), img_size, patch)
+        if render_fn is None:
+            tot["l1"] += float(F.l1_loss(out["F_hat"].float(),
+                                         out["target_pix"].float())) * Bb
+            rec01 = denorm01(out["F_hat"].float(), img_size, patch)
+        else:
+            # 投放路径（I2）: l1 也必须在**渲染图上**算, 否则 l1 与 psnr/ssim 不同口径
+            rec01 = render_fn(out)
+            tot["l1"] += float(F.l1_loss(rec01, denorm01(
+                out["target_pix"].float(), img_size, patch))) * Bb
         tgt01 = denorm01(out["target_pix"].float(), img_size, patch)
         # ★运行时护栏: 反归一化单位口径一旦再写错（多除 255）, 目标图均值会从
         #   ~0.45 掉到 ~0.0018, PSNR/SSIM 会整体虚高 ~48dB —— 直接报错而不是
@@ -518,6 +530,28 @@ def parse_args():
                     help="蒸馏权重线性 ramp 占总步数的比例（默认 0.05）")
     ap.add_argument("--kd_every", type=int, default=1,
                     help="每 k 个优化步算一次蒸馏损失（默认 1）")
+    # ── I1/I2: 蒸馏空间（latent）+ 逐步 KD + teacher decoder 渲染（2026-11-23）──
+    #    见 doc/2026-11-23/NOTES_kd_vs_alit_code.md §3-I1/I2/I4。默认值全部 = 现有
+    #    kd1 行为 ⇒ `--kd_space pixel` 时损失路径逐位不变。
+    ap.add_argument("--kd_space", default="pixel", choices=["pixel", "latent"],
+                    help="pixel=教师解码图上的 L1/MSE（默认, = kd1 逐位不变）| "
+                         "latent=教师 latent 的 MSE（I1; 需 --z_head 1）")
+    ap.add_argument("--kd_latent_scale", type=float, default=0.18215,
+                    help="latent MSE 两边相乘的 SD 缩放因子（默认 0.18215）")
+    ap.add_argument("--kd_steps", default="last",
+                    help="KD 监督哪些步: last（默认, 只末步=现有行为）| all | "
+                         "逗号列表（**1-based**, 如 5,6,7 = 第 5/6/7 步）; "
+                         "仅在 --kd_space latent 下生效")
+    ap.add_argument("--kd_step_weights", nargs="*", default=[],
+                    help="各选中步的 KD 权重（长度 = 选中步数或 1）; 空 = 等权; "
+                         "按**加权平均**归一化（除以权重和）⇒ --kd_weight 始终是总 λ; "
+                         "仅在 --kd_space latent 下生效")
+    ap.add_argument("--render", default="pixel", choices=["pixel", "sdvae"],
+                    help="评测/验证出图: pixel=自身像素头（默认, 逐位不变）| "
+                         "sdvae=z_hat→teacher.decode(z/scale)（需 --z_head 1）")
+    ap.add_argument("--z_head", type=int, default=0,
+                    help="潜变量头: 0=关（默认, state_dict 逐 key 不变）| 1=开 "
+                         "(z_hat=(B,T,4,H/8,W/8), 从每步像素预测回归教师 latent)")
     # ── PatchGAN 对抗微调（2026-11-22）──
     ap.add_argument("--gan_weight", type=float, default=0.0,
                     help="PatchGAN 对抗损失目标权重; 0=关（默认, 旧路径逐位不变）")
@@ -589,7 +623,43 @@ def build_cfg(args) -> LinAttnConfig:
         refiner_mlp_ratio=float(args.refiner_mlp_ratio),
         refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps),
         zs_dim=int(getattr(args, "zs_dim", 0)),
-        recon_loss=str(getattr(args, "recon_loss", "l1")))
+        recon_loss=str(getattr(args, "recon_loss", "l1")),
+        # ── I1/I2 潜变量头（0 = 默认关 ⇒ cfg/state_dict 逐字段/逐 key 不变）──
+        z_head=int(getattr(args, "z_head", 0)))
+
+
+def parse_kd_steps(spec, num_steps: int):
+    """`--kd_steps` → **0-based** 步下标列表（1-based 是命令行语义, 日志里也写 1-based）。
+
+    "last"（默认）/"" ⇒ 只末步（= kd1 行为）; "all" ⇒ 全部 T 步;
+    逗号列表如 "5,6,7" ⇒ 第 5/6/7 步。越界/重复/空一律 assert（宁可启动即失败）。
+    """
+    s = str(spec).strip().lower()
+    T = int(num_steps)
+    if s in ("", "last"):
+        return [T - 1]
+    if s == "all":
+        return list(range(T))
+    out = [int(v) - 1 for v in s.split(",") if str(v).strip()]
+    assert out, f"--kd_steps={spec!r} 解析为空"
+    assert all(0 <= i < T for i in out), \
+        f"--kd_steps={spec!r} 越界（1-based, T={T}）"
+    assert len(set(out)) == len(out), f"--kd_steps={spec!r} 有重复步"
+    return out
+
+
+def parse_kd_step_weights(ws, n_sel: int):
+    """`--kd_step_weights` → 长度 n_sel 的权重列表; 空 ⇒ 全 1.0（等权）; 长度 1 ⇒ 广播。"""
+    out = [float(w) for w in (ws or [])]
+    if not out:
+        return [1.0] * int(n_sel)
+    assert len(out) in (int(n_sel), 1), \
+        f"--kd_step_weights 长度 {len(out)} 须 = 选中步数 {n_sel} 或 1"
+    if len(out) == 1:
+        out = out * int(n_sel)
+    assert all(w >= 0.0 for w in out) and sum(out) > 0.0, \
+        "--kd_step_weights 须全部非负且不全为 0"
+    return out
 
 
 def _init_zs_bottleneck_ortho(model: nn.Module) -> None:
@@ -713,6 +783,7 @@ def load_init_from(model: nn.Module, path: str) -> dict:
     allowed = ({"decoder.mem_pos"}
                | set(mism)                      # 形状变化: 已按瓶颈规则重初始化
                | {k for k in missing if k.startswith("refiner.")}
+               | {k for k in missing if k.startswith("z_head.")}   # I1/I2 新头
                | {k for k in missing if k.startswith(("zs_proj.", "zcls_proj."))})
     assert set(missing) <= allowed, \
         f"除 mem_pos/refiner.*/FC 瓶颈外还有未加载参数（形状不符?）: " \
@@ -782,6 +853,25 @@ def main():
               f"(原 {sum(prm.numel() for prm in model.parameters())/1e6:.3f} M)", flush=True)
     pc = model.count_params()
     n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
+    # ── I1/I2/I4: KD 空间 / 选中步 / 逐步权重（默认 last+pixel ⇒ 与 kd1 逐位相同）──
+    kd_space = str(args.kd_space).lower()
+    kd_scale = float(args.kd_latent_scale)
+    kd_render = str(args.render).lower()
+    if kd_space == "latent" or kd_render == "sdvae":
+        assert int(args.z_head) == 1, (
+            f"--kd_space={kd_space} / --render={kd_render} 需要 --z_head 1"
+            "（z_hat 来自潜变量头; 关着就没有 latent 可监督/可渲染）")
+    _kd_sel_raw = parse_kd_steps(args.kd_steps, n_steps)
+    if kd_space == "pixel":
+        # 像素分支是 kd1 原样: **只末步、权重恒 1**（改了就不是"逐位不变"了）
+        if str(args.kd_steps).strip().lower() not in ("", "last") or args.kd_step_weights:
+            _p("⚠️ --kd_space pixel ⇒ KD 固定只挂末步、权重恒 1; "
+               "--kd_steps/--kd_step_weights 仅在 --kd_space latent 下生效", flush=True)
+        kd_sel, kd_w = [n_steps - 1], [1.0]
+    else:
+        kd_sel = _kd_sel_raw
+        kd_w = parse_kd_step_weights(args.kd_step_weights, len(kd_sel))
+
     _p(f"[decode] recurrent={getattr(model,'recurrent',False)} "
           f"parallel={getattr(model,'parallel',False)} "
           f"dec_attn={cfg.dec_attn} → {type(model.decoder).__name__} T={n_steps}"
@@ -829,16 +919,33 @@ def main():
         _p(f"[perc] VGG16 感知损失: weight={args.perc_weight} layers={_pl} "
               f"resize={args.perc_resize}", flush=True)
 
-    # ── SD-VAE 输出蒸馏 teacher（2026-11-23; --kd_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    # ── SD-VAE 蒸馏 teacher（2026-11-23; 默认全关 ⇒ 旧路径逐位不变）──
+    #    装载条件 = KD 有梯度需求（weight>0）**或** latent 空间（要 teacher encoder）
+    #    **或** teacher-decoder 渲染（要 teacher decoder）—— 后两者即使 weight=0 也要装。
     kd_fn = None
-    if float(getattr(args, "kd_weight", 0.0)) > 0:
+    if (float(getattr(args, "kd_weight", 0.0)) > 0
+            or kd_space == "latent" or kd_render == "sdvae"):
         from kd_loss import SDVAETeacher
         kd_fn = SDVAETeacher(model_id=str(args.kd_teacher),
-                             local_files_only=bool(int(args.kd_local_only))).to(_DEVICE)
+                             local_files_only=bool(int(args.kd_local_only)),
+                             latent_scale=kd_scale).to(_DEVICE)
         kd_fn.eval()
-        _p(f"[kd] SD-VAE 蒸馏: weight={args.kd_weight} loss={args.kd_loss} "
+        _p(f"[kd] SD-VAE 蒸馏: space={kd_space} weight={args.kd_weight} "
+              f"loss={args.kd_loss} scale={kd_scale} "
+              f"steps={args.kd_steps}⇒{'/'.join(str(i+1) for i in kd_sel)} (1-based, T={n_steps}) "
+              f"w={kd_w}(加权平均, Σ={sum(kd_w):.2f}) render={kd_render} "
               f"start_frac={args.kd_start_frac} ramp_frac={args.kd_ramp_frac} "
               f"every={args.kd_every} | {kd_fn.describe(int(args.img_size))}", flush=True)
+
+    # ── I2: val/评测出图路径（`--render sdvae` ⇒ z_hat → 冻结 teacher decoder）──
+    #    默认 render=pixel ⇒ val_render_fn=None ⇒ val 与改造前逐位相同。
+    val_render_fn, val_render_tag = None, ""
+    if kd_render == "sdvae":
+        val_render_fn = (lambda o: kd_fn.decode_latent(
+            o["z_hat"][:, -1].float() / kd_scale))
+        val_render_tag = " [val-render=sdvae]"
+        _p(f"[val] 出图走 z_hat[:,-1]/{kd_scale} → teacher.decode ⇒ **非**自身像素头: "
+              f"下面的 val PSNR/SSIM 与 best ckpt 选择都按这条投放路径", flush=True)
 
     raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
     use_manual_ddp = False
@@ -1007,6 +1114,7 @@ def main():
                     kd_lam = float(args.kd_weight) * min(
                         1.0, (step - _kst + 1) / _krp)
             kd_raw = None
+            kd_mse = None
             # PatchGAN 对抗权重调度（ramp 避免开局把已收敛的模型打乱）
             adv_raw = None
             lam_ratio = None
@@ -1057,13 +1165,33 @@ def main():
                         loss = loss + perc_lam * _pv
                         perc_raw = float(_pv.detach())
                     if _need_kd:
-                        # teacher 目标只由 GT 生成（no_grad, fp32）; 梯度只经 _pred01 反传
-                        _kt01 = kd_fn(_tgt01)
-                        with torch.autocast("cuda", enabled=False):
-                            if str(args.kd_loss).lower() == "l2":
-                                _kdl = F.mse_loss(_pred01.float(), _kt01)
-                            else:
-                                _kdl = F.l1_loss(_pred01.float(), _kt01)
+                        if kd_space == "latent":
+                            # ── I1: latent MSE（教师 encoder 只跑一次/微批）──
+                            #  z_t 只由 GT 生成（no_grad, fp32）; 梯度只经 z_hat 反传。
+                            #  L += kd_lam · Σ_t w_t·MSE(z_hat_t·s, z_t·s)
+                            with torch.autocast("cuda", enabled=False):
+                                _kt_z = kd_fn.encode_codes(_tgt01)
+                                _z_hat = out["z_hat"].float()
+                                _terms, _plains = [], []
+                                for _t, _w in zip(kd_sel, kd_w):
+                                    _m = latent_mse(_z_hat[:, _t], _kt_z, kd_scale)
+                                    _terms.append(_w * _m)
+                                    _plains.append(float(_m.detach()))
+                                # 加权**平均**（除以权重和）: `--kd_weight` 始终是总 λ,
+                                # 改权重"形状"不会顺带改总强度（与 `_aggregate_loss` 的
+                                # 既有归一化口径一致; ALIT 用不归一化的 sum, 差别只是 λ 的
+                                # 定义, 但对我们"先扫 λ 再调形状"更不易混淆）。
+                                _kdl = torch.stack(_terms).sum() / max(
+                                    1e-12, float(sum(kd_w)))
+                            kd_mse = sum(_plains) / max(1, len(_plains))
+                        else:
+                            # ── 像素（默认, = kd1 原样: 只末步、L1/MSE 到教师解码图）──
+                            _kt01 = kd_fn(_tgt01)
+                            with torch.autocast("cuda", enabled=False):
+                                if str(args.kd_loss).lower() == "l2":
+                                    _kdl = F.mse_loss(_pred01.float(), _kt01)
+                                else:
+                                    _kdl = F.l1_loss(_pred01.float(), _kt01)
                         loss = loss + kd_lam * _kdl
                         kd_raw = float(_kdl.detach())
                     if _need_gan:
@@ -1148,7 +1276,12 @@ def main():
                     rec["kd_lam"] = round(kd_lam, 6)
                     if kd_raw is not None:
                         rec["kd"] = round(kd_raw, 5)
-                        _rfid_txt += f" kd={kd_raw:.4f}(λ={kd_lam:.4f})"
+                        if kd_mse is not None:      # latent 臂: 未乘 λ/未加权的原始 MSE
+                            rec["kd_mse"] = round(kd_mse, 6)
+                            _rfid_txt += (f" kd_mse={kd_mse:.5f}"
+                                          f" kd={kd_raw:.4f}(λ={kd_lam:.4f})")
+                        else:
+                            _rfid_txt += f" kd={kd_raw:.4f}(λ={kd_lam:.4f})"
                 if gan is not None:
                     rec["gan_lam"] = round(gan_lam, 6)
                     if adv_raw is not None:
@@ -1199,12 +1332,16 @@ def main():
             vr = evaluate(raw_model, va_loader, args.patch, args.img_size,
                           bool(args.amp), args.val_batches * accum * world,
                           save_grid=os.path.join(args.output_dir, "samples",
-                                                 f"epoch{epoch:03d}_val.png"))
+                                                 f"epoch{epoch:03d}_val.png"),
+                          render_fn=val_render_fn)
             vr.update({"step": step, "epoch": epoch, "split": "val"})
+            if val_render_fn is not None:
+                vr["render"] = "sdvae"
             _p(f"[val] ep{epoch} step{step} l1={vr['l1_norm']:.4f} "
                   f"psnr={vr['psnr']:.2f}dB ssim={vr['ssim']:.4f} "
                   f"(mean基线 {vr['psnr_mean_image_baseline']:.2f}dB, "
-                  f"patchDC基线 {vr['psnr_patch_dc_baseline']:.2f}dB)", flush=True)
+                  f"patchDC基线 {vr['psnr_patch_dc_baseline']:.2f}dB)"
+                  + val_render_tag, flush=True)
             log_jsonl(log_path, vr)
             with open(os.path.join(args.output_dir, "eval_val.json"), "w") as f:
                 json.dump(vr, f, ensure_ascii=False, indent=1)
