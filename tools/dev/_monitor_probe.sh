@@ -4,7 +4,7 @@
 # 用法（agent 以后台 job 启动）: bash tools/dev/_monitor_probe.sh
 set -u
 HOST='-o StrictHostKeyChecking=no -o ConnectTimeout=20 -o BatchMode=yes -p 17677 root@connect.sha1.seetacloud.com'
-ST=/root/autodl-tmp/tok256x12_t8/probe
+ST=/root/autodl-tmp/tok256x12_t8/probe_native
 LOCAL=/home/linaro/dsh/tok448_work/artifacts/probe
 mkdir -p "$LOCAL/logs"
 for i in $(seq 1 90); do          # 90 × 120 s = 3 h
@@ -25,6 +25,9 @@ timeout 240 scp -P 17677 -o StrictHostKeyChecking=no -o BatchMode=yes \
   "root@connect.sha1.seetacloud.com:$ST/*.json" "$LOCAL/" 2>&1
 timeout 240 scp -P 17677 -o StrictHostKeyChecking=no -o BatchMode=yes \
   "root@connect.sha1.seetacloud.com:$ST/status.txt" "$LOCAL/" 2>&1
+mkdir -p "$LOCAL/grids"
+timeout 300 scp -P 17677 -o StrictHostKeyChecking=no -o BatchMode=yes \
+  "root@connect.sha1.seetacloud.com:$ST/grids/*.png" "$LOCAL/grids/" 2>&1
 timeout 300 scp -P 17677 -o StrictHostKeyChecking=no -o BatchMode=yes \
   "root@connect.sha1.seetacloud.com:$ST/logs/*.log" "$LOCAL/logs/" 2>&1
 echo "=== summary ==="

@@ -11,11 +11,14 @@
     自己的 native 分辨率（**不做增强**, 三组对照共用同一批图）;
   · 特征：ViT 类取第 `--layer` 层（默认最后一层）的**空间 patch token**（丢 CLS），
     reshape 成 (C,h,w); SAM 取 image encoder 输出; SD-VAE 取 latent（未缩放）;
-  · 统一瓶颈：特征 → `adaptive_avg_pool2d(g×g)`（h,w>g 时）或 bilinear 放大到 g×g
-    （h,w<g 时）⇒ 所有编码器都变成 **g×g×C 的同一形状语义**（g=16 ⇒ 每编码器
-    空间位置数相同, 只剩通道数差异 = 特征维度）;
-  · 解码器：`Conv1x1(C→W)` + 4×[Upsample×2, Conv3×3, GroupNorm, GELU] + `Conv3×3→3`，
-    **所有编码器完全同一个解码器**（只有第一层输入通道不同），W=256 ⇒ ~2.4M 参数;
+  · **不压缩（默认 `--grid 0`）**：直接用编码器的**原生特征网格**（CLIP 16×16、
+    SigLIP 27×27、SAM 64×64 …）和**全部通道**；只有网格非 2 的幂时才就近插值到
+    8/16/32/64（27→32、37→32、14→16）。`--grid 16` 是早期"压到统一网格"的对照口径;
+  · 解码器：`Conv1x1(C→W)`（线性 readout, 唯一通道瓶颈）+ `log2(256/g)` 个
+    [Upsample×2, Conv3×3, GroupNorm, GELU] + `Conv3×3→3`。**所有编码器同一个解码器**，
+    只有第一层输入通道/上采样层数随特征形状变; W=256 ⇒ 2–3M 参数;
+    注意：编码器通道数 > 256 时 readout 是**线性压缩**（W 本身不是信息上限的证明,
+    见 `--width 512` 的敏感性实验）;
   · 损失/优化：L1 + AdamW(2e-4, cosine, warmup 100) + 固定 `--epochs`/`--steps` 预算;
   · 指标：val(1000 张) 的 PSNR / SSIM / L1。
 
@@ -312,16 +315,19 @@ def main():
     ap.add_argument("--data_dir", default="/root/autodl-tmp/datasets/imagenet100")
     ap.add_argument("--train_per_class", type=int, default=120, help="每类训练图数（×100 类）")
     ap.add_argument("--val_per_class", type=int, default=10, help="每类验证图数（×100 类）")
-    ap.add_argument("--epochs", type=float, default=2.0)
+    ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--grid", type=int, default=16, help="统一特征网格（所有编码器相同）")
+    ap.add_argument("--grid", type=int, default=0,
+                    help="0=**原生特征网格**（默认, 不压缩空间; 非 2 的幂时就近插值到 8/16/32/64）; "
+                         ">0=强制统一到该网格（早期'压缩'口径, 仅留作对照）")
     ap.add_argument("--width", type=int, default=256, help="解码器宽度")
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--layer", type=float, default=1.0,
                     help="ViT 取第几层（0..1 比例, 或整数层号; 默认最后一层）")
     ap.add_argument("--max_steps", type=int, default=0, help=">0 时截断（debug 用）")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save_grid", default="", help="非空 ⇒ 存一张 GT|重建 对比图（实验报告用）")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tag", default="")
     args = ap.parse_args()
@@ -350,7 +356,16 @@ def main():
     cin = int(enc.forward(torch.zeros(2, 3, spec["res"], spec["res"], device=dev)).shape[1])
     featshape = tuple(enc.forward(torch.zeros(1, 3, spec["res"], spec["res"], device=dev)).shape[1:])
 
-    dec = Decoder(cin, width=args.width, grid=args.grid, out=256).to(dev)
+    g_native = int(featshape[-1])
+    if args.grid and args.grid > 0:
+        grid_eff = int(args.grid)
+    else:
+        grid_eff = (g_native if g_native in (8, 16, 32, 64)
+                    else int(2 ** round(math.log2(g_native))))
+    grid_eff = max(8, min(64, grid_eff))
+    print(f"[probe] native_grid={g_native} -> decoder_grid={grid_eff} "
+          f"(grid=0 ⇒ 原生网格, 不压缩空间)", flush=True)
+    dec = Decoder(cin, width=args.width, grid=grid_eff, out=256).to(dev)
     opt = torch.optim.AdamW(dec.parameters(), lr=args.lr, weight_decay=0.01)
     steps_per_ep = max(1, len(ds_tr) // args.batch)
     total = max(1, int(steps_per_ep * args.epochs))
@@ -393,9 +408,30 @@ def main():
     t_train = time.time() - t1
 
     m = evaluate(dec, enc, dl_va, dev)
+    if args.save_grid:
+        from PIL import ImageDraw
+        dec.eval()
+        xs, ts = [], []
+        with torch.no_grad():
+            for x, tgt in dl_va:
+                xs.append(x[:4]); ts.append(tgt[:4]); break
+        x4, t4 = xs[0].to(dev), ts[0].to(dev)
+        r4 = dec(enc.forward(x4).float()).clamp(0, 1)
+        n = x4.shape[0]
+        cell = 256
+        canvas = Image.new("RGB", (cell * 2, cell * n), (255, 255, 255))
+        for i in range(n):
+            gt = Image.fromarray((t4[i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+            rc = Image.fromarray((r4[i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+            canvas.paste(gt, (0, i * cell)); canvas.paste(rc, (cell, i * cell))
+        d = ImageDraw.Draw(canvas)
+        d.text((6, 4), f"GT | recon  {args.enc}  PSNR={m['psnr']:.2f}", fill=(255, 0, 0))
+        os.makedirs(os.path.dirname(args.save_grid), exist_ok=True)
+        canvas.save(args.save_grid)
     m.update(enc=args.enc, vendor=spec["vendor"], note=spec["note"],
              enc_res=spec["res"], layer=args.layer, feat_shape=list(featshape),
-             feat_values=int(np.prod(featshape)), grid=args.grid,
+             feat_values=int(np.prod(featshape)), grid=grid_eff,
+             grid_native=g_native, grid_mode=("native" if not args.grid else "fixed"),
              dec_width=args.width, dec_params=int(sum(p.numel() for p in dec.parameters())),
              train_images=len(ds_tr), val_images=len(ds_va), steps=total,
              load_sec=round(t_load, 1), train_sec=round(t_train, 1),

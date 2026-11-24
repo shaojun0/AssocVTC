@@ -10,9 +10,10 @@
 set -u
 cd /root/AssocVTC_tok448
 export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/root/autodl-tmp/hf_cache   # / 只有 30G, 缓存放数据盘
 export SDPA_BACKEND=math
 export PYTORCH_MUSA_ALLOC_CONF=expandable_segments:True
-OUT=${OUT:-/root/autodl-tmp/tok256x12_t8/probe}
+OUT=${OUT:-/root/autodl-tmp/tok256x12_t8/probe_native}
 SMOKE=${SMOKE:-0}
 [ "$SMOKE" != "0" ] && OUT="$OUT/smoke"
 TAGSUF=${TAGSUF:-}
@@ -20,15 +21,15 @@ LOG=$OUT/logs
 mkdir -p "$LOG"
 ONLY=${ONLY:-}
 TRAIN_PER_CLASS=${TRAIN_PER_CLASS:-200}
-EPOCHS=${EPOCHS:-2}
-GRID=${GRID:-16}
+EPOCHS=${EPOCHS:-3}
+GRID=${GRID:-0}   # 0=原生网格（不压缩）
 WIDTH=${WIDTH:-256}
 echo "[probe] start $(date) train_per_class=$TRAIN_PER_CLASS epochs=$EPOCHS grid=$GRID width=$WIDTH smoke=$SMOKE" \
   > "$OUT/status.txt"
 
 # ── 0) 先顺序下载全部权重（并行下载会被镜像限速, 且失败要早发现）──
 if [ "$SMOKE" = "0" ] && [ -z "$ONLY" ]; then
-for m in openai/clip-vit-large-patch14 \
+for m in openai/clip-vit-base-patch32 openai/clip-vit-large-patch14 \
          google/vit-large-patch16-224-in21k google/vit-huge-patch14-224-in21k \
          facebook/dinov2-large facebook/dinov2-giant facebook/vit-mae-huge \
          facebook/sam-vit-huge google/siglip-so400m-patch14-384 \
@@ -53,14 +54,16 @@ run_one () {  # $1=enc  $2=gpu  $3=extra args（可空）
     --width 64 --workers 2 --max_steps 3"
   MUSA_VISIBLE_DEVICES=$gpu CUDA_VISIBLE_DEVICES=$gpu \
     timeout 5400 python3 probe_enc_dec.py --enc "$enc" $common $extra \
+    --save_grid "$OUT/grids/${enc}${TAGSUF:-}.png" \
     --out "$OUT/${enc}${TAGSUF:-}.json" --tag "run1" > "$LOG/${enc}${TAGSUF:-}.log" 2>&1
   echo "[probe] $enc gpu=$gpu rc=$? $(date)" >> "$OUT/status.txt"
 }
 
 # ── 1) 三批, 每批 4 个 GPUs ──
-BATCH1="clip_l14 vit_l16 dinov2_l pixel16"
-BATCH2="siglip_so400m mae_h randvit_l sdvae"
-BATCH3="sam_h dinov2_g vit_h14 qwen2vl_2b"
+BATCH1="clip_l14 clip_b32 vit_l16 dinov2_l"
+BATCH2="pixel16 siglip_so400m mae_h randvit_l"
+BATCH3="sdvae sam_h dinov2_g vit_h14"
+BATCH4="qwen2vl_2b"
 
 want () {  # ONLY 过滤
   [ -z "$ONLY" ] && return 0
@@ -74,7 +77,7 @@ launch_batch () {
   done
   wait
 }
-for B in "$BATCH1" "$BATCH2" "$BATCH3"; do
+for B in "$BATCH1" "$BATCH2" "$BATCH3" "$BATCH4"; do
   launch_batch "$B"
   echo "[probe] batch done: $B $(date)" >> "$OUT/status.txt"
 done

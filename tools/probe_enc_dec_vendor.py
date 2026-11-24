@@ -58,7 +58,7 @@ VENDORS = {
     "deepseek_v41_flash": dict(
         repo="deepseek-ai/DeepSeek-V4.1-Flash-1017", vendor="DeepSeek", cfg="ds",
         ckpt="ds_visual_1.safetensors", strip="vision.",
-        res=448, patch=14, temporal=1, merge=1,
+        res=448, patch=14, temporal=1, merge=3,
         mean=HALF_MEAN, std=HALF_STD, note="DeepSeek-V4.1-Flash-1017 ViT (32L, 1024d, patch14)"),
 }
 
@@ -131,6 +131,20 @@ class VisionEnc(nn.Module):
             mod.get_vision_cos_sin = _cos_sin
             self.m = mod.ViT(args)
             self.kind = "ds"
+            self.aligner = None
+            if self.stage == "post":     # aligner 输出 = DeepSeek 喂给 LLM 的 token
+                from safetensors.torch import load_file as _lf
+                asd = _lf(os.path.join(ROOT, "ds_aligner.safetensors"))
+                asd = {k[len("aligner."):]: v for k, v in asd.items()
+                       if k.startswith("aligner.")}
+                dim = int(asd["w2.weight"].shape[1])
+                self.aligner = mod.Aligner(SimpleNamespace(
+                    vision_dim=vc["hidden_size"],
+                    vision_downsample_ratio=vc["downsample_ratio"], dim=dim))
+                a_missing, a_unexp = self.aligner.load_state_dict(asd, strict=False)
+                assert not a_missing and not a_unexp, (a_missing, a_unexp)
+                print(f"[vendor] ds aligner loaded (dim={dim}, down={vc['downsample_ratio']})",
+                      flush=True)
         else:
             raise SystemExit(f"unknown vendor {key}")
 
@@ -163,6 +177,8 @@ class VisionEnc(nn.Module):
                     kwargs.get("hidden_states") if torch.is_tensor(kwargs.get("hidden_states")) else None)
             if merger is not None:
                 self._hook = merger.register_forward_pre_hook(_cap, with_kwargs=True)
+        if getattr(self, "aligner", None) is not None:
+            self.aligner = self.aligner.to(dev).eval()
         self.m = self.m.to(dev).eval()
         if any(p.dtype == torch.float32 for p in self.m.parameters()):
             # 权重保存为 fp32；推理用 bf16（与各家训练 dtype 一致）
@@ -180,7 +196,14 @@ class VisionEnc(nn.Module):
             outs = []
             for b in range(B):
                 o = self.m(patches[b].to(torch.bfloat16), gh, gw)
-                outs.append(o.float().reshape(gh, gw, -1).permute(2, 0, 1))
+                o = o.float()
+                if self.aligner is not None:
+                    r = int(s["merge"])
+                    o = self.aligner(o, gh, gw)              # (N', dim)
+                    gh2, gw2 = math.ceil(gh / r), math.ceil(gw / r)
+                    outs.append(o.reshape(gh2, gw2, -1).permute(2, 0, 1))
+                else:
+                    outs.append(o.reshape(gh, gw, -1).permute(2, 0, 1))
             return torch.stack(outs, 0)
         hidden, gh, gw = patchify_conv3d(x, p, t)
         grid = torch.tensor([[1, gh, gw]] * B, device=x.device, dtype=torch.long)
