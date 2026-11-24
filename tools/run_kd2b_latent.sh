@@ -95,16 +95,25 @@ if [ "$SMOKE" != "0" ]; then
   python3 - "$ST/smoke/train_log.jsonl" >> "$ST/status" 2>&1 <<'PY'
 import json, math, sys
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-kd = [r for r in rows if r.get("kd_mse") is not None]
-bad = [r["step"] for r in rows
-       if any(isinstance(v, float) and not math.isfinite(v) for v in [r["loss"], r["recon"]])]
+# 注意: 最后一条是 [stop] 的收尾记录, 没有 loss/recon ⇒ 一律用 .get 取
+kd = [r for r in rows if isinstance(r.get("kd_mse"), (int, float))]
+bad = [r.get("step") for r in rows
+       if any(isinstance(v, (int, float)) and not math.isfinite(v)
+              for v in (r.get("loss"), r.get("recon"), r.get("kd_mse")))]
+def relmean(r):
+    d = r.get("kd_rel_steps") or {}
+    vs = [v for v in d.values() if isinstance(v, (int, float)) and math.isfinite(v)]
+    return sum(vs) / len(vs) if vs else None
 print(f"[smoke] rows={len(rows)} kd_rows={len(kd)} nan_steps={bad[:5]}")
 if kd:
+    r0, r1 = relmean(kd[0]), relmean(kd[-1])
     print(f"[smoke] kd_mse first={kd[0]['kd_mse']:.5f} last={kd[-1]['kd_mse']:.5f}")
-    print(f"[smoke] kd_rel first={kd[0].get('kd_rel_steps')}")
-    print(f"[smoke] kd_rel last ={kd[-1].get('kd_rel_steps')}")
-ok = (len(kd) >= 2 and not bad and any(isinstance(v, float) and math.isfinite(v)
-      for r in kd for v in r.get("kd_rel_steps", {}).values()))
+    print(f"[smoke] kd_rel mean first={r0} last={r1}")
+    print(f"[smoke] kd_rel last per-step ={kd[-1].get('kd_rel_steps')}")
+    print(f"[smoke] kd_lam max={max((r.get('kd_lam') or 0.0) for r in kd):.4f}")
+ok = (len(kd) >= 2 and not bad and r0 is not None and r1 is not None
+      and r1 <= r0 * 1.02
+      and max((r.get('kd_lam') or 0.0) for r in kd) >= 0.5)
 print("[smoke] GATE", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 PY
