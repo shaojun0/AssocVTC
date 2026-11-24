@@ -89,11 +89,16 @@ def _load_module(path, name):
 
 
 class VisionEnc(nn.Module):
-    def __init__(self, key, dev):
+    """stage="post" ⇒ vision tower 的标准输出（GLM/Qwen/MiMo 是 merger 之后, 即 LLM 看到的 token）;
+       stage="pre"  ⇒ merger **输入**（ViT 的原始空间 token, 通过 forward_pre_hook 抓取）。"""
+
+    def __init__(self, key, dev, stage="post", res=None):
         super().__init__()
         self.key, self.dev = key, dev
+        self.stage = str(stage).lower()
         s = VENDORS[key]
-        self.s, self.res = s, int(s["res"])
+        self.s, self.res = s, int(res or s["res"])
+        assert self.stage in ("pre", "post"), self.stage
         vc = json.load(open(f"{ROOT}/cfg_{s['cfg']}.json"))["vision_config"]
         if key == "glm5_flash":
             from transformers.models.glm5_next import Glm5NextVisionConfig, Glm5NextVisionModel
@@ -147,6 +152,17 @@ class VisionEnc(nn.Module):
                     if k in named and named[k].dim() >= 1:
                         named[k].zero_()
             print(f"[vendor]   zeroed {len(missing)} missing params", flush=True)
+        self._cap = None
+        self._hook = None
+        if self.stage == "pre":
+            merger = getattr(self.m, "merger", None)
+            if merger is None:      # DeepSeek 的 ViT 输出本来就在 aligner 之前 = pre 特征
+                print(f"[vendor] {key} 无 merger（ViT 输出即 pre 特征）, 跳过 hook", flush=True)
+            def _cap(mod, args, kwargs):
+                self._cap = args[0] if args and torch.is_tensor(args[0]) else (
+                    kwargs.get("hidden_states") if torch.is_tensor(kwargs.get("hidden_states")) else None)
+            if merger is not None:
+                self._hook = merger.register_forward_pre_hook(_cap, with_kwargs=True)
         self.m = self.m.to(dev).eval()
         if any(p.dtype == torch.float32 for p in self.m.parameters()):
             # 权重保存为 fp32；推理用 bf16（与各家训练 dtype 一致）
@@ -168,7 +184,17 @@ class VisionEnc(nn.Module):
             return torch.stack(outs, 0)
         hidden, gh, gw = patchify_conv3d(x, p, t)
         grid = torch.tensor([[1, gh, gw]] * B, device=x.device, dtype=torch.long)
+        self._cap = None
         o = self.m(hidden.to(torch.bfloat16), grid)
+        if self.stage == "pre":
+            assert self._cap is not None, "pre-merge hook 没抓到输入"
+            o = self._cap
+            if not isinstance(o, torch.Tensor):
+                o = o[0]
+            o = o.float()
+            if o.dim() == 2:
+                o = o.reshape(B, gh * gw, -1)
+            return o.transpose(1, 2).reshape(B, -1, gh, gw)
         if not isinstance(o, torch.Tensor):      # HF 返回 BaseModelOutputWithPooling
             o = getattr(o, "last_hidden_state", None)
             if o is None:
@@ -199,6 +225,9 @@ def main():
     ap.add_argument("--width", type=int, default=256)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--max_steps", type=int, default=0)
+    ap.add_argument("--stage", default="post", choices=["post", "pre"],
+                    help="post=vision tower 标准输出（LLM 看到的东西, 默认）| pre=merger 之前的 ViT token")
+    ap.add_argument("--enc_res", type=int, default=0, help="覆盖输入分辨率（0=用 registry 原值）")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--save_grid", default="")
     ap.add_argument("--out", default="")
@@ -211,12 +240,14 @@ def main():
 
     dev = "cuda"
     torch.manual_seed(0)
-    spec = VENDORS[args.vendor]
+    spec = dict(VENDORS[args.vendor])
     t0 = time.time()
-    enc = VisionEnc(args.vendor, dev)
+    enc = VisionEnc(args.vendor, dev, stage=args.stage, res=(args.enc_res or None))
     print(f"[vendor] built {args.vendor} in {time.time()-t0:.1f}s", flush=True)
+    if args.stage == "pre":
+        spec = dict(spec, res=enc.res)
     if args.selftest:
-        x = torch.rand(2, 3, spec["res"], spec["res"], device=dev) * 2 - 1
+        x = torch.rand(2, 3, enc.res, enc.res, device=dev) * 2 - 1
         f = enc.forward(x)
         print(f"[vendor] SELFTEST ok: out {tuple(f.shape)} "
               f"mean={f.mean().item():.4f} std={f.std().item():.4f} "
@@ -224,15 +255,15 @@ def main():
         return
 
     tr_p, va_p = list_split(args.data_dir, args.train_per_class, args.val_per_class)
-    ds_tr = ReconDataset(tr_p, spec["res"], spec["mean"], spec["std"])
-    ds_va = ReconDataset(va_p, spec["res"], spec["mean"], spec["std"])
+    ds_tr = ReconDataset(tr_p, enc.res, spec["mean"], spec["std"])
+    ds_va = ReconDataset(va_p, enc.res, spec["mean"], spec["std"])
     dl_tr = torch.utils.data.DataLoader(ds_tr, batch_size=args.batch, shuffle=True,
                                         num_workers=args.workers, pin_memory=False,
                                         drop_last=True, persistent_workers=args.workers > 0)
     dl_va = torch.utils.data.DataLoader(ds_va, batch_size=args.batch, shuffle=False,
                                         num_workers=args.workers, pin_memory=False)
 
-    fs = tuple(enc.forward(torch.zeros(1, 3, spec["res"], spec["res"], device=dev)).shape[1:])
+    fs = tuple(enc.forward(torch.zeros(1, 3, enc.res, enc.res, device=dev)).shape[1:])
     g_native = int(fs[-1])
     grid = (g_native if g_native in (8, 16, 32, 64)
             else int(2 ** round(math.log2(g_native))))
@@ -298,7 +329,7 @@ def main():
         canvas.save(args.save_grid)
 
     m.update(vendor=args.vendor, lab=spec["vendor"], note=spec["note"], repo=spec["repo"],
-             enc_res=spec["res"], feat_shape=list(fs), feat_values=int(np.prod(fs)),
+             stage=args.stage, enc_res=enc.res, feat_shape=list(fs), feat_values=int(np.prod(fs)),
              grid=grid, grid_native=g_native, grid_mode="native",
              dec_width=args.width, dec_params=int(sum(p.numel() for p in dec.parameters())),
              train_images=len(ds_tr), val_images=len(ds_va), steps=total,
