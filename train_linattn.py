@@ -536,8 +536,10 @@ def parse_args():
     ap.add_argument("--kd_space", default="pixel", choices=["pixel", "latent"],
                     help="pixel=教师解码图上的 L1/MSE（默认, = kd1 逐位不变）| "
                          "latent=教师 latent 的 MSE（I1; 需 --z_head 1）")
-    ap.add_argument("--kd_latent_scale", type=float, default=0.18215,
-                    help="latent MSE 两边相乘的 SD 缩放因子（默认 0.18215）")
+    ap.add_argument("--kd_latent_scale", type=float, default=1.0,
+                    help="latent MSE 两边相乘的常数（默认 1.0 = 未缩放 latent 的原始 MSE）。"
+                         "⚠️ 恒定 scale 是全局缩放 ⇒ 只把损失/梯度乘 scale²，等于暗改 λ；"
+                         "要调强度请用 --kd_weight。0.18215 仅用于复现 kd2-#1 的 ckpt")
     ap.add_argument("--kd_steps", default="last",
                     help="KD 监督哪些步: last（默认, 只末步=现有行为）| all | "
                          "逗号列表（**1-based**, 如 5,6,7 = 第 5/6/7 步）; "
@@ -936,6 +938,10 @@ def main():
               f"w={kd_w}(加权平均, Σ={sum(kd_w):.2f}) render={kd_render} "
               f"start_frac={args.kd_start_frac} ramp_frac={args.kd_ramp_frac} "
               f"every={args.kd_every} | {kd_fn.describe(int(args.img_size))}", flush=True)
+        if abs(kd_scale - 1.0) > 1e-9:
+            _p(f"[kd] ⚠️ kd_latent_scale={kd_scale} ⇒ KD 项与梯度被整体乘 "
+                  f"s²={kd_scale ** 2:.4f}，**有效 λ = {float(args.kd_weight) * kd_scale ** 2:.4g}"
+                  f"**（不是 {args.kd_weight}）。除非复现历史 ckpt，否则请用 1.0", flush=True)
 
     # ── I2: val/评测出图路径（`--render sdvae` ⇒ z_hat → 冻结 teacher decoder）──
     #    默认 render=pixel ⇒ val_render_fn=None ⇒ val 与改造前逐位相同。
@@ -1117,6 +1123,9 @@ def main():
                         1.0, (step - _kst + 1) / _krp)
             kd_raw = None
             kd_mse = None
+            # 逐步诊断（2026-11-24 加）：kd2-#1 只有一个跨步平均的 kd_mse，看不出
+            # 是早期步（384 值）拖累还是末步也压不下去 ⇒ 逐步 MSE + 相对 RMS 误差。
+            kd_mse_steps = kd_rel_steps = kd_step_ids = None
             # PatchGAN 对抗权重调度（ramp 避免开局把已收敛的模型打乱）
             adv_raw = None
             lam_ratio = None
@@ -1174,11 +1183,13 @@ def main():
                             with torch.autocast("cuda", enabled=False):
                                 _kt_z = kd_fn.encode_codes(_tgt01)
                                 _z_hat = out["z_hat"].float()
-                                _terms, _plains = [], []
+                                _kt_rms = float(_kt_z.float().pow(2).mean().sqrt()) + 1e-12
+                                _terms, _plains, _rels = [], [], []
                                 for _t, _w in zip(kd_sel, kd_w):
                                     _m = latent_mse(_z_hat[:, _t], _kt_z, kd_scale)
                                     _terms.append(_w * _m)
                                     _plains.append(float(_m.detach()))
+                                    _rels.append((float(_m.detach()) ** 0.5) / _kt_rms)
                                 # 加权**平均**（除以权重和）: `--kd_weight` 始终是总 λ,
                                 # 改权重"形状"不会顺带改总强度（与 `_aggregate_loss` 的
                                 # 既有归一化口径一致; ALIT 用不归一化的 sum, 差别只是 λ 的
@@ -1186,6 +1197,8 @@ def main():
                                 _kdl = torch.stack(_terms).sum() / max(
                                     1e-12, float(sum(kd_w)))
                             kd_mse = sum(_plains) / max(1, len(_plains))
+                            kd_step_ids = [int(_t) + 1 for _t in kd_sel]
+                            kd_mse_steps, kd_rel_steps = _plains, _rels
                         else:
                             # ── 像素（默认, = kd1 原样: 只末步、L1/MSE 到教师解码图）──
                             _kt01 = kd_fn(_tgt01)
@@ -1280,8 +1293,20 @@ def main():
                         rec["kd"] = round(kd_raw, 5)
                         if kd_mse is not None:      # latent 臂: 未乘 λ/未加权的原始 MSE
                             rec["kd_mse"] = round(kd_mse, 6)
+                            if kd_mse_steps is not None:
+                                rec["kd_mse_steps"] = {
+                                    str(k): round(v, 6)
+                                    for k, v in zip(kd_step_ids, kd_mse_steps)}
+                                rec["kd_rel_steps"] = {
+                                    str(k): round(v, 4)
+                                    for k, v in zip(kd_step_ids, kd_rel_steps)}
                             _rfid_txt += (f" kd_mse={kd_mse:.5f}"
                                           f" kd={kd_raw:.4f}(λ={kd_lam:.4f})")
+                            if kd_mse_steps is not None:
+                                _rfid_txt += (" kd8=[" + ",".join(
+                                    f"{v:.4f}" for v in kd_mse_steps) + "]")
+                                _rfid_txt += (" zrel=[" + ",".join(
+                                    f"{v:.3f}" for v in kd_rel_steps) + "]")
                         else:
                             _rfid_txt += f" kd={kd_raw:.4f}(λ={kd_lam:.4f})"
                 if gan is not None:

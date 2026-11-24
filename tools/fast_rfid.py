@@ -9,9 +9,14 @@ in memory for each decoding step (and for GT) and call pytorch-fid's exact
 (F.interpolate vs PIL), which is sub-0.1 FID.
 
 2026-11-23 I2: `--render sdvae` 把每步的图换成**冻结 teacher decoder 渲染**的
-`decode(z_hat[:,t] / kd_latent_scale)`（需要 ckpt 里 `cfg.z_head=1`）; 其余口径
+`decode(z_hat[:,t])`（需要 ckpt 里 `cfg.z_head=1`）; 其余口径
 （uint8 量化 / Inception 特征 / per-step 统计 / JSON 字段）不变。默认 `pixel` ⇒
 与提交前逐位一致（含 `--vae_roundtrip` 那一臂）。
+
+2026-11-24 修: `z_hat` 是**未缩放** latent（`MSE(z_hat·s, z_t·s)` 的最优解是
+`z_hat = z_t`，`s` 只改损失尺度）⇒ 渲染**不能**再 `/ kd_latent_scale`。
+`--kd_latent_scale` 默认改为 1.0（旧 ckpt 仍需显式传 0.18215，但注意那只影响
+"训练时 λ 被暗乘 s²"这一历史事实，不影响本脚本渲染）。
 """
 import argparse
 import json
@@ -82,10 +87,11 @@ def main():
     # I2 投放路径（2026-11-23）: 出图 = 冻结 teacher decoder 渲染 z_hat。
     # 默认 pixel ⇒ 本脚本与提交前逐位一致（含 --vae_roundtrip 那一臂）。
     ap.add_argument("--render", default="pixel", choices=["pixel", "sdvae"],
-                    help="pixel=自身像素头（默认, 逐位不变）| sdvae=z_hat→teacher.decode(z/scale), "
+                    help="pixel=自身像素头（默认, 逐位不变）| sdvae=z_hat→teacher.decode(z_hat), "
                          "需 ckpt 里 cfg.z_head=1")
-    ap.add_argument("--kd_latent_scale", type=float, default=0.18215,
-                    help="z_hat 反缩放的 SD 因子（默认 0.18215, 与训练 --kd_latent_scale 一致）")
+    ap.add_argument("--kd_latent_scale", type=float, default=1.0,
+                    help="**已不再用于渲染**（z_hat 就是未缩放 latent）。默认 1.0; 仅回填进 "
+                         "JSON 以便与训练 args 对齐（0.18215 = kd2-#1 的历史值）")
     args = ap.parse_args()
     assert args.render in ("pixel", "sdvae")
     dev = "cuda"
@@ -139,8 +145,8 @@ def main():
         rt_psnr, rt_l1 = [0.0] * T, [0.0] * T
         print(f"[fast] P0-d vae_roundtrip=on teacher={args.teacher_vae}", flush=True)
     if args.render == "sdvae":
-        print(f"[fast] render=sdvae: 每步图 = teacher.decode(z_hat[:,t]/{args.kd_latent_scale}) "
-              f"teacher={args.teacher_vae}", flush=True)
+        print(f"[fast] render=sdvae: 每步图 = teacher.decode(z_hat[:,t])（z_hat 未缩放, "
+              f"不除 scale）teacher={args.teacher_vae}", flush=True)
     seen = 0
 
     with torch.no_grad():
@@ -153,8 +159,9 @@ def main():
             tgt = out["target_pix"].float()
             if args.render == "sdvae":
                 # ── I2 投放路径: z_hat → 冻结 teacher decoder（像素头不参与）──
-                #   z_hat 是**归一化** latent（训练时乘过 scale 再算 MSE）⇒ 反缩放回去。
-                # ⚠️ z_hat 是**未缩放** latent（见 kd_loss.latent_mse 的语义）⇒ 不除 scale
+                # ⚠️ 2026-11-24 修: z_hat 是**未缩放** latent（MSE(z_hat·s, z_t·s) 的
+                #    最优解是 z_hat=z_t, s 只改损失尺度）⇒ 直接 decode, 不除 scale
+                #    （除 scale 会把 latent 放大 1/s≈5.5 倍 ⇒ 出图趋近均值图）。
                 zs = out["z_hat"].float()
                 rec01 = torch.stack([
                     ((vae.decode(zs[:, t]).sample.float() + 1.0) * 0.5

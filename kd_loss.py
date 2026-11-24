@@ -21,8 +21,13 @@ L1 只从 ~13/255 降到 9.31/255（−21%），rFID 却从 86.50 变 3.44（−
     `forward_loss = MSE(gt_code, decoded_code)`，`gt_code` 来自 frozen teacher encoder，
     且 stage-1 **没有任何像素损失**（`adaptive_vae.py:247-250`）；像素由 teacher 自己的
     decoder 渲染（`adaptive_vae.py:120-122`），对应我们的 `render=sdvae`（I2）；
-  · 尺度约定：两边都乘 SD 的 `0.18215` 再算 MSE（ALIT 对应 `mul_(0.2325)`，
-    `modules/base_tokenizers.py:52-60`），否则 MSE 被大方差通道主导。
+  · 尺度约定（**2026-11-24 更正**）：默认 `scale=1.0`，即直接回归**未缩放** latent。
+    第一版 kd2 用了 SD 的 `0.18215`，理由是"归一化后 MSE 不被大方差通道主导"——这是
+    **概念错误**：两边同乘一个正常数只把损失/梯度整体乘 `s²`（0.18215² = 0.0332，
+    即 λ 被暗削弱 30 倍），**完全不会改变各通道的相对权重**。ALIT 的 `mul_(0.2325)`
+    在其 stage-1 里无害，只因为那一阶段**只有 MSE 这一条损失**、λ 由它自己定。
+    ⇒ 我们的 KD 强度统一由 `--kd_weight` 表达；`--kd_latent_scale 0.18215` 仅保留为
+      "复现 kd2-#1 那版 ckpt"的开关（ckpt 的 args.json 会记录实际值）。
 
 本文件的两个出口
 ----------------
@@ -32,7 +37,9 @@ L1 只从 ~13/255 降到 9.31/255（−21%），rFID 却从 86.50 变 3.44（−
    的旧路径仍用它，逐位不变）。
 
 新增 `decode_latent(z)`（= `decode(z)` 的 [0,1] 包装）：`--render sdvae` 的评测路径
-（`train_linattn.py` 的 val / `tools/fast_rfid.py`）用它把 `z_hat / scale` 渲染成图。
+（`train_linattn.py` 的 val / `tools/fast_rfid.py`）用它把 `z_hat`（**未缩放**）渲染成图。
+⚠️ 绝不能写成 `z_hat / scale`：`MSE(z_hat·s, z_t·s)` 的最优解是 `z_hat = z_t`，
+   再除 `s` 等于把 latent 放大 `1/s≈5.5` 倍 ⇒ 出图趋近均值图（kd2-#1 的 Bug 1）。
 
 ⚠️ 目标分支只喂 GT（`_tgt01`），绝不喂学生输出 —— 否则 teacher 会被学生的伪影带偏，
    且"教师看 GT"这条边界在论文里要写清楚（这里看的是训练图 x，不是额外的标签信息）。
@@ -41,18 +48,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# SD 约定的 latent 缩放因子（`sd-vae-ft-mse` 的 `config.scaling_factor`，即 LDM
-# pipeline 里 `z_norm = z * 0.18215`）。ALIT 的对应常数是 `mul_(0.2325)`。
-# 作为模块常量暴露，构造函数可用 `latent_scale=` 覆盖（探针臂/换 teacher 时用）。
-LATENT_SCALE = 0.18215
+# 默认 **1.0**（= 直接回归未缩放 latent, λ 语义干净）。0.18215 是 SD 的
+# `config.scaling_factor`（`z_norm = z * 0.18215`），它属于**扩散调度**的约定，
+# 不是"给 MSE 调通道权重"的工具；见文件头的 2026-11-24 更正。
+# 保留 knob 只为复现 kd2-#1（`--kd_latent_scale 0.18215 --kd_weight 1.0`）。
+LATENT_SCALE = 1.0
 
 
 def latent_mse(pred_z: torch.Tensor, gt_z: torch.Tensor,
                scale: float = LATENT_SCALE) -> torch.Tensor:
-    """latent MSE：**两边都乘 `scale` 再算** `mean((pred*scale − gt*scale)²)`。
+    """latent MSE：`scale=1.0` 时就是 `mean((pred − gt)²)`。
 
-    · 为什么要乘：latent 各通道方差差很多，不缩放时 MSE 会被方差大的通道主导；
-      SD/ALIT 的口径都是"先归一化到 N(0,1) 量级再回归"（0.18215 / 0.2325）；
+    ⚠️ 恒定 `scale` 是**全局**缩放：`MSE(pred·s, gt·s) = s² · MSE(pred, gt)`，
+       损失值和梯度都乘 `s²`，**不改各通道比例**。所以它唯一的效果是"暗改 λ"。
+       强度请用 `--kd_weight` 表达；`scale≠1` 只用于复现历史 ckpt。
     · 纯函数、无状态、可微（pred_z 一侧建图，gt_z 一侧调用方自己 no_grad）;
     · `scale` 显式传入而不是读模块常量 ⇒ 调用方（train/fast_rfid）与 ckpt 里的
       `--kd_latent_scale` 一致，不会出现"训练一套尺度、评测另一套"。
@@ -112,8 +121,8 @@ class SDVAETeacher(nn.Module):
     def decode_latent(self, z: torch.Tensor) -> torch.Tensor:
         """z: (B,4,H/8,W/8) **未缩放** latent ⇒ (B,3,H,W) ∈ [0,1]。
 
-        评测侧 `--render sdvae` 传的是 `z_hat / scale`（把学生预测的归一化 latent
-        反缩放回 SD 的 z 尺度），与 `adaptive_vae.py:120-122`
+        ⚠️ 传的是 `z_hat` **原值**，不要 `/ scale`（见文件头 Bug 1 说明）。
+        与 `adaptive_vae.py:120-122`
         `reconstruct_images = base_tokenizer.vae.decode(decoded_code)` 同构。
         """
         with torch.autocast("cuda", enabled=False):

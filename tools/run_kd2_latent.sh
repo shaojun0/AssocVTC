@@ -34,14 +34,18 @@ mkdir -p "$ST/s2"
 echo "[kd2] start $(date) src=$SRC epochs=$EPOCHS lr=$LR kd_weight=$KDW scale=$SCALE smoke=$SMOKE" > "$ST/status"
 
 if [ "$SMOKE" = "0" ]; then
-  # 等 GPU 空出来（最多 10 分钟；仍占用则退出，避免两个训练抢卡）
-  for i in $(seq 1 20); do
-    n=$(pgrep -f "train_linattn.py" 2>/dev/null | wc -l)
+  # 等 GPU 空出来（最多 60 分钟）。注意 kd1 的训练结束后还会串行跑 4 组
+  # fast_rfid 评测（每组 ~8 min），所以 train_linattn **和** fast_rfid 都要等。
+  for i in $(seq 1 120); do
+    n=$(pgrep -f "train_linattn.py|fast_rfid.py" 2>/dev/null | wc -l)
     [ "${n:-0}" -eq 0 ] && break
     sleep 30
   done
-  n=$(pgrep -f "train_linattn.py" 2>/dev/null | wc -l)
-  if [ "${n:-0}" -ne 0 ]; then echo "[kd2] ABORT: GPU busy ($n procs)" >> "$ST/status"; exit 1; fi
+  n=$(pgrep -f "train_linattn.py|fast_rfid.py" 2>/dev/null | wc -l)
+  if [ "${n:-0}" -ne 0 ]; then
+    echo "[kd2] ABORT: GPU busy ($n procs) $(date)" >> "$ST/status"; exit 1
+  fi
+  echo "[kd2] GPU free $(date)" >> "$ST/status"
 fi
 
 COMMON="--data_dir /root/autodl-tmp/datasets/imagenet100 --img_size 256 --patch 16 --num_specials 256 \

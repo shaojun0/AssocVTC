@@ -28,7 +28,8 @@ sys.path.insert(0, _ROOT)                    # 让 `model_v2_linattn` / `kd_loss
 import kd_loss                                            # noqa: E402
 from model_v2_linattn import LinAttnConfig, SRPhase1LinAttn  # noqa: E402
 
-SCALE = 0.18215
+SCALE = 1.0          # 2026-11-24: 默认改为原始 latent MSE（0.18215 只是历史 ckpt 的 knob）
+LEGACY_SCALE = 0.18215
 FAILED = []
 
 
@@ -113,18 +114,23 @@ def t_off_is_old():
             f"forward 无 z_hat; 开时多 {len(k_on - k_off)} 个 z_head.* key")
 
 
-# ── 4. latent_mse == 手算（按 scale 缩放后）────────────────────────────────────
+# ── 4. latent_mse == 手算 + **恒定 scale 只是全局缩放**（kd2-#1 Bug 2 的回归测试）──
 def t_latent_mse():
     torch.manual_seed(0)
     a, b = torch.randn(2, 4, 8, 8), torch.randn(2, 4, 8, 8)
-    for s in (SCALE, 1.0, 0.5):
+    for s in (SCALE, LEGACY_SCALE, 0.5):
         got = float(kd_loss.latent_mse(a, b, s))
         want = float(((a * s - b * s) ** 2).mean())
         assert abs(got - want) <= 1e-7 * max(1.0, abs(want)), (s, got, want)
     assert abs(float(kd_loss.LATENT_SCALE) - SCALE) < 1e-12, kd_loss.LATENT_SCALE
     assert abs(float(kd_loss.latent_mse(a, b)) - float(
         kd_loss.latent_mse(a, b, SCALE))) < 1e-12, "默认 scale 不是 LATENT_SCALE"
-    return f"scale∈{{0.18215,1.0,0.5}} 均与 ((a·s−b·s)²).mean() 一致; LATENT_SCALE={SCALE}"
+    # 回归: MSE(a·s, b·s) = s²·MSE(a,b) ⇒ scale 不改通道权重、只暗改 λ（kd2-#1 病因）
+    base = float(kd_loss.latent_mse(a, b, 1.0))
+    for s in (LEGACY_SCALE, 0.5):
+        assert abs(float(kd_loss.latent_mse(a, b, s)) - s * s * base) <= 1e-6 * max(1.0, base), s
+    return (f"scale∈{{1.0,0.18215,0.5}} 与 ((a·s−b·s)²).mean() 一致; "
+            f"LATENT_SCALE={SCALE}; 且 MSE(a·s,b·s)=s²·MSE(a,b)（全局缩放）")
 
 
 # ── 5. teacher（需要 diffusers + 本地 sd-vae 权重; 缺 ⇒ SKIP）──────────────────

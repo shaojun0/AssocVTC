@@ -2453,7 +2453,7 @@ if __name__ == "__main__":
     assert n_zh < 1_000_000, f"z_head 参数 {n_zh:,} 应远小于 1M"
     torch.manual_seed(7)
     _z_t = torch.randn_like(o_z1["z_hat"])
-    _zloss = F.mse_loss(o_z1["z_hat"] * 0.18215, _z_t * 0.18215)
+    _zloss = F.mse_loss(o_z1["z_hat"], _z_t)   # 2026-11-24: 默认 scale=1.0
     _zloss.backward()
 
     def _gmax(mod):
@@ -2473,8 +2473,7 @@ if __name__ == "__main__":
         o_h = m_h(torch.randn(2, 3, _H, _H))
         assert o_h["z_hat"].shape == (2, 3, 4, _H // 8, _H // 8), o_h["z_hat"].shape
         # 只有 latent 损失才把梯度送到 z_head（重建损失不看 z_hat, 梯度应为 0）
-        F.mse_loss(o_h["z_hat"] * 0.18215,
-                   torch.zeros_like(o_h["z_hat"])).backward()
+        F.mse_loss(o_h["z_hat"], torch.zeros_like(o_h["z_hat"])).backward()
         assert _gmax(m_h.z_head) > 0
     print("    H=64 ⇒ z_hat (2,3,4,8,8) / H=128 ⇒ (2,3,4,16,16); 反传后 z_head 仍有梯度 OK")
 
