@@ -1,0 +1,29 @@
+{
+ "psnr": 15.047776664733886,
+ "ssim": 0.5039062271118164,
+ "l1": 0.13134886765480042,
+ "n": 1000,
+ "vendor": "mimo26_flash",
+ "lab": "Xiaomi/MiMo",
+ "note": "MiMo-V2.6-Flash vision (28L, 1280d, patch16, window attn)",
+ "repo": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+ "enc_res": 448,
+ "feat_shape": [
+  4096,
+  14,
+  14
+ ],
+ "feat_values": 802816,
+ "grid": 16,
+ "grid_native": 14,
+ "grid_mode": "native",
+ "dec_width": 256,
+ "dec_params": 3418115,
+ "train_images": 20000,
+ "val_images": 1000,
+ "steps": 1875,
+ "train_sec": 4204.1,
+ "img_per_s": 14.3,
+ "tag": "run1",
+ "gpu": "2"
+}

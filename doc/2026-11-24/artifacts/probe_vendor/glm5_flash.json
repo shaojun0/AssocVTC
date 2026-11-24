@@ -1,0 +1,29 @@
+{
+ "psnr": 14.347830032348632,
+ "ssim": 0.4857737605571747,
+ "l1": 0.14361170196533204,
+ "n": 1000,
+ "vendor": "glm5_flash",
+ "lab": "Zai/GLM",
+ "note": "GLM-5.3-Flash vision (24L, 1024d, patch14)",
+ "repo": "zai-org/GLM-5.3-Flash",
+ "enc_res": 448,
+ "feat_shape": [
+  4096,
+  16,
+  16
+ ],
+ "feat_values": 1048576,
+ "grid": 16,
+ "grid_native": 16,
+ "grid_mode": "native",
+ "dec_width": 256,
+ "dec_params": 3418115,
+ "train_images": 20000,
+ "val_images": 1000,
+ "steps": 1875,
+ "train_sec": 3509.8,
+ "img_per_s": 17.1,
+ "tag": "run1",
+ "gpu": "0"
+}

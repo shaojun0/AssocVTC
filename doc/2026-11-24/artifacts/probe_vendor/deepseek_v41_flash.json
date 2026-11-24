@@ -1,0 +1,29 @@
+{
+ "psnr": 25.810722915649414,
+ "ssim": 0.7402973365783692,
+ "l1": 0.036192707002162934,
+ "n": 1000,
+ "vendor": "deepseek_v41_flash",
+ "lab": "DeepSeek",
+ "note": "DeepSeek-V4.1-Flash-1017 ViT (32L, 1024d, patch14)",
+ "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+ "enc_res": 448,
+ "feat_shape": [
+  1024,
+  32,
+  32
+ ],
+ "feat_values": 1048576,
+ "grid": 32,
+ "grid_native": 32,
+ "grid_mode": "native",
+ "dec_width": 256,
+ "dec_params": 2041091,
+ "train_images": 20000,
+ "val_images": 1000,
+ "steps": 1875,
+ "train_sec": 4556.8,
+ "img_per_s": 13.2,
+ "tag": "run1",
+ "gpu": "3"
+}

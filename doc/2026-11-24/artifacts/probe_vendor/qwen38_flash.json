@@ -1,0 +1,29 @@
+{
+ "psnr": 15.882892105102538,
+ "ssim": 0.5046212928295135,
+ "l1": 0.1145439887046814,
+ "n": 1000,
+ "vendor": "qwen38_flash",
+ "lab": "Alibaba/Qwen",
+ "note": "Qwen3.8-Flash-Next vision (27L, 1152d, patch16)",
+ "repo": "Qwen/Qwen3.8-Flash-Next",
+ "enc_res": 512,
+ "feat_shape": [
+  4608,
+  16,
+  16
+ ],
+ "feat_values": 1179648,
+ "grid": 16,
+ "grid_native": 16,
+ "grid_mode": "native",
+ "dec_width": 256,
+ "dec_params": 3549187,
+ "train_images": 20000,
+ "val_images": 1000,
+ "steps": 1875,
+ "train_sec": 3386.2,
+ "img_per_s": 17.7,
+ "tag": "run1",
+ "gpu": "1"
+}
