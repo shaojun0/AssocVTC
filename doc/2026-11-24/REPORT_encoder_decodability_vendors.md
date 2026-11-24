@@ -22,7 +22,7 @@
 
 ## 2. 核心结果：**同一个编码器，两个出口差 7–9 dB**
 
-这些多模态模型的视觉链是 `图像 → ViT → token →（merger/投影）→ LLM`：
+这些多模态模型的视觉链是 `图像 → ViT → token →（merger/投影）→ LLM`。逐组结果（PSNR/SSIM/L1、特征形状、参数量、步数）见 `artifacts/probe_vendor2/pre/*.json` 与 `post/*.json`：
 
 | 编码器 | ViT 出口（merger 之前） | LLM 入口（merger 之后） | Δ |
 |---|---|---|---|
@@ -65,8 +65,8 @@ row-major / 转置 / pixel-unshuffle / **随机打乱** 喂给解码器。**随�
 
 ## 5. 图像证据
 
-- `artifacts/probe_vendor2/grids_pre/`：ViT 出口，GLM 22.91 dB 能清楚认出鸟
-- `artifacts/probe_vendor2/grids_post/`：LLM 入口，GLM 14.23 dB 只剩色块
+- `artifacts/probe_vendor2/pre/grids/`：ViT 出口，GLM 22.91 dB 能清楚认出鸟
+- `artifacts/probe_vendor2/post/grids/`：LLM 入口，GLM 14.23 dB 只剩色块
 - `artifacts/probe_vendor/`：全预算 LLM 入口的 4 张对照图
 
 ## 6. 口径与 caveat
