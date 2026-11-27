@@ -1,0 +1,27 @@
+{
+ "ckpt": "/root/autodl-tmp/v20_224/s1/ckpt_best.pt",
+ "tag": "s1_stage1",
+ "n_images": 5000,
+ "K": 32,
+ "zs_dim": 1248,
+ "recurrent": false,
+ "T": 1,
+ "cum_z_s": [
+  32
+ ],
+ "img_size": 224,
+ "patch": 16,
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)",
+ "vae_roundtrip": false,
+ "teacher_vae": null,
+ "per_step": {
+  "1": {
+   "step": 1,
+   "cum_z_s": 32,
+   "values": 39936,
+   "psnr": 32.106528881835935,
+   "l1_255": 4.756491037756205,
+   "rfid": 6.6566263880076235
+  }
+ }
+}

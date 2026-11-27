@@ -1,0 +1,4 @@
+[s3] wrapper start 2026-11-27T21:50:35+08:00
+[s3] attempt 1 2026-11-27T21:50:35+08:00 --init_from /root/autodl-tmp/v20_224/s2/ckpt_best.pt
+[s3] attempt 1 rc=0 2026-11-28T05:34:10+08:00
+[s3] rc=0 2026-11-28T05:34:10+08:00

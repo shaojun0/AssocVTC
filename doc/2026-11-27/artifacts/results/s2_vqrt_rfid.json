@@ -1,0 +1,22 @@
+{
+ "ckpt": "/root/autodl-tmp/v20_224/s2/ckpt_best.pt",
+ "tag": "pixel_then_vq",
+ "n_images": 5000,
+ "img_size": 224,
+ "render": "pixel_then_vq",
+ "vq_ckpt": "/root/autodl-tmp/vq/llamagen_vq16_c2i.pt",
+ "vq_vocab": 16384,
+ "vq_grid": [
+  14,
+  14
+ ],
+ "rfid_pixel": 19.74150773263659,
+ "rfid_pixel_vq_roundtrip": 23.290444151558006,
+ "psnr_pixel": 28.057606216430663,
+ "psnr_pixel_vq_roundtrip": 21.34525087890625,
+ "l1_255_pixel": 7.0520441862344745,
+ "l1_255_pixel_vq_roundtrip": 15.49037018609047,
+ "wall_sec": 564.4038364887238,
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)",
+ "note": "rec_pixel_vq = tokenizer.recon(像素重建图); 用于把「VQ 渲染失真」与「模型重建」分开"
+}

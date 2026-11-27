@@ -1,0 +1,8 @@
+{
+ "n_per_half": 2000,
+ "images_used": 4000,
+ "split": "val items even/odd (class-balanced 20/class)",
+ "fid_ger_vs_gt": 26.5304031236451,
+ "fid_rev": 26.530403039262808,
+ "note": "\u540c\u4e00 GT \u5206\u5e03\u7684\u4e24\u4efd\u72ec\u7acb 2000 \u6837\u672c \u21d2 \u6709\u9650\u6837\u672c\u566a\u58f0\u5e95\uff08rFID \u7edd\u5bf9\u91cf\u7ea7\u53c2\u7167\uff09"
+}

@@ -1,0 +1,21 @@
+{
+ "n": 2000,
+ "img_size": 224,
+ "tokenizer": "VQGAN-f16-1024",
+ "checkpoint": "/root/autodl-tmp/vq/vqgan_f16_1024_last.ckpt",
+ "rfid": 32.40363936984113,
+ "psnr": 19.23199040222168,
+ "l1_255": 20.12292485654354,
+ "wall_sec": 1045.8520874977112,
+ "grid": [
+  14,
+  14
+ ],
+ "n_embed": 1024,
+ "ids_per_image": 196,
+ "codebook_dim": 256,
+ "val_per_class": 50,
+ "subset": "deterministic val split, first n=2000 items (class-ordered prefix, no shuffle)",
+ "device": "cpu",
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)"
+}

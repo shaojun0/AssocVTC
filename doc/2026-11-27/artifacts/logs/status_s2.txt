@@ -1,0 +1,4 @@
+[s2] wrapper start 2026-11-27T13:38:45+08:00
+[s2] attempt 1 2026-11-27T13:38:45+08:00 --resume /root/autodl-tmp/v20_224/s2/ckpt_last.pt
+[s2] attempt 1 rc=0 2026-11-27T21:49:01+08:00
+[s2] rc=0 2026-11-27T21:49:01+08:00

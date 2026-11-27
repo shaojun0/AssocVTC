@@ -1,0 +1,1589 @@
+"""
+训练脚本 — AssocVTC 实验版 (linattn): 无预训练编码器
+=========================================================
+
+从零训练 `model_v2_linattn.SRPhase1LinAttn`（线性注意力编码器 ~31.9M +
+普通注意力解码器 ~31.2M）在 ImageNet-100 上做 224×224 → 224×224 像素重建。
+
+    torchrun --nproc_per_node=1 train_linattn.py --output_dir out/linattn_k64
+
+**单卡默认路径逐位不变**; 设了 `WORLD_SIZE>1`（torchrun 注入）时自动启用 DDP:
+    torchrun --nproc_per_node=2 train_linattn.py ...   # ⇒ 2 卡 DDP
+`--batch_size` 始终是**全局等效批量**, 每卡 micro = batch_size/(accum_steps×world);
+steps/epoch、优化器、调度、等效批量语义全部与单卡完全相同（2026-11-04 双卡提速改造）。
+
+训练量: 121,689 train / 5,000 val（100 类 × 50 张等距抽取）;
+batch 128 时 drop_last ⇒ **950 步/epoch**, 60 epoch = 57,000 步 ≈ 5.7h @ ~357 img/s。
+
+关键超参（默认值）:
+    lr 3e-4 (AdamW, cosine + warmup 5%), wd 0.05, grad_clip 1.0, bf16 autocast,
+    L1 像素损失（归一化空间, 与主线同口径）。
+
+产出（output_dir 下）:
+    ckpt_last.pt / ckpt_best.pt   —— 含 cfg / args / 指标
+    train_log.jsonl               —— 逐步日志
+    status.json                   —— 监控用快照（step/epoch/loss/psnr/eta）
+    samples/*.png                 —— 输入 | 重建 对照网格
+    eval_val.json                 —— 最后一次验证的完整指标（含基线）
+"""
+
+import argparse
+import contextlib
+import json
+import math
+import os
+import time
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+try:                                  # 真 torchvision（CUDA 机器口径不变）
+    from torchvision.utils import make_grid, save_image
+    _ = make_grid                     # 空壳 torchvision: 能 import 但没有 make_grid
+except (ImportError, AttributeError):
+    # MUSA 训练机（connect.sha1）上的 torchvision 是空壳 ⇒ 纯 PIL/torch 替身
+    from tvmini import make_grid, save_image
+
+from data_linattn import build_loaders
+from kd_loss import latent_mse          # kd_loss 顶部只 import torch（diffusers 惰性）
+from metrics_linattn import psnr, ssim, per_patch_dc_baseline
+from model_v2_linattn import (IMAGENET_MEAN, IMAGENET_STD, LinAttnConfig,
+                              SRPhase1LinAttn, patches_to_image,
+                              parse_loss_weights)
+
+
+# ─────────────────────── 设备适配（MUSA / CUDA） ───────────────────────
+# MUSA 训练机（4×MTT S4000, torch_musa）实测: `torch.cuda` 是 MUSA 的别名
+# （`.to("cuda")`、无参 `.cuda()`、`autocast("cuda")` 都可用），但
+#   * `Tensor.cuda(device)` / `.cuda(non_blocking=True)` / `nn.Module.cuda()`
+#     会报 "takes 1 positional argument"（torch_musa 的 Tensor.cuda 只收 self）
+#   * 集合通信后端是 MCCL（启动脚本里 DDP_BACKEND=mccl）
+# ⇒ 全程改用 `.to(_DEVICE, ...)`；单卡/ DDP 都把 _DEVICE 钉到本 rank 的卡。
+_DEVICE = torch.device("cuda", 0)
+
+
+def _set_device(index: int = 0) -> None:
+    """把 `_DEVICE` 钉到 `cuda:index`（MUSA 下即 musa:index）；CUDA 上等价。"""
+    global _DEVICE
+    _DEVICE = torch.device("cuda", int(index))
+    try:
+        torch.cuda.set_device(int(index))
+    except Exception:
+        pass
+
+
+def _patch_ddp_pre_forward_musa(ddp_model) -> None:
+    """绕开 MUSA 上 DDP 的 c10d logger timer 崩溃（保留 DDP 的 bucket 重叠）。
+
+    torch 2.11 + torch_musa 的 `DDP._pre_forward` 在第二次 forward 调
+    `self.logger.set_runtime_stats_and_log()` → C++ `reducer_->timer_` 空指针
+    assert（timer 只用于日志统计）。`dist.Logger` 是 pybind 类、无法在 Python
+    侧改它的方法，所以这里**逐行照抄 torch 2.11 的 `_pre_forward`**、只删掉那
+    一行 logger 调用；其余（lazy init / bucket rebuild / buffer sync / join /
+    输入搬移 / mixed-precision cast）保持原样。这样 allreduce 仍在 backward
+    里按 bucket 异步执行，通信可与反传重叠。
+    """
+    import types
+    from torch.distributed.algorithms.join import Join
+    from torch.nn.parallel.distributed import _to_kwargs, _cast_forward_inputs
+
+    def _pre_forward(self, *inputs, **kwargs):
+        if self._use_python_reducer:
+            return inputs, kwargs
+        if not self._lazy_init_ran and not torch.compiler.is_compiling():
+            self._lazy_init()
+        if self._delay_all_reduce_all_params:
+            return inputs, kwargs
+        if torch.is_grad_enabled() and self.require_backward_grad_sync:
+            # 原实现: self.logger.set_runtime_stats_and_log()  ← MUSA timer 崩
+            self.reducer.prepare_for_forward()
+        work = Join.notify_join_context(self)
+        if work:
+            self.reducer._set_forward_pass_work_handle(
+                work, self._divide_by_initial_world_size)
+        if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+            self._has_rebuilt_buckets = True
+        if self._check_sync_bufs_pre_fwd():
+            self._sync_buffers()
+        if self._join_config.enable:
+            self._check_global_requires_backward_grad_sync(is_joined_rank=False)
+        if self.device_ids:
+            moved_inputs, moved_kwargs = _to_kwargs(
+                inputs, kwargs,
+                torch.device(self.device_type, self.device_ids[0]),
+                self.use_side_stream_for_tensor_copies)
+            args, kwargs = moved_inputs[0], moved_kwargs[0]
+            if self.mixed_precision is not None:
+                args, kwargs = _cast_forward_inputs(
+                    self.mixed_precision.param_dtype, *args, **kwargs)
+            return args, kwargs
+        if self.mixed_precision is not None:
+            inputs, kwargs = _cast_forward_inputs(
+                self.mixed_precision.param_dtype, *inputs, **kwargs)
+        return inputs, kwargs
+
+    ddp_model._pre_forward = types.MethodType(_pre_forward, ddp_model)
+
+
+class ManualDDP(nn.Module):
+    """DDP 的极简替代（MUSA 上用）：backward 后显式 all_reduce 梯度。
+
+    为什么需要：torch 2.11 + torch_musa 的 DDP 在第二次 forward 触发
+    `reducer_->timer_ INTERNAL ASSERT FAILED`（c10d logger 的 C++ timer 空指针，
+    该 timer 只用于日志统计，不参与梯度同步；`dist.Logger` 是 pybind 类，
+    Python 侧无法 monkeypatch 它的 `set_runtime_stats_and_log`）。
+    这里不复用 DDP，直接用 MCCL 的 `dist.all_reduce` 做梯度平均：
+        * 初始化后从 rank0 广播一遍参数（各 rank seed 相同本已一致，广播只为保险）;
+        * 每个优化步的最后一次 micro-batch 之后对全部 `p.grad` 做 SUM 再 /world;
+        * `no_sync()` 期间只累积本地梯度（等价 DDP 的 no_sync）。
+    语义与 `DistributedDataParallel`（默认 allreduce、梯度取均值）一致；
+    少了 bucket/通信-反传重叠，本模型 486M 参数、单步通信量 ~1.95GB，实测可接受。
+    """
+
+    def __init__(self, module: nn.Module, world: int):
+        super().__init__()
+        self.module = module
+        self.world = int(world)
+        self._require_sync = True
+
+    def forward(self, *a, **kw):
+        return self.module(*a, **kw)
+
+    @contextlib.contextmanager
+    def no_sync(self):
+        old = self._require_sync
+        self._require_sync = False
+        try:
+            yield
+        finally:
+            self._require_sync = old
+
+    def allreduce_gradients(self) -> None:
+        if not self._require_sync or self.world <= 1:
+            return
+        for prm in self.module.parameters():
+            if prm.grad is None:
+                continue
+            dist.all_reduce(prm.grad, op=dist.ReduceOp.SUM)
+            prm.grad.div_(self.world)
+
+
+_DIAG_GRAD = os.environ.get("DIAG_GRAD", "0") == "1"
+
+# ── SDPA 后端选择（2026-11-17: MUSA 上 bf16 的 flash/mem-efficient 反向数值不稳）──
+# 实测（doc/2026-11-17/REPORT_musa_instability.md）: 同一权重、同一 batch 下，
+# bf16-autocast 的编码器梯度可比 fp32 大 30–230 倍；换 math 后端后该差异基本消失。
+# SDPA_BACKEND=math|flash|mem_efficient（空 = 不干预，CUDA 机器默认行为不变）。
+_SDPA_BACKEND = os.environ.get("SDPA_BACKEND", "").strip().lower()
+if _SDPA_BACKEND:
+    try:
+        if _SDPA_BACKEND == "math":
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+        elif _SDPA_BACKEND == "flash":
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        elif _SDPA_BACKEND == "mem_efficient":
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+        print(f"[sdpa] backend={_SDPA_BACKEND}", flush=True)
+    except Exception as _e:            # CUDA 老版本无这些开关时静默降级
+        print(f"[sdpa] 设置 {_SDPA_BACKEND} 失败（忽略）: {_e}", flush=True)
+
+
+def _grad_group_norms(model) -> dict:
+    """按模块分组统计梯度范数（诊断用; 只有 DIAG_GRAD=1 才调用）。
+
+    用途: 定位「训练后期 grad_norm 爆到几百」到底来自编码器、448 维瓶颈 FC、
+    解码器 memory 投影，还是解码器 stack 的某几层。
+    """
+    groups = {k: 0.0 for k in ("enc", "zs_fc", "dec_mem", "dec_stack0_2",
+                               "dec_stack3_4", "dec_stack5_6", "dec_head",
+                               "other")}
+    for n, prm in model.named_parameters():
+        if prm.grad is None:
+            continue
+        if n.startswith("encoder."):
+            k = "enc"
+        elif n.startswith(("zs_proj.", "zcls_proj.")):
+            k = "zs_fc"
+        elif n.startswith(("decoder.mem_proj.", "decoder.mem_norm.",
+                           "decoder.query_base", "decoder.query_pos")):
+            k = "dec_mem"
+        elif n.startswith("decoder.stack.layers."):
+            i = int(n.split(".")[3])
+            k = "dec_stack0_2" if i < 3 else ("dec_stack3_4" if i < 5
+                                              else "dec_stack5_6")
+        elif n.startswith(("decoder.norm_out.", "decoder.pixel_head.")):
+            k = "dec_head"
+        else:
+            k = "other"
+        groups[k] += float(prm.grad.detach().float().norm()) ** 2
+    return {k: round(v ** 0.5, 3) for k, v in groups.items() if v > 0}
+
+
+# ─────────────────────── 分布式（DDP）辅助 ───────────────────────
+
+# 单卡（或 rank0）时 _IS_MAIN=True ⇒ `_p` 与内置 `print` 行为完全一致。
+_IS_MAIN = True
+
+
+def _p(*a, **kw):
+    """rank0-only 打印（单卡路径与 `print` 逐位等价, 保证旧行为不变）。"""
+    if _IS_MAIN:
+        print(*a, **kw)
+
+
+def ddp_env():
+    """读 torchrun 注入的分布式环境变量; 未设置 ⇒ (1, 0, 0) 单卡路径。"""
+    def _i(key, default):
+        v = os.environ.get(key, "")
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+    return _i("WORLD_SIZE", 1), _i("RANK", 0), _i("LOCAL_RANK", 0)
+
+
+# ─────────────────────────── 工具 ───────────────────────────
+
+def param_groups(model: nn.Module, weight_decay: float):
+    decay, no_decay = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or n.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [{"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0}]
+
+
+def lr_at(step: int, total: int, warmup: int, base_lr: float, min_lr: float) -> float:
+    if step < warmup:
+        return base_lr * (step + 1) / max(1, warmup)
+    t = (step - warmup) / max(1, total - warmup)
+    return min_lr + (base_lr - min_lr) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, t)))
+
+
+def log_jsonl(path: str, obj: dict):
+    with open(path, "a") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def write_status(path: str, obj: dict):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def denorm01(pix: torch.Tensor, hw: int, patch: int) -> torch.Tensor:
+    """(B,N,3pp) 归一化像素 patch → (B,3,hw,hw) **[0,1]**。
+
+    ⚠️ 单位陷阱（踩过）: `IMAGENET_MEAN/STD` 是 **[0,1] 标度**（0.485/0.229），
+    所以 `patches_to_image` 反归一化后直接就是 [0,1]，**不能再除以 255**。
+    反之 `model_v2.patches_to_image` 的 mean/std 口径是 0-255 标度（所以那里
+    才需要 /255）。本函数用 clamp_255=False 关掉 0-255 截断，改成显式
+    clamp(0,1)（预测可能越界, 截断到有效像素范围后再算 PSNR/SSIM 才公平）。
+    """
+    img = patches_to_image(pix, hw, hw, patch, IMAGENET_MEAN, IMAGENET_STD,
+                           clamp_255=False)
+    return img.clamp(0.0, 1.0)
+
+
+def save_pair_grid(inp01: torch.Tensor, rec01: torch.Tensor, path: str, n: int = 8):
+    """上排原图 / 下排重建, 各 n 张。"""
+    n = min(n, inp01.shape[0])
+    a = make_grid(inp01[:n], nrow=n, padding=2, value_range=(0, 1))
+    b = make_grid(rec01[:n], nrow=n, padding=2, value_range=(0, 1))
+    canvas = torch.cat([a, torch.ones(3, 4, a.shape[2], device=a.device), b], dim=1)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    save_image(canvas, path)
+
+
+# ─────────────────────────── 验证 ───────────────────────────
+
+@torch.no_grad()
+def evaluate(model, loader, patch: int, img_size: int, amp: bool,
+             max_batches: int = 0, save_grid: str = "", max_images: int = 0,
+             render_fn=None):
+    """val 指标。`render_fn=None`（默认）⇒ 出图走自身像素头（逐位不变）;
+    给定 `render_fn(out)->(B,3,H,W)∈[0,1]` ⇒ 出图走**投放路径**（I2: z_hat→teacher
+    decoder）。注意: 后者的 PSNR/SSIM 与自身像素头**不可直接比**, 见调用处日志标注。
+    """
+    model.eval()
+    # 按图数加权（与 eval_linattn 同口径; 早期按批等权会系统性偏低 ~0.06dB）
+    tot = {"l1": 0.0, "p": 0.0, "s": 0.0, "dc": 0.0, "c": 0.0}
+    n_img = 0
+    grid_in, grid_rec = [], []
+    const01 = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+    for bi, (x, _) in enumerate(loader):
+        if max_batches and bi >= max_batches:
+            break
+        x = x.to(_DEVICE, non_blocking=True)
+        if max_images and n_img >= max_images:
+            break
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            out = model(x)
+        Bb = x.shape[0]
+        if render_fn is None:
+            tot["l1"] += float(F.l1_loss(out["F_hat"].float(),
+                                         out["target_pix"].float())) * Bb
+            rec01 = denorm01(out["F_hat"].float(), img_size, patch)
+        else:
+            # 投放路径（I2）: l1 也必须在**渲染图上**算, 否则 l1 与 psnr/ssim 不同口径
+            rec01 = render_fn(out)
+            tot["l1"] += float(F.l1_loss(rec01, denorm01(
+                out["target_pix"].float(), img_size, patch))) * Bb
+        tgt01 = denorm01(out["target_pix"].float(), img_size, patch)
+        # ★运行时护栏: 反归一化单位口径一旦再写错（多除 255）, 目标图均值会从
+        #   ~0.45 掉到 ~0.0018, PSNR/SSIM 会整体虚高 ~48dB —— 直接报错而不是
+        #   产出一份"看着很漂亮"的错误指标（2026-10-15 独立审查 finding 3）。
+        assert 0.02 < float(tgt01.mean()) < 0.98, (
+            f"反归一化单位口径疑似错误: tgt01.mean()={float(tgt01.mean()):.6f} "
+            f"(真实图像应≈0.45)")
+        tot["p"] += float(psnr(rec01, tgt01).sum())
+        tot["s"] += float(ssim(rec01, tgt01).sum())
+        tot["dc"] += float(per_patch_dc_baseline(tgt01, patch).sum())
+        # 常数均值图基线: 拿"ImageNet 均值图"去和**真实 val 目标**比（不是和黑图比）
+        tot["c"] += float(psnr(const01.expand_as(tgt01).to(tgt01.device),
+                               tgt01).sum())
+        n_img += x.shape[0]
+        if save_grid and len(grid_in) * x.shape[0] < 8:
+            grid_in.append(tgt01[:4].cpu())
+            grid_rec.append(rec01[:4].cpu())
+    model.train()
+    res = {
+        "n_images": n_img,
+        "l1_norm": tot["l1"] / max(1, n_img),
+        "psnr": tot["p"] / max(1, n_img),
+        "ssim": tot["s"] / max(1, n_img),
+        "psnr_mean_image_baseline": tot["c"] / max(1, n_img),
+        "psnr_patch_dc_baseline": tot["dc"] / max(1, n_img),
+        "pred_clamped_to_01": True,   # 指标用 clamp(0,1) 后的预测（基线天然在域内）
+    }
+    res["psnr_gain_over_patch_dc"] = res["psnr"] - res["psnr_patch_dc_baseline"]
+    if save_grid and grid_in:
+        save_pair_grid(torch.cat(grid_in), torch.cat(grid_rec), save_grid, 8)
+    return res
+
+
+# ─────────────────────── 阶段3-CE 验证（token 交叉熵） ───────────────────────
+
+@torch.no_grad()
+def evaluate_token(model, loader, vq, mean01, std01, amp: bool,
+                   max_batches: int = 0):
+    """阶段3-CE 的 val 指标: token 交叉熵 + top-1 准确率（按图数加权, 逐步平权）。
+
+    与像素版 `evaluate` 完全同协议: 同一个 val 划分/同一批数/同一 max_batches;
+    唯一区别是"重建质量"换成"对图像 tokenizer 离散码的预测质量"。
+    """
+    model.eval()
+    n = 0
+    ce_sum, acc_sum = 0.0, 0.0
+    ce_ps = acc_ps = None
+    for bi, (x, _) in enumerate(loader):
+        if max_batches and bi >= max_batches:
+            break
+        x = x.to(_DEVICE, non_blocking=True)
+        x01 = (x.float() * std01 + mean01).clamp(0.0, 1.0)
+        ids = vq.encode_ids(x01)                     # (B,N) long, 无梯度
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(amp)):
+            out = model(x, target_ids=ids)
+        Bb = x.shape[0]
+        ce_sum += float(out["tok_ce"]) * Bb
+        acc_sum += float(out["tok_acc"]) * Bb
+        cps = out["tok_ce_per_step"].float().cpu() * Bb
+        aps = out["tok_acc_per_step"].float().cpu() * Bb
+        ce_ps = cps if ce_ps is None else ce_ps + cps
+        acc_ps = aps if acc_ps is None else acc_ps + aps
+        n += Bb
+    model.train()
+    d = max(1, n)
+    return {
+        "n_images": n,
+        "tok_ce": ce_sum / d,
+        "tok_acc": acc_sum / d,
+        "tok_ce_per_step": [float(v) / d for v in (ce_ps if ce_ps is not None else [])],
+        "tok_acc_per_step": [float(v) / d for v in (acc_ps if acc_ps is not None else [])],
+        "T": 0 if ce_ps is None else int(len(ce_ps)),
+    }
+
+
+# ─────────────────────────── 主流程 ───────────────────────────
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_dir", default="/root/autodl-tmp/datasets/imagenet100")
+    ap.add_argument("--output_dir", default="output/linattn_k64")
+    ap.add_argument("--img_size", type=int, default=224)
+    ap.add_argument("--patch", type=int, default=16)
+    ap.add_argument("--num_specials", type=int, default=64, help="K: z_s 压缩 token 数")
+    ap.add_argument("--special_init_std", type=float, default=0.02,
+                    help="special token 初始化标准差（默认 0.02 = 原行为; 2026-10-22 "
+                         "K≥128 A 相坍缩诊断的对称性探针）")
+    # 编码器
+    ap.add_argument("--enc_dim", type=int, default=448)
+    ap.add_argument("--enc_depth", type=int, default=13)
+    ap.add_argument("--enc_heads", type=int, default=8)
+    ap.add_argument("--enc_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--enc_dwconv", type=int, default=1)
+    ap.add_argument("--enc_qk_norm", type=int, default=1,
+                    help="线性注意力 QK-Norm（稳定性修复 1, 见模型 docstring）")
+    ap.add_argument("--enc_attn", default="linear",
+                    choices=["linear", "linattn", "std", "standard", "softmax"],
+                    help="编码器注意力形式: linear=昨日臂(线性注意力, 默认); "
+                         "std=**普通 transformer** softmax 缩放点积注意力（消融臂）")
+    ap.add_argument("--enc_std_qk_norm", type=int, default=0,
+                    help="enc_attn=std 时的 QK-Norm（默认 0 = 普通 transformer 原貌）")
+    ap.add_argument("--dec_recurrent", type=int, default=0,
+                    help="1 = 循环读出（主线口径, 每步只读自己那块 z_s, BPTT carry）")
+    ap.add_argument("--dec_parallel", type=int, default=0,
+                    help="1 = 并行读出（v9 口径: T 步折进 batch 一次前向, 无 carry, "
+                         "每步只读前缀 memory, mask 控可见性; 须 dec_attn=std）")
+    ap.add_argument("--dec_parallel_read", default="prefix",
+                    choices=["prefix", "block"],
+                    help="dec_parallel=1 的可见性: prefix=mem[0..hi]（z_cls+前 hi 个 "
+                         "z_s, 默认）; block=只读本步块（无 carry 的严格对照臂）")
+    ap.add_argument("--dec_steps", default="",
+                    help="逗号分隔采样步; 空 = square_block_starts(K)（K=64 → 8 步）")
+    ap.add_argument("--step_plan", default="square",
+                    choices=["square", "fixed", "cumulative"],
+                    help="读窗口计划: square=默认主线口径; fixed=每步固定 block 个; "
+                         "cumulative=dec_steps 解释为每步累计 z_s 数（固定 T 步 × 总预算 K "
+                         "的消融, 生成器 model_v2_linattn.scaled_square_cumsum）")
+    ap.add_argument("--block", type=int, default=0,
+                    help="plan=fixed 时每步读入的 z_s 数（默认 0 = 不用）")
+    ap.add_argument("--allow_k_gt_n", type=int, default=0,
+                    help="1 = 显式允许 K>N（预算超过 patch 数, 已不是压缩; "
+                         "仅 2026-10-21 的 K=256 探针臂）")
+    ap.add_argument("--dec_attn", default="std", choices=["std", "linear"],
+                    help="解码器注意力形式: std=nn.TransformerDecoder softmax（默认）; "
+                         "linear=自注意力与交叉注意力都用线性注意力（**全线性**臂）")
+    ap.add_argument("--dec_linear_qk_norm", type=int, default=1,
+                    help="dec_attn=linear 时的 QK-Norm（默认 1 = 线性注意力稳定性修复）")
+    ap.add_argument("--dec_grad_ckpt", type=int, default=0,
+                    help="dec_attn=linear 时对解码器层做梯度检查点（数学等价, 反向重算; "
+                         "全线性+BPTT 在 bs64 会 OOM, 置 1 可放进显存）")
+    ap.add_argument("--freeze_encoder", type=int, default=0,
+                    help="1 = 冻结编码器（只训解码器; 逐步精炼实验用）")
+    # ── E-B1..B4（全部「新增 + 默认关」; 见 PLAN_alit_adaptive_experiments.md §4/§6）──
+    ap.add_argument("--loss_weights", nargs="*", default=[],
+                    help="E-B1 逐迭代损失权重: 逗号或空格分隔（如 "
+                         "'2.5,2,1.5,1.25,1,1,1,1'）; 空 = 平权（现状）; "
+                         "也支持 '--loss_weights 2.5 2 1.5 ...'; 长度须 = T 或 1（广播）")
+    ap.add_argument("--dh_mode", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="E-B2 损失侧动态停机: 0=关(现状); 1=硬区域掩码(第t步只监督"
+                         "region_t 行区); 2=软停机(按上一步逐patch误差的每图分位); "
+                         "3=2 + 已完成 patch 的 carry stop-gradient")
+    ap.add_argument("--dh_quantile", type=float, default=0.5,
+                    help="dh_mode 2/3 的分位阈值: 0.5 = 保留误差最大的 50%% patch")
+    ap.add_argument("--sample_grad_iters", type=int, default=0,
+                    help="E-B4 随机预算采样: >0 时每步随机抽 2..N 个迭代算 loss "
+                         "（其余步只前向）; 0 = 全步（现状）")
+    ap.add_argument("--refiner_layers", type=int, default=0,
+                    help="E-B3 读侧生长 GrowthBlock 层数: 0=关(现状), 1–2 "
+                         "（d=256 时 1 层≈1.05M / 2 层≈1.84M）")
+    ap.add_argument("--refiner_dim", type=int, default=256, help="GrowthBlock 内部维度")
+    ap.add_argument("--refiner_heads", type=int, default=8)
+    ap.add_argument("--refiner_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--refiner_grow", type=int, default=16,
+                    help="每步新增的生长 token 数（解码器读集合 = [z_s; L_1..L_it]）")
+    ap.add_argument("--refiner_steps", type=int, default=0,
+                    help="生长步数; 0 = 跟随解码器步数 T")
+    ap.add_argument("--zs_init", default="default", choices=["default", "ortho"],
+                    help="zs_dim 瓶颈初始化: default=nn.Linear 默认; ortho=随机正交"
+                         "子空间投影（从头训窄瓶颈时的稳定性修复, 见 _init_zs_bottleneck_ortho）")
+    ap.add_argument("--zs_dim", type=int, default=0,
+                    help="编码器末端 FC 瓶颈维数（2026-10-26; 0=关）。zs_dim=448 ⇒ "
+                         "每个 z_s token 从 enc_dim 压到 448 维、每步 2×448=896 个数、"
+                         "每图 32×448=14,336 个值（= 旧 63M 宽度）")
+    ap.add_argument("--recon_loss", default="l1", choices=["l1", "l2"],
+                    help="重建损失形式（2026-11-23）: l1=逐像素 L1（默认/主线口径）; "
+                         "l2=逐像素 MSE（直接优化 PSNR）")
+    ap.add_argument("--init_from", default="",
+                    help="warm start ckpt（循环版可从单步版 ckpt 热启动, 只缺零初始化 mem_pos）")
+    # 解码器
+    ap.add_argument("--dec_dim", type=int, default=512)
+    ap.add_argument("--dec_depth", type=int, default=7)
+    ap.add_argument("--dec_heads", type=int, default=8)
+    ap.add_argument("--dec_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--pixel_hidden", type=int, default=1024)
+    ap.add_argument("--dropout", type=float, default=0.0)
+    # 优化
+    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--batch_size", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--min_lr", type=float, default=1e-6)
+    ap.add_argument("--weight_decay", type=float, default=0.05)
+    ap.add_argument("--warmup_frac", type=float, default=0.08)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--accum_steps", type=int, default=1,
+                    help="梯度累积步数（默认 1 = 原行为逐位不变）。>1 时 loader 批量 = "
+                         "batch_size/accum_steps, **等效批量与优化步数都不变**"
+                         "（每步梯度 = accum 个 micro-batch 均值, 数学等价）, 只为把 "
+                         "BPTT 步数很大（T=16/24/32）时的激活显存放下来 "
+                         "（2026-10-23「固定 n=2 × T=16/24/32」臂: bs64 在 T=32 会 OOM）")
+    ap.add_argument("--skip_grad", type=float, default=50.0,
+                    help="clip 前 grad_norm 超过该值就跳过本步更新（0=关）; "
+                         "线性注意力低精度间歇爆炸的护栏, 见模型 docstring")
+    ap.add_argument("--amp", type=int, default=1)
+    # ── 批次 rFID（重建 FID）辅助损失（2026-11-20; 默认 0 = 关, 旧路径逐位不变）──
+    #    参考会话 session-0389af9d 结论: rFID 可微/可当损失（FastFID 2009.14075）,
+    #    但是分布级统计量 ⇒ 只作 L1 的辅助项, 小权重 + ramp + 监控 raw rFID。
+    ap.add_argument("--rfid_weight", type=float, default=0.0,
+                    help="批次 rFID 辅助损失权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--rfid_dim", type=int, default=2048,
+                    help="InceptionV3 特征维（默认 pool3=2048, 与 eval rFID 同口径）")
+    ap.add_argument("--rfid_every", type=int, default=1,
+                    help="每 k 个优化步计算一次 rFID 损失（默认 1 = 每步）")
+    ap.add_argument("--rfid_start_frac", type=float, default=0.1,
+                    help="从总步数的哪个比例开始启用 rFID（默认 0.1）")
+    ap.add_argument("--rfid_ramp_frac", type=float, default=0.1,
+                    help="rFID 权重线性 ramp 占总步数的比例（默认 0.1）")
+    ap.add_argument("--rfid_norm_dim", type=int, default=1,
+                    help="1=rFID 除以特征维（量纲稳定, 默认）; 0=用原始 rFID")
+    ap.add_argument("--perc_weight", type=float, default=0.0,
+                    help="VGG16 感知损失权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--perc_layer", default="3,8,15",
+                    help="VGG16 features 下标（逗号分隔, 默认 3,8,15 = relu1_2/2_2/3_3）")
+    ap.add_argument("--perc_resize", type=int, default=224,
+                    help="送入 VGG 的尺寸（默认 224）")
+    # ── SD-VAE 输出蒸馏（2026-11-23; 见 PLAN_distill_20261123.md）──
+    #    目标: t = D(E(gt)),  loss += w·L1(F_hat, t)（只挂末步）。
+    #    动机: 同值数下 ALIT rFID 8.25 vs 我们 86.50 ⇒ 瓶颈是解码器先验, 用 teacher 输出当监督。
+    ap.add_argument("--kd_weight", type=float, default=0.0,
+                    help="SD-VAE 输出蒸馏权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--kd_teacher", default="stabilityai/sd-vae-ft-mse",
+                    help="teacher 的 diffusers 模型 id 或本地目录")
+    ap.add_argument("--kd_local_only", type=int, default=1,
+                    help="1=只从本地 HF 缓存加载（默认; 机器访问不了 huggingface.co）")
+    ap.add_argument("--kd_loss", default="l1",
+                    help="蒸馏损失: l1（默认）| l2")
+    ap.add_argument("--kd_start_frac", type=float, default=0.05,
+                    help="从总步数的哪个比例开始启用蒸馏（默认 0.05）")
+    ap.add_argument("--kd_ramp_frac", type=float, default=0.05,
+                    help="蒸馏权重线性 ramp 占总步数的比例（默认 0.05）")
+    ap.add_argument("--kd_every", type=int, default=1,
+                    help="每 k 个优化步算一次蒸馏损失（默认 1）")
+    # ── I1/I2: 蒸馏空间（latent）+ 逐步 KD + teacher decoder 渲染（2026-11-23）──
+    #    见 doc/2026-11-23/NOTES_kd_vs_alit_code.md §3-I1/I2/I4。默认值全部 = 现有
+    #    kd1 行为 ⇒ `--kd_space pixel` 时损失路径逐位不变。
+    ap.add_argument("--kd_space", default="pixel", choices=["pixel", "latent"],
+                    help="pixel=教师解码图上的 L1/MSE（默认, = kd1 逐位不变）| "
+                         "latent=教师 latent 的 MSE（I1; 需 --z_head 1）")
+    ap.add_argument("--kd_latent_scale", type=float, default=1.0,
+                    help="latent MSE 两边相乘的常数（默认 1.0 = 未缩放 latent 的原始 MSE）。"
+                         "⚠️ 恒定 scale 是全局缩放 ⇒ 只把损失/梯度乘 scale²，等于暗改 λ；"
+                         "要调强度请用 --kd_weight。0.18215 仅用于复现 kd2-#1 的 ckpt")
+    ap.add_argument("--kd_steps", default="last",
+                    help="KD 监督哪些步: last（默认, 只末步=现有行为）| all | "
+                         "逗号列表（**1-based**, 如 5,6,7 = 第 5/6/7 步）; "
+                         "仅在 --kd_space latent 下生效")
+    ap.add_argument("--kd_step_weights", nargs="*", default=[],
+                    help="各选中步的 KD 权重（长度 = 选中步数或 1）; 空 = 等权; "
+                         "按**加权平均**归一化（除以权重和）⇒ --kd_weight 始终是总 λ; "
+                         "仅在 --kd_space latent 下生效")
+    ap.add_argument("--render", default="pixel", choices=["pixel", "sdvae"],
+                    help="评测/验证出图: pixel=自身像素头（默认, 逐位不变）| "
+                         "sdvae=z_hat→teacher.decode(z/scale)（需 --z_head 1）")
+    ap.add_argument("--z_head", type=int, default=0,
+                    help="潜变量头: 0=关（默认, state_dict 逐 key 不变）| 1=开 "
+                         "(z_hat=(B,T,4,H/8,W/8), 从每步像素预测回归教师 latent)")
+    # ── 阶段3-CE: 对齐图像 tokenizer 离散码（2026-11-26）──
+    ap.add_argument("--token_ce", type=int, default=0,
+                    help="1=阶段3-CE 臂: 每个读出步输出 codebook logits, 损失=逐步交叉熵"
+                         "（对齐图像 tokenizer 对原图的离散码）; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--vq_ckpt", default="/root/autodl-tmp/vq/llamagen_vq16_c2i.pt",
+                    help="图像 tokenizer 权重（LlamaGen VQ-16 的 vq_ds16_c2i.pt）")
+    ap.add_argument("--vq_codebook_size", type=int, default=16384,
+                    help="码本大小（LlamaGen VQ-16 = 16384）")
+    ap.add_argument("--vq_embed_dim", type=int, default=8,
+                    help="码本向量维数（LlamaGen VQ-16 = 8）")
+    ap.add_argument("--token_ce_init_pixel", type=int, default=1,
+                    help="1=token 头第一层从 --init_from ckpt 的像素头 MLP 第一层热启动"
+                         "（默认 1; 源 ckpt 无像素头时自动跳过）")
+    # ── PatchGAN 对抗微调（2026-11-22）──
+    ap.add_argument("--gan_weight", type=float, default=0.0,
+                    help="PatchGAN 对抗损失目标权重; 0=关（默认, 旧路径逐位不变）")
+    ap.add_argument("--gan_ndf", type=int, default=64, help="判别器基础通道")
+    ap.add_argument("--gan_layers", type=int, default=3,
+                    help="判别器下采样层数（3 ⇒ 70×70 感受野）")
+    ap.add_argument("--gan_d_lr", type=float, default=1e-4, help="判别器 lr")
+    ap.add_argument("--gan_start_frac", type=float, default=0.0,
+                    help="从训练进度百分之几开始加对抗项")
+    ap.add_argument("--gan_ramp_frac", type=float, default=0.05,
+                    help="对抗权重线性 ramp 的进度占比")
+    ap.add_argument("--gan_adaptive", type=int, default=1,
+                    help="1=VQGAN 自适应权重 λ=‖∇_pred L_rec‖/‖∇_pred L_adv‖×gan_weight;"
+                         " 0=固定权重")
+
+    ap.add_argument("--num_workers", type=int, default=16)
+    ap.add_argument("--val_per_class", type=int, default=50)
+    ap.add_argument("--val_batches", type=int, default=40)
+    ap.add_argument("--log_interval", type=int, default=20)
+    ap.add_argument("--sample_interval", type=int, default=2000)
+    ap.add_argument("--save_every_epochs", type=int, default=1)
+    ap.add_argument("--save_epoch_ckpts", type=int, default=0,
+                    help=">0 时每个 epoch 额外存 ckpt_ep{N}.pt（逐 epoch 评测/续训用）")
+    # 控制
+    ap.add_argument("--max_steps", type=int, default=0, help=">0 时提前停（冒烟）")
+    ap.add_argument("--stop_at_step", type=int, default=0,
+                    help=">0 时在第 N 步停**但保持 total_steps/lr 调度不变** "
+                         "（受控对照用: 让两臂走过完全相同的优化步数/学习率）")
+    ap.add_argument("--limit", type=int, default=0, help=">0 时限制训练集大小（冒烟）")
+    ap.add_argument("--time_budget_h", type=float, default=0.0, help=">0 时到点保存退出")
+    ap.add_argument("--save_every_steps", type=int, default=0,
+                    help=">0 时每 N 步覆盖保存 ckpt_last.pt（MUSA 偶发 MCCL 崩溃后续跑用; 0=关=旧行为）")
+    ap.add_argument("--save_opt", type=int, default=1,
+                    help="1 = ckpt 里存 AdamW 状态（默认, 与原行为一致）；0 = 只存 model/cfg/args"
+                         "（2026-10-24 容量阶梯: 360M 档 ckpt 含 opt 约 11.6G/个, 数据盘放不下; "
+                         "本线不 --resume, 评测/热启动只用 model 权重 ⇒ 不存 opt 无副作用）")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume", default="")
+    ap.add_argument("--smoke", action="store_true", help="冒烟: 快速配置 + 小数据")
+    return ap.parse_args()
+
+
+def build_cfg(args) -> LinAttnConfig:
+    """CLI args → `LinAttnConfig`（单独提出便于 CPU 单测: 不进 CUDA / 数据管线）。
+
+    E-B1..B4 的新参数全部「空/0 = 默认关」⇒ 与改造前的 cfg 逐字段相同。
+    """
+    return LinAttnConfig(
+        img_size=args.img_size, patch=args.patch, num_specials=args.num_specials,
+        special_init_std=float(args.special_init_std),
+        enc_dim=args.enc_dim, enc_depth=args.enc_depth, enc_heads=args.enc_heads,
+        enc_mlp_ratio=args.enc_mlp_ratio, enc_dwconv=bool(args.enc_dwconv),
+        enc_qk_norm=bool(args.enc_qk_norm), enc_attn=args.enc_attn,
+        enc_std_qk_norm=bool(args.enc_std_qk_norm),
+        dec_recurrent=bool(args.dec_recurrent), dec_steps=args.dec_steps,
+        dec_parallel=bool(getattr(args, "dec_parallel", 0)),
+        dec_parallel_read=str(getattr(args, "dec_parallel_read", "prefix")),
+        dec_step_plan=args.step_plan, dec_block=int(args.block),
+        allow_k_gt_n=bool(args.allow_k_gt_n),
+        dec_attn=args.dec_attn, dec_linear_qk_norm=bool(args.dec_linear_qk_norm),
+        dec_grad_ckpt=bool(args.dec_grad_ckpt),
+        dec_dim=args.dec_dim, dec_depth=args.dec_depth, dec_heads=args.dec_heads,
+        dec_mlp_ratio=args.dec_mlp_ratio, pixel_hidden=args.pixel_hidden,
+        dropout=args.dropout,
+        # ── E-B1..B4（空/0 = 默认关 ⇒ 旧路径逐位不变）──
+        loss_weights=tuple(parse_loss_weights(args.loss_weights)),
+        dh_mode=int(args.dh_mode), dh_quantile=float(args.dh_quantile),
+        sample_grad_iters=int(args.sample_grad_iters),
+        refiner_layers=int(args.refiner_layers), refiner_dim=int(args.refiner_dim),
+        refiner_heads=int(args.refiner_heads),
+        refiner_mlp_ratio=float(args.refiner_mlp_ratio),
+        refiner_grow=int(args.refiner_grow), refiner_steps=int(args.refiner_steps),
+        zs_dim=int(getattr(args, "zs_dim", 0)),
+        recon_loss=str(getattr(args, "recon_loss", "l1")),
+        # ── I1/I2 潜变量头（0 = 默认关 ⇒ cfg/state_dict 逐字段/逐 key 不变）──
+        z_head=int(getattr(args, "z_head", 0)),
+        # ── 阶段3-CE token 分类头（0 = 默认关 ⇒ 逐字段/逐 key 不变）──
+        token_ce=int(getattr(args, "token_ce", 0)),
+        token_vocab=int(getattr(args, "vq_codebook_size", 16384)))
+
+
+def parse_kd_steps(spec, num_steps: int):
+    """`--kd_steps` → **0-based** 步下标列表（1-based 是命令行语义, 日志里也写 1-based）。
+
+    "last"（默认）/"" ⇒ 只末步（= kd1 行为）; "all" ⇒ 全部 T 步;
+    逗号列表如 "5,6,7" ⇒ 第 5/6/7 步。越界/重复/空一律 assert（宁可启动即失败）。
+    """
+    s = str(spec).strip().lower()
+    T = int(num_steps)
+    if s in ("", "last"):
+        return [T - 1]
+    if s == "all":
+        return list(range(T))
+    out = [int(v) - 1 for v in s.split(",") if str(v).strip()]
+    assert out, f"--kd_steps={spec!r} 解析为空"
+    assert all(0 <= i < T for i in out), \
+        f"--kd_steps={spec!r} 越界（1-based, T={T}）"
+    assert len(set(out)) == len(out), f"--kd_steps={spec!r} 有重复步"
+    return out
+
+
+def parse_kd_step_weights(ws, n_sel: int):
+    """`--kd_step_weights` → 长度 n_sel 的权重列表; 空 ⇒ 全 1.0（等权）; 长度 1 ⇒ 广播。"""
+    out = [float(w) for w in (ws or [])]
+    if not out:
+        return [1.0] * int(n_sel)
+    assert len(out) in (int(n_sel), 1), \
+        f"--kd_step_weights 长度 {len(out)} 须 = 选中步数 {n_sel} 或 1"
+    if len(out) == 1:
+        out = out * int(n_sel)
+    assert all(w >= 0.0 for w in out) and sum(out) > 0.0, \
+        "--kd_step_weights 须全部非负且不全为 0"
+    return out
+
+
+def _init_zs_bottleneck_ortho(model: nn.Module) -> None:
+    """`--zs_dim>0` 且**从头训练**时的瓶颈良态初始化（2026-11-17, MUSA 448 线）。
+
+    现象（实测, 448²/p32, K=16, zs_dim=448, lr 2e-4, warmup 8%）: 默认
+    `nn.Linear` 初始化把 `enc_dim→zs_dim` 的映射方差压得很小（输出 std ≈
+    0.5/√? 量级 ≪1），解码器看到的 z 信号偏弱；训练到 lr≈1.1e-4（epoch3）时
+    grad_norm 从 ~1 爆到 519/1210，42% 优化步被 `--skip_grad` 跳过，val 从
+    13.31 dB 退化到 12.32 dB。同配置 zs_dim=0 的对照则稳定（见 diag A3/B3）。
+
+    修法: 把「编码器末端 FC + 解码器 mem_proj」的**初始复合映射**设成一次
+    随机正交子空间投影，信号既不放大也不塌到噪声底：
+        · zs_proj/zcls_proj: 权重 = Q[:, :d]ᵀ（(d, enc) 行正交; Q 为 enc 维正交阵）
+        · decoder.mem_proj: 权重 = [I_d; 0]（d 维原样放进 dec_dim 的前 d 维）
+    其余层（encoder / decoder stack / pixel head）初始化不变；这些 FC 之后照常
+    参与端到端训练。
+    """
+    zs = getattr(model, "zs_proj", None)
+    if zs is None:
+        return
+    enc, d = int(zs.in_features), int(zs.out_features)
+    gen = torch.Generator(device="cpu").manual_seed(20261117)
+    q, _ = torch.linalg.qr(torch.randn(enc, enc, generator=gen))
+    W = q[:, :d].T.contiguous()                     # (d, enc) 行正交
+    mem = getattr(model.decoder, "mem_proj", None)
+    with torch.no_grad():
+        for m in (model.zs_proj, model.zcls_proj):
+            m.weight.copy_(W.to(m.weight.dtype))
+            m.bias.zero_()
+        if isinstance(mem, nn.Linear) and mem.in_features == d:
+            Wm = torch.zeros_like(mem.weight)
+            n = min(mem.out_features, d)
+            Wm[:n, :n] = torch.eye(n, dtype=Wm.dtype)
+            mem.weight.copy_(Wm)
+            mem.bias.zero_()
+    _p(f"[zs_init] ortho: zs_proj {tuple(W.shape)} 行正交, "
+       f"mem_proj {tuple(mem.weight.shape) if isinstance(mem, nn.Linear) else 'n/a'}",
+       flush=True)
+
+
+def _init_bottleneck_warm_start(model: nn.Module, sd: dict) -> None:
+    """`--zs_dim>0` 的 warm start 初始化（2026-10-26）。
+
+    目标: 让"编码器末端 FC（enc_dim→zs_dim）+ 解码器 mem_proj（zs_dim→dec_dim）"
+    这一对在初始化时**尽量逼近旧的 mem_proj（enc_dim→dec_dim）**，即最小化
+    「多出来的瓶颈」带来的初始退化，然后全量微调。
+
+    做法（对旧 `decoder.mem_proj.weight` W (dec_dim, enc_dim) 做 SVD）:
+        W ≈ U_d · diag(S_d) · Vh_d          # 最优秩 zs_dim 近似（Eckart–Young）
+        zs_proj.weight = zcls_proj.weight = Vh_d        # (zs_dim, enc_dim) 下投影
+        decoder.mem_proj.weight = U_d · diag(S_d)       # (dec_dim, zs_dim) 上投影
+    ⇒ 初始 `mem_proj(FC(z))` = W 的最优秩 zs_dim 近似（与旧 memory 同量级/同方向）。
+
+    退化路径: 旧 ckpt 没有 `decoder.mem_proj.weight`（enc_dim==dec_dim 时 mem_proj 是
+    Identity）⇒ FC 用截断恒等（取前 zs_dim 维）。
+    """
+    if getattr(model, "zs_proj", None) is None:
+        return
+    d = int(model.zs_dim)
+    key = "decoder.mem_proj.weight"
+    with torch.no_grad():
+        if key in sd:
+            W = sd[key].float()                       # (dec_dim, enc_dim)
+            # 2026-11-22 fix: ckpt 本身已是瓶颈结构（mem_proj in_dim == zs_dim，说明源模型
+            # 早就带 zs_proj），此时 zs_proj/mem_proj 已由 load_state_dict 原样加载，
+            # 再做一次 SVD 会把 (d,d) 的 Vh_d 拷进 (d,enc_dim) 的 FC → 尺寸不符崩溃。
+            if int(W.shape[1]) == d:
+                _p(f"[init_from] zs_dim={d}: 源 ckpt 已是瓶颈结构 "
+                     f"(mem_proj {tuple(W.shape)})，跳过 SVD warm start", flush=True)
+                return
+            U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+            Vh_d = Vh[:d].contiguous()                # (d, enc_dim)
+            U_d = (U[:, :d] * S[:d]).contiguous()     # (dec_dim, d)
+            model.zs_proj.weight.copy_(Vh_d)
+            model.zcls_proj.weight.copy_(Vh_d)
+            model.zs_proj.bias.zero_()
+            model.zcls_proj.bias.zero_()
+            model.decoder.mem_proj.weight.copy_(U_d)
+            # 初始近似误差（相对 Frobenius）: 反映瓶颈带来的初始退化
+            approx = U_d @ Vh_d
+            rel = float((W - approx).norm() / W.norm())
+            _p(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=SVD 前 {d} 个右奇异向量, "
+                  f"mem_proj {tuple(W.shape)} → {tuple(U_d.shape)} "
+                  f"（秩-{d} 近似相对误差 {rel:.3f}）", flush=True)
+            return
+        for m in (model.zs_proj, model.zcls_proj):
+            m.weight.zero_()
+            m.bias.zero_()
+            for i in range(d):
+                m.weight[i, i] = 1.0
+    _p(f"[init_from] zs_dim={d} 瓶颈 warm start: FC=截断恒等（无 mem_proj 权重）",
+          flush=True)
+
+
+def load_init_from(model: nn.Module, path: str) -> dict:
+    """warm start: 允许缺 `decoder.mem_pos`（单步 → 循环）/ `refiner.*`（E-B3 新增块）
+    / `zs_proj.*`+`zcls_proj.*`（2026-10-26 编码器末端 FC 瓶颈）; 也允许
+    `decoder.mem_proj.*` 的形状变化（瓶颈臂: (dec_dim,enc_dim) → (dec_dim,zs_dim)）。
+
+    其余 missing 一律报错（形状不符/配置不匹配必须立刻失败）; 有多余 key 也报错。
+    返回 `{"missing": [...], "unexpected": [...], "shape_mismatch": [...]}`。
+    """
+    ck0 = torch.load(path, map_location="cpu", weights_only=False)
+    raw = dict(ck0["model"])
+    want = model.state_dict()
+    mism = {k: v for k, v in raw.items()
+            if k in want and tuple(v.shape) != tuple(want[k].shape)}
+    for k in mism:                       # 形状不符的先摘出来, 稍后按瓶颈规则重初始化
+        raw.pop(k)
+    if mism:
+        _p(f"[init_from] 形状变化（按瓶颈规则重初始化）: "
+              f"{ {k: (tuple(v.shape), tuple(want[k].shape)) for k, v in mism.items()} }",
+              flush=True)
+    missing, unexpected = model.load_state_dict(raw, strict=False)
+    if getattr(model, "zs_proj", None) is not None:
+        _init_bottleneck_warm_start(model, ck0["model"])
+    _p(f"[init_from] {path} → missing={list(missing)} "
+          f"unexpected={list(unexpected)}", flush=True)
+    assert not unexpected, f"ckpt 有多余 key: {unexpected[:5]}"
+    allowed = ({"decoder.mem_pos"}
+               | set(mism)                      # 形状变化: 已按瓶颈规则重初始化
+               | {k for k in missing if k.startswith("refiner.")}
+               | {k for k in missing if k.startswith("z_head.")}   # I1/I2 新头
+               | {k for k in missing if k.startswith("token_head.")}  # 阶段3-CE 新头
+               | {k for k in missing if k.startswith(("zs_proj.", "zcls_proj."))})
+    assert set(missing) <= allowed, \
+        f"除 mem_pos/refiner.*/FC 瓶颈外还有未加载参数（形状不符?）: " \
+        f"{[k for k in missing if k not in allowed][:8]}"
+    return {"missing": list(missing), "unexpected": list(unexpected),
+            "shape_mismatch": list(mism)}
+
+
+def _init_token_head_from_pixel(model: nn.Module) -> None:
+    """阶段3-CE 热启动: token 分类头第一层 ← 阶段2 像素头 MLP 第一层。
+
+    两者结构都是 Linear(dec_dim, hidden=1024)+GELU+Linear(hidden, out) ⇒ 第一层逐位
+    同形，可直接 copy; 最后一层（输出维像素 768 vs 码本 V）保持随机初始化。
+    源 ckpt 无像素头 / 结构不符时跳过（不报错）。
+    """
+    th = getattr(model, "token_head", None)
+    ph = getattr(getattr(model, "decoder", None), "pixel_head", None)
+    if th is None or ph is None:
+        _p("[token_ce] token 头热启动跳过（无 token_head 或源无 pixel_head）")
+        return
+    try:
+        # pixel_head 是 PixelHead（内含 .net Sequential）; token_head 本身是 Sequential
+        src = getattr(ph, "net", ph)[0]
+        dst = getattr(th, "net", th)[0]
+    except (AttributeError, IndexError, TypeError):
+        _p("[token_ce] token 头热启动跳过（无法定位第一层 Linear）")
+        return
+    if hasattr(src, "weight") and tuple(src.weight.shape) == tuple(dst.weight.shape):
+        dst.weight.data.copy_(src.weight.data)
+        dst.bias.data.copy_(src.bias.data)
+        _p(f"[token_ce] token 头第一层 ← 像素头 MLP 第一层 "
+              f"{tuple(dst.weight.shape)}（热启动）", flush=True)
+    else:
+        _p("[token_ce] token 头热启动跳过（第一层形状不符）", flush=True)
+
+
+def main():
+    global _IS_MAIN
+    args = parse_args()
+    if args.smoke:
+        args.limit = args.limit or 512
+        args.max_steps = args.max_steps or 30
+        args.val_batches = 2
+        args.log_interval = 5
+        args.num_workers = 8
+        args.sample_interval = 20
+    # ── 分布式（DDP）: 只有 torchrun 注入 WORLD_SIZE>1 才启用 ──────────────
+    # 未设置时 world=1/rank=0 ⇒ 下面所有 `if ddp:` 分支都不执行, 单卡路径逐位不变。
+    world, rank, local_rank = ddp_env()
+    ddp = world > 1
+    _IS_MAIN = (rank == 0)
+    if ddp:
+        backend = os.environ.get("DDP_BACKEND", "nccl")
+        ndev = torch.cuda.device_count()
+        # 正常 2 卡: local_rank 即物理卡号。同卡多 rank 的 plumbing 测试
+        # (CUDA_VISIBLE_DEVICES 只暴露 1 张卡) 时取模, 两个 rank 都落 device 0。
+        dev = local_rank if local_rank < ndev else local_rank % max(1, ndev)
+        _set_device(dev)                       # 单卡路径是 .cuda(); MUSA 只认 .to()
+        local_rank = dev
+        dist.init_process_group(backend=backend)
+        assert dist.get_world_size() == world, \
+            f"torchrun WORLD_SIZE={world} ≠ 进程组 world_size={dist.get_world_size()}"
+        # 每个 rank 各打一行（rank≠0 也打: 冒烟时用来确认两个进程都起来了/各自 device）
+        print(f"[ddp] rank={rank}/{world} local_rank={local_rank} "
+              f"backend={backend} device=cuda:{dev}"
+              + (" （⚠️ 多 rank 共卡调试: 仅 gloo 可跑, NCCL 会拒绝 Duplicate GPU）"
+                 if ndev < world else ""), flush=True)
+
+    if not ddp:
+        _set_device(0)
+
+    if _IS_MAIN:
+        os.makedirs(args.output_dir, exist_ok=True)
+    log_path = os.path.join(args.output_dir, "train_log.jsonl")
+    status_path = os.path.join(args.output_dir, "status.json")
+    if _IS_MAIN:      # 日志/args 只由 rank0 落盘
+        with open(os.path.join(args.output_dir, "args.json"), "w") as f:
+            json.dump(vars(args), f, ensure_ascii=False, indent=1)
+
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.benchmark = True
+
+    cfg = build_cfg(args)
+    model = SRPhase1LinAttn(cfg).to(_DEVICE)
+    if args.zs_init == "ortho" and not args.init_from:
+        _init_zs_bottleneck_ortho(model)
+    if args.init_from:
+        load_init_from(model, args.init_from)
+    if (args.init_from and int(getattr(args, "token_ce", 0)) > 0
+            and int(getattr(args, "token_ce_init_pixel", 1))):
+        _init_token_head_from_pixel(model)
+    if args.freeze_encoder:
+        for prm in model.encoder.parameters():
+            prm.requires_grad_(False)
+        n_tr = sum(prm.numel() for prm in model.parameters() if prm.requires_grad)
+        _p(f"[freeze] 冻结编码器 ⇒ 可训参数 {n_tr/1e6:.3f} M "
+              f"(原 {sum(prm.numel() for prm in model.parameters())/1e6:.3f} M)", flush=True)
+    pc = model.count_params()
+    n_steps = (len(model.decoder.steps) if getattr(model, "recurrent", False) else 1)
+    # ── I1/I2/I4: KD 空间 / 选中步 / 逐步权重（默认 last+pixel ⇒ 与 kd1 逐位相同）──
+    kd_space = str(args.kd_space).lower()
+    kd_scale = float(args.kd_latent_scale)
+    kd_render = str(args.render).lower()
+    if kd_space == "latent" or kd_render == "sdvae":
+        assert int(args.z_head) == 1, (
+            f"--kd_space={kd_space} / --render={kd_render} 需要 --z_head 1"
+            "（z_hat 来自潜变量头; 关着就没有 latent 可监督/可渲染）")
+    _kd_sel_raw = parse_kd_steps(args.kd_steps, n_steps)
+    if kd_space == "pixel":
+        # 像素分支是 kd1 原样: **只末步、权重恒 1**（改了就不是"逐位不变"了）
+        if str(args.kd_steps).strip().lower() not in ("", "last") or args.kd_step_weights:
+            _p("⚠️ --kd_space pixel ⇒ KD 固定只挂末步、权重恒 1; "
+               "--kd_steps/--kd_step_weights 仅在 --kd_space latent 下生效", flush=True)
+        kd_sel, kd_w = [n_steps - 1], [1.0]
+    else:
+        kd_sel = _kd_sel_raw
+        kd_w = parse_kd_step_weights(args.kd_step_weights, len(kd_sel))
+
+    _p(f"[decode] recurrent={getattr(model,'recurrent',False)} "
+          f"parallel={getattr(model,'parallel',False)} "
+          f"dec_attn={cfg.dec_attn} → {type(model.decoder).__name__} T={n_steps}"
+          + (f" steps={model.decoder.steps}" if getattr(model,'recurrent',False) else "")
+          + (f" read={getattr(model.decoder,'read_mode','')} "
+             f"limits={getattr(model.decoder,'limits','')}"
+             if getattr(model,'parallel',False) else ""),
+          flush=True)
+    _p(f"[cfg] N={cfg.num_patches} K={cfg.num_specials} "
+          f"enc={cfg.enc_dim}x{cfg.enc_depth} dec={cfg.dec_dim}x{cfg.dec_depth} "
+          f"enc_attn={cfg.enc_attn} → {type(model.encoder).__name__} "
+          f"zs_dim={getattr(cfg, 'zs_dim', 0)} "
+          f"({pc['values_per_image']} 个值/图)", flush=True)
+    _p(f"[alit] loss_weights={model.loss_weights or '(平权)'} "
+          f"dh_mode={model.dh_mode} dh_quantile={model.dh_quantile} "
+          f"sample_grad_iters={model.sample_grad_iters} "
+          f"refiner={type(model.refiner).__name__ if model.refiner else 'off'} "
+          f"(layers={cfg.refiner_layers} dim={cfg.refiner_dim} grow={cfg.refiner_grow} "
+          f"steps={cfg.refiner_steps or 'T'})", flush=True)
+    _p(f"[loss] recon_loss={getattr(cfg, 'recon_loss', 'l1')} "
+          f"(l1=逐像素 L1, l2=MSE；监控 recon 恒为 L1)", flush=True)
+    _p(f"[params] {pc}", flush=True)
+
+    # ── 阶段3-CE: 图像 tokenizer（冻结）+ 原图离散码（2026-11-26; 默认关）──
+    #    每个读出步把 norm_out(Y_t) 映射成 codebook logits，对 tokenizer(x) 的
+    #    离散码算交叉熵（逐步平权）。tokenizer 只在前向出现, 不参与梯度。
+    vq = None
+    mean01 = std01 = None
+    if int(getattr(args, "token_ce", 0)) > 0:
+        from vq_tokenizer import LlamaGenVQ16
+        for _nm in ("rfid_weight", "perc_weight", "kd_weight", "gan_weight"):
+            _v = float(getattr(args, _nm, 0.0))
+            assert _v == 0.0, \
+                f"--token_ce 1 与 --{_nm} {_v} 不能同时开（阶段3-CE 只用交叉熵）"
+        assert bool(args.dec_recurrent), "--token_ce 需要 --dec_recurrent 1（逐步读出）"
+        vq = LlamaGenVQ16(ckpt=str(args.vq_ckpt), device=str(_DEVICE))
+        assert int(vq.n_embed) == int(args.vq_codebook_size), \
+            f"tokenizer 码本 {vq.n_embed} ≠ --vq_codebook_size {args.vq_codebook_size}"
+        _gh, _gw = vq.grid(int(cfg.img_size))
+        assert _gh * _gw == cfg.num_patches and cfg.img_size // _gh == cfg.patch, \
+            (f"tokenizer 网格 {_gh}x{_gw} 与 patch 网格 "
+             f"({cfg.img_size // cfg.patch}x{cfg.img_size // cfg.patch}, N={cfg.num_patches}) 不对齐")
+        mean01 = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1).to(_DEVICE)
+        std01 = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1).to(_DEVICE)
+        _p(f"[token_ce] VQ ckpt={args.vq_ckpt} "
+              f"vocab={vq.n_embed} code_dim={getattr(vq, 'codebook_dim', '?')} "
+              f"grid={_gh}x{_gw}(=N {cfg.num_patches}) ⇒ 每步对整幅 {_gh * _gw} 个位置"
+              f"算 CE（T={n_steps} 步平权）; 像素头不参与损失; 解码器/循环与阶段2 同一条",
+              flush=True)
+
+    # ── 批次 rFID 辅助损失（2026-11-20; --rfid_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    rfid_fn = None
+    if float(getattr(args, "rfid_weight", 0.0)) > 0:
+        from rfid_loss import BatchRFIDLoss
+        rfid_fn = BatchRFIDLoss(
+            dim=int(getattr(args, "rfid_dim", 2048)),
+            normalize_by_dim=bool(getattr(args, "rfid_norm_dim", 1))).to(_DEVICE)
+        rfid_fn.eval()
+        _p(f"[rfid] batch rFID loss: InceptionV3 pool3(dim={args.rfid_dim}) "
+              f"weight={args.rfid_weight} every={args.rfid_every} "
+              f"start_frac={args.rfid_start_frac} ramp_frac={args.rfid_ramp_frac} "
+              f"norm_by_dim={bool(args.rfid_norm_dim)}", flush=True)
+
+    # ── VGG16 感知损失（2026-11-21; --perc_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    perc_fn = None
+    if float(getattr(args, "perc_weight", 0.0)) > 0:
+        from perc_loss import VGGPerceptualLoss
+        _pl = [int(v) for v in str(args.perc_layer).split(",") if str(v).strip()]
+        perc_fn = VGGPerceptualLoss(layers=_pl,
+                                    resize=int(args.perc_resize)).to(_DEVICE)
+        perc_fn.eval()
+        _p(f"[perc] VGG16 感知损失: weight={args.perc_weight} layers={_pl} "
+              f"resize={args.perc_resize}", flush=True)
+
+    # ── SD-VAE 蒸馏 teacher（2026-11-23; 默认全关 ⇒ 旧路径逐位不变）──
+    #    装载条件 = KD 有梯度需求（weight>0）**或** latent 空间（要 teacher encoder）
+    #    **或** teacher-decoder 渲染（要 teacher decoder）—— 后两者即使 weight=0 也要装。
+    kd_fn = None
+    if (float(getattr(args, "kd_weight", 0.0)) > 0
+            or kd_space == "latent" or kd_render == "sdvae"):
+        from kd_loss import SDVAETeacher
+        kd_fn = SDVAETeacher(model_id=str(args.kd_teacher),
+                             local_files_only=bool(int(args.kd_local_only)),
+                             latent_scale=kd_scale).to(_DEVICE)
+        kd_fn.eval()
+        _p(f"[kd] SD-VAE 蒸馏: space={kd_space} weight={args.kd_weight} "
+              f"loss={args.kd_loss} scale={kd_scale} "
+              f"steps={args.kd_steps}⇒{'/'.join(str(i+1) for i in kd_sel)} (1-based, T={n_steps}) "
+              f"w={kd_w}(加权平均, Σ={sum(kd_w):.2f}) render={kd_render} "
+              f"start_frac={args.kd_start_frac} ramp_frac={args.kd_ramp_frac} "
+              f"every={args.kd_every} | {kd_fn.describe(int(args.img_size))}", flush=True)
+        if abs(kd_scale - 1.0) > 1e-9:
+            _p(f"[kd] ⚠️ kd_latent_scale={kd_scale} ⇒ KD 项与梯度被整体乘 "
+                  f"s²={kd_scale ** 2:.4f}，**有效 λ = {float(args.kd_weight) * kd_scale ** 2:.4g}"
+                  f"**（不是 {args.kd_weight}）。除非复现历史 ckpt，否则请用 1.0", flush=True)
+
+    # ── I2: val/评测出图路径（`--render sdvae` ⇒ z_hat → 冻结 teacher decoder）──
+    #    默认 render=pixel ⇒ val_render_fn=None ⇒ val 与改造前逐位相同。
+    val_render_fn, val_render_tag = None, ""
+    if kd_render == "sdvae":
+        # ⚠️ 2026-11-23 修: z_hat 的语义是**未缩放** latent（loss=MSE(z_hat*s, z_t*s)
+        #    的最优解是 z_hat=z_t, s 只改尺度不改目标）⇒ 渲染必须 decode(z_hat)，
+        #    绝不能 /scale（那样 latent 被放大 1/s≈5.5 倍 ⇒ 出图约等于均值图）。
+        val_render_fn = (lambda o: kd_fn.decode_latent(o["z_hat"][:, -1].float()))
+        val_render_tag = " [val-render=sdvae]"
+        _p(f"[val] 出图走 z_hat[:,-1] → teacher.decode ⇒ **非**自身像素头: "
+              f"下面的 val PSNR/SSIM 与 best ckpt 选择都按这条投放路径", flush=True)
+
+    raw_model = model            # DDP 包装前的裸模型: state_dict / evaluate / 采样图用
+    use_manual_ddp = False
+    if ddp:
+        impl = os.environ.get("DDP_IMPL", "auto").lower()
+        is_musa = hasattr(torch, "musa") and torch.musa.is_available()
+        if impl == "manual" or (impl == "auto" and is_musa):
+            # MUSA 默认走 ManualDDP（不依赖 DDP 的 c10d logger）；若想要
+            # DDP 的 bucket/通信-反传重叠，设 DDP_IMPL=patched 走下面的补丁路径。
+            if impl == "auto":
+                use_manual_ddp = True
+                model = ManualDDP(raw_model, world)
+                for prm in raw_model.parameters():
+                    dist.broadcast(prm.data, src=0)
+            else:
+                model = DDP(raw_model, device_ids=[local_rank],
+                            find_unused_parameters=True)
+        else:
+            model = DDP(raw_model, device_ids=[local_rank],
+                        find_unused_parameters=True)
+            if is_musa:
+                _patch_ddp_pre_forward_musa(model)
+
+    # ── PatchGAN 判别器（2026-11-22; --gan_weight 0 = 关 ⇒ 旧路径逐位不变）──
+    gan = None
+    if float(getattr(args, "gan_weight", 0.0)) > 0:
+        from patchgan import PatchGANTrainer
+        gan = PatchGANTrainer(ndf=int(args.gan_ndf), n_layers=int(args.gan_layers),
+                              lr=float(args.gan_d_lr), device=_DEVICE,
+                              ddp=ddp, world=world, rank=rank)
+        _gan_w = gan.last_layer_weight(raw_model)
+        _p(f"[gan] adaptive 基准层 = "
+              f"{'pixel_head.last_weight' if _gan_w is not None else 'None(退回固定权重)'}",
+              flush=True)
+        _p(f"[gan] PatchGAN ndf={args.gan_ndf} layers={args.gan_layers} "
+              f"weight={args.gan_weight} d_lr={args.gan_d_lr} "
+              f"start_frac={args.gan_start_frac} ramp_frac={args.gan_ramp_frac} "
+              f"adaptive={bool(int(args.gan_adaptive))} "
+              f"（D {sum(p.numel() for p in gan.D.parameters())/1e6:.2f}M 参数, "
+              f"{'独立于 DDP/手动 allreduce' if ddp else '单卡'}）", flush=True)
+
+    accum = max(1, int(args.accum_steps))
+    # ★ `--batch_size` 恒为**全局等效批量**: 每卡 micro = batch_size/(accum×world)。
+    #   单卡时 world=1 ⇒ micro = batch_size/accum, 与改造前逐位相同。
+    assert args.batch_size % (accum * world) == 0, \
+        f"--batch_size({args.batch_size}) 须能被 accum_steps×world_size" \
+        f"({accum}×{world}={accum * world}) 整除"
+    micro_bs = args.batch_size // (accum * world)
+    if accum > 1:
+        _p(f"[accum] 等效批量 {args.batch_size} = micro {micro_bs} × {accum} "
+              f"累积, 优化步数不变（val 每批 {micro_bs} × 批数×{accum} 保持同样张数）",
+              flush=True)
+    if ddp:
+        _p(f"[ddp] 等效批量 {args.batch_size} = 每卡 micro {micro_bs} × 每卡 accum "
+              f"{accum} × {world} 卡（与单卡 micro {args.batch_size // accum} × "
+              f"accum {accum} 等价, 优化步数不变）", flush=True)
+    # val 张数口径: 单卡 val 图数 = micro×accum×val_batches = batch_size×val_batches,
+    # DDP 下换成每个 rank 的 micro/accum, 故批数要乘 world 才能保持同样张数。
+    val_batches_n = args.val_batches * accum * world
+    tr_loader, va_loader, tr_ds, va_ds = build_loaders(
+        args.data_dir, args.img_size, micro_bs, args.val_per_class,
+        args.num_workers, args.limit, val_batches_n)
+    tr_sampler = None
+    if ddp:
+        # 每卡只看自己那份（DistributedSampler 自动垫齐到 ceil(N/world)）
+        tr_sampler = DistributedSampler(tr_ds, num_replicas=world, rank=rank,
+                                        shuffle=True, seed=args.seed,
+                                        drop_last=False)
+        tr_loader = DataLoader(tr_ds, batch_size=micro_bs, sampler=tr_sampler,
+                               drop_last=True, num_workers=args.num_workers,
+                               pin_memory=True,
+                               persistent_workers=args.num_workers > 0,
+                               prefetch_factor=4 if args.num_workers > 0 else None)
+    steps_per_epoch = len(tr_loader) // accum
+    total_steps = (args.max_steps if args.max_steps > 0
+                   else steps_per_epoch * args.epochs)
+    warmup = max(1, int(total_steps * args.warmup_frac))
+    _p(f"[data] train={len(tr_ds)} val={len(va_ds)} "
+          f"steps/epoch={steps_per_epoch} total_steps={total_steps} "
+          f"warmup={warmup}", flush=True)
+    if ddp:
+        # ★等价批量语义守卫: steps/epoch 必须与「同样超参的单卡跑」完全一致,
+        #   否则等效批量/优化步数被悄悄改了（每个 rank 各打一行, 供冒烟核对）。
+        micro_single = args.batch_size // accum
+        ref_single = (len(tr_ds) // micro_single) // accum
+        assert steps_per_epoch == ref_single, (
+            f"DDP steps/epoch={steps_per_epoch} ≠ 单卡参考 {ref_single}"
+            f"（train={len(tr_ds)} micro={micro_bs} accum={accum} world={world}）")
+        print(f"[ddp] rank={rank} sampler num_samples={len(tr_sampler)} "
+              f"loader_batches={len(tr_loader)} micro={micro_bs} accum={accum} "
+              f"⇒ steps/epoch={steps_per_epoch} == 单卡参考 {ref_single} ✓",
+              flush=True)
+
+    opt = torch.optim.AdamW(param_groups(raw_model, args.weight_decay),
+                            lr=args.lr, betas=(0.9, 0.95), eps=1e-8)
+    start_step, start_epoch, best_psnr = 0, 0, -1e9
+    if args.resume and os.path.exists(args.resume):
+        ck = torch.load(args.resume, map_location="cpu", weights_only=False)
+        raw_model.load_state_dict(ck["model"])
+        if "opt" in ck:
+            opt.load_state_dict(ck["opt"])
+        start_step = ck.get("step", 0)
+        start_epoch = ck.get("epoch", 0)
+        best_psnr = ck.get("best_psnr", -1e9)
+        _p(f"[resume] {args.resume} step={start_step} epoch={start_epoch} "
+              f"best_psnr={best_psnr:.3f}", flush=True)
+
+    def save_ckpt(path, step, epoch, best, tag=""):
+        blob = {"model": raw_model.state_dict(),   # 裸模型: 不带 DDP 的 "module." 前缀
+                "cfg": cfg.to_dict(), "args": vars(args), "step": step,
+                "epoch": epoch, "best_psnr": best, "tag": tag,
+                "params": pc}
+        if ddp:                                    # 单卡 ckpt 逐字节不变: 只在 DDP 下加此键
+            blob["ddp"] = {"world_size": world, "rank": rank, "backend": backend,
+                           "micro_bs": micro_bs, "accum": accum}
+        if args.save_opt:
+            blob["opt"] = opt.state_dict()      # 默认路径与原行为逐位相同
+        torch.save(blob, path)
+
+    t0 = time.time()
+    run_imgs, run_t0 = 0, time.time()
+    n_skipped = 0
+    loss_sum, rec_sum = 0.0, 0.0     # 一个优化步内 accum 个 micro-batch 的累计
+    gan_lam_state = None             # 自适应 λ 的跨 micro-batch 共享值（同一步内一致）
+    model.train()
+    step = start_step
+    stop = False
+    epoch = start_epoch
+    # 终止条件用**步数**（而非 epoch 数）: 这样 --time_budget_h 中途打断后从
+    # ckpt 续跑也能正好补满 total_steps, cosine 能走到 min_lr
+    # （2026-10-15 独立审查 finding 6: 旧版按 epoch 数终止会少跑 <1 epoch）。
+    while step < total_steps and not stop:
+        epoch += 1
+        if ddp:
+            tr_sampler.set_epoch(epoch)   # 每 epoch 换一份不重复的全局打乱划分
+        for bi, (x, _) in enumerate(tr_loader):
+            if step >= total_steps:
+                stop = True
+                break
+            lr = lr_at(step, total_steps, warmup, args.lr, args.min_lr)
+            for g in opt.param_groups:
+                g["lr"] = lr
+            x = x.to(_DEVICE, non_blocking=True)
+            if bi % accum == 0:
+                opt.zero_grad(set_to_none=True)
+                loss_sum, rec_sum = 0.0, 0.0
+                _dstat = None            # 本次优化步的判别器监控量（GAN 关闭时恒 None）
+            last_micro = ((bi + 1) % accum == 0)
+            # rFID 权重调度（rfid_fn=None 或未到启动步 ⇒ 0, 下方分支不进）
+            rfid_lam = 0.0
+            if rfid_fn is not None:
+                _st = max(1, int(args.rfid_start_frac * total_steps))
+                _rp = max(1, int(args.rfid_ramp_frac * total_steps))
+                if step >= _st:
+                    rfid_lam = float(args.rfid_weight) * min(
+                        1.0, (step - _st + 1) / _rp)
+            rfid_raw = None
+            perc_lam = float(getattr(args, "perc_weight", 0.0))
+            perc_raw = None
+            # SD-VAE 蒸馏权重调度（与 rFID 同款 start_frac + ramp）
+            kd_lam = 0.0
+            if kd_fn is not None:
+                _kst = max(1, int(args.kd_start_frac * total_steps))
+                _krp = max(1, int(args.kd_ramp_frac * total_steps))
+                if step >= _kst:
+                    kd_lam = float(args.kd_weight) * min(
+                        1.0, (step - _kst + 1) / _krp)
+            kd_raw = None
+            kd_mse = None
+            # 逐步诊断（2026-11-24 加）：kd2-#1 只有一个跨步平均的 kd_mse，看不出
+            # 是早期步（384 值）拖累还是末步也压不下去 ⇒ 逐步 MSE + 相对 RMS 误差。
+            kd_mse_steps = kd_rel_steps = kd_step_ids = None
+            # PatchGAN 对抗权重调度（ramp 避免开局把已收敛的模型打乱）
+            adv_raw = None
+            lam_ratio = None
+            if gan is not None:
+                # 自适应模式下同一优化步内所有 micro-batch 用同一个 λ（上一次算出的值），
+                # 只有最后一次 micro 才重新按梯度比值更新它。
+                if gan_lam_state is not None:
+                    gan_lam = gan_lam_state
+                else:
+                    gan_lam = gan.lam_at(step,
+                                         int(args.gan_start_frac * total_steps),
+                                         int(args.gan_ramp_frac * total_steps),
+                                         float(args.gan_weight))
+            else:
+                gan_lam = 0.0
+            # DDP 梯度累积: 只有本优化步的最后一次 micro 才 allreduce, 其余 no_sync
+            # （否则每个 micro 都同步一次, 通信量 ×accum 且语义不等价）。
+            sync_ctx = (model.no_sync() if ddp and not last_micro
+                        else contextlib.nullcontext())
+            with sync_ctx:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
+                    if vq is not None:
+                        # 阶段3-CE: 目标 = tokenizer 对**同一增广视图**原图的离散码
+                        # （tokenizer 冻结; ids 必须在 **fp32** 下算 —— no_grad 不关 autocast,
+                        #  bf16 autocast 会让 conv 走 bf16 ⇒ 实测 ~5.8% 的 id 与 fp32 不同,
+                        #  而 val 侧/P0 天花板都用 fp32 码 ⇒ 这里显式关掉 autocast）
+                        with torch.no_grad(), torch.autocast("cuda", enabled=False):
+                            _x01 = (x.float() * std01 + mean01).clamp(0.0, 1.0)
+                            _tgt_ids = vq.encode_ids(_x01)
+                        out = model(x, target_ids=_tgt_ids)
+                    else:
+                        out = model(x)
+                    loss = out["loss"]
+                    base_loss = loss
+                    # 末步重建 F_hat vs target 的辅助项（rFID / 感知损失, 小权重）
+                    _need_rfid = (rfid_fn is not None and rfid_lam > 0.0
+                                  and step % max(1, int(args.rfid_every)) == 0)
+                    _need_perc = perc_fn is not None and perc_lam > 0.0
+                    _need_gan = gan is not None and gan_lam > 0.0
+                    _need_kd = (kd_fn is not None and kd_lam > 0.0
+                                and step % max(1, int(args.kd_every)) == 0)
+                    if _need_rfid or _need_perc or _need_gan or _need_kd:
+                        _pred01 = patches_to_image(
+                            out["F_hat"], cfg.img_size, cfg.img_size, cfg.patch,
+                            IMAGENET_MEAN, IMAGENET_STD,
+                            clamp_255=False).clamp(0.0, 1.0)
+                        _tgt01 = patches_to_image(
+                            out["target_pix"], cfg.img_size, cfg.img_size, cfg.patch,
+                            IMAGENET_MEAN, IMAGENET_STD,
+                            clamp_255=False).clamp(0.0, 1.0)
+                    if _need_rfid:
+                        _r = rfid_fn(_pred01, _tgt01)
+                        loss = loss + rfid_lam * _r["loss"]
+                        rfid_raw = float(_r["raw"].detach())
+                    if _need_perc:
+                        with torch.autocast("cuda", enabled=False):
+                            _pv = perc_fn(_pred01.float(), _tgt01.float())
+                        loss = loss + perc_lam * _pv
+                        perc_raw = float(_pv.detach())
+                    if _need_kd:
+                        if kd_space == "latent":
+                            # ── I1: latent MSE（教师 encoder 只跑一次/微批）──
+                            #  z_t 只由 GT 生成（no_grad, fp32）; 梯度只经 z_hat 反传。
+                            #  L += kd_lam · Σ_t w_t·MSE(z_hat_t·s, z_t·s)
+                            with torch.autocast("cuda", enabled=False):
+                                _kt_z = kd_fn.encode_codes(_tgt01)
+                                _z_hat = out["z_hat"].float()
+                                _kt_rms = float(_kt_z.float().pow(2).mean().sqrt()) + 1e-12
+                                _terms, _plains, _rels = [], [], []
+                                for _t, _w in zip(kd_sel, kd_w):
+                                    _m = latent_mse(_z_hat[:, _t], _kt_z, kd_scale)
+                                    _terms.append(_w * _m)
+                                    _plains.append(float(_m.detach()))
+                                    _rels.append((float(_m.detach()) ** 0.5) / _kt_rms)
+                                # 加权**平均**（除以权重和）: `--kd_weight` 始终是总 λ,
+                                # 改权重"形状"不会顺带改总强度（与 `_aggregate_loss` 的
+                                # 既有归一化口径一致; ALIT 用不归一化的 sum, 差别只是 λ 的
+                                # 定义, 但对我们"先扫 λ 再调形状"更不易混淆）。
+                                _kdl = torch.stack(_terms).sum() / max(
+                                    1e-12, float(sum(kd_w)))
+                            kd_mse = sum(_plains) / max(1, len(_plains))
+                            kd_step_ids = [int(_t) + 1 for _t in kd_sel]
+                            kd_mse_steps, kd_rel_steps = _plains, _rels
+                        else:
+                            # ── 像素（默认, = kd1 原样: 只末步、L1/MSE 到教师解码图）──
+                            _kt01 = kd_fn(_tgt01)
+                            with torch.autocast("cuda", enabled=False):
+                                if str(args.kd_loss).lower() == "l2":
+                                    _kdl = F.mse_loss(_pred01.float(), _kt01)
+                                else:
+                                    _kdl = F.l1_loss(_pred01.float(), _kt01)
+                        loss = loss + kd_lam * _kdl
+                        kd_raw = float(_kdl.detach())
+                    if _need_gan:
+                        _adv = gan.g_adv_loss(_pred01)
+                        # VQGAN 自适应权重: 让对抗项对**末端重建张量**的梯度范数与
+                        # 重建损失同量级（否则 L1 已收敛时对抗项要么无效要么炸掉模型）。
+                        # autograd.grad 只从 loss 反传到 pred（图很小）⇒ 开销可忽略。
+                        if bool(int(args.gan_adaptive)) and last_micro:
+                            try:
+                                _r = gan.grad_ratio(base_loss, _adv, _gan_w)
+                                if _r is None:
+                                    raise RuntimeError("grad_ratio=None")
+                                gan_lam = gan.lam_at(
+                                    step, int(args.gan_start_frac * total_steps),
+                                    int(args.gan_ramp_frac * total_steps),
+                                    float(args.gan_weight) * _r)
+                                gan_lam_state = gan_lam
+                                lam_ratio = _r
+                            except RuntimeError as e:
+                                _p(f"[gan] adaptive λ 失败({e}), 用固定权重", flush=True)
+                        adv_raw = float(_adv.detach())
+                        loss = loss + gan_lam * _adv
+                (loss / accum).backward()      # accum=1 时与原行为逐位相同
+            loss_sum += float(base_loss.item())
+            rec_sum += float(out["recon"].item())
+            if not last_micro:
+                continue                    # 累积未满 ⇒ 不做优化步
+            if use_manual_ddp:               # MUSA: 梯度平均（等价 DDP 的 allreduce）
+                model.allreduce_gradients()
+            if _DIAG_GRAD and _IS_MAIN:
+                _p(f"[gdiag] step {step} {_grad_group_norms(raw_model)}",
+                   flush=True)
+            if args.grad_clip > 0:
+                gn = torch.nn.utils.clip_grad_norm_(
+                    [prm for prm in raw_model.parameters() if prm.requires_grad],
+                    args.grad_clip)
+            else:
+                gn = torch.tensor(0.0)
+            # ★梯度爆炸跳步护栏（线性注意力稳定性修复 3）: 前向产出巨大 activation
+            #   时参数本身还完好, 只要**不做这一步更新**就不会被毁（实测不设护栏时
+            #   grad_norm 冲到 3e8, 一步就把 PSNR 从 19.6dB 打到 11.8dB 且不可恢复）。
+            if args.skip_grad > 0 and float(gn) > args.skip_grad:
+                n_skipped += 1
+                opt.zero_grad(set_to_none=True)
+            else:
+                opt.step()
+            # 判别器更新（G 步之后；G 的对抗项会把梯度写进 D, 这里 zero_grad 后重算）
+            if gan is not None and gan_lam > 0.0:
+                _d = gan.update_d(_tgt01, _pred01)
+                _dstat = _d
+            step += 1
+            if (_IS_MAIN and int(getattr(args, "save_every_steps", 0)) > 0
+                    and step % int(args.save_every_steps) == 0
+                    and step % steps_per_epoch != 0):
+                save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"),
+                          step, epoch, best_psnr, "periodic")
+            if args.stop_at_step > 0 and step >= args.stop_at_step:
+                _p(f"[stop] 达到 stop_at_step={args.stop_at_step}"
+                      f"（total_steps/lr 调度保持 {total_steps} 不变）", flush=True)
+                stop = True
+                break
+            run_imgs += x.shape[0] * accum * world   # DDP: ×world = 全局吞吐（单卡恒等）
+            loss_avg = loss_sum / accum
+            rec_avg = rec_sum / accum
+
+            # 日志/status 只由 rank0 写（否则两个 rank 抢同一个 status.json.tmp，
+            # os.replace 会 ENOENT；train_log.jsonl 也会被写两遍）。
+            if _IS_MAIN and (step % args.log_interval == 0 or step - start_step <= 3):
+                el = time.time() - t0
+                ips = run_imgs / max(1e-6, time.time() - run_t0)
+                eta_h = (total_steps - step) / max(1e-6, ips) * args.batch_size / 3600
+                rec = {
+                    "step": step, "epoch": epoch, "loss": round(loss_avg, 5),
+                    "recon": round(rec_avg, 5),
+                    "lr": lr, "grad_norm": round(float(gn), 4), "skipped": n_skipped, "T": n_steps,
+                    "img_per_s": round(ips, 1), "elapsed_min": round(el / 60, 2),
+                    "eta_h": round(eta_h, 2),
+                    "vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+                }
+                _rfid_txt = ""
+                if rfid_fn is not None:
+                    rec["rfid"] = (None if rfid_raw is None else round(rfid_raw, 3))
+                    rec["rfid_lam"] = round(rfid_lam, 6)
+                    if rfid_raw is not None:
+                        _rfid_txt = f" rfid={rfid_raw:.2f}(λ={rfid_lam:.4f})"
+                if kd_fn is not None:
+                    rec["kd_lam"] = round(kd_lam, 6)
+                    if kd_raw is not None:
+                        rec["kd"] = round(kd_raw, 5)
+                        if kd_mse is not None:      # latent 臂: 未乘 λ/未加权的原始 MSE
+                            rec["kd_mse"] = round(kd_mse, 6)
+                            if kd_mse_steps is not None:
+                                rec["kd_mse_steps"] = {
+                                    str(k): round(v, 6)
+                                    for k, v in zip(kd_step_ids, kd_mse_steps)}
+                                rec["kd_rel_steps"] = {
+                                    str(k): round(v, 4)
+                                    for k, v in zip(kd_step_ids, kd_rel_steps)}
+                            _rfid_txt += (f" kd_mse={kd_mse:.5f}"
+                                          f" kd={kd_raw:.4f}(λ={kd_lam:.4f})")
+                            if kd_mse_steps is not None:
+                                _rfid_txt += (" kd8=[" + ",".join(
+                                    f"{v:.4f}" for v in kd_mse_steps) + "]")
+                                _rfid_txt += (" zrel=[" + ",".join(
+                                    f"{v:.3f}" for v in kd_rel_steps) + "]")
+                        else:
+                            _rfid_txt += f" kd={kd_raw:.4f}(λ={kd_lam:.4f})"
+                if gan is not None:
+                    rec["gan_lam"] = round(gan_lam, 6)
+                    if adv_raw is not None:
+                        rec["adv"] = round(adv_raw, 4)
+                    if lam_ratio is not None:
+                        rec["lam_ratio"] = round(lam_ratio, 3)
+                    if _dstat:
+                        rec["d"] = {k: round(v, 3) for k, v in _dstat.items()}
+                        _rfid_txt += (f" gan(λ={gan_lam:.4f}"
+                                      f" r={lam_ratio if lam_ratio is None else round(lam_ratio,2)}"
+                                      f" adv={adv_raw:.3f}"
+                                      f" d_real={_dstat['d_real']:.2f}"
+                                      f" d_fake={_dstat['d_fake']:.2f}"
+                                      f" acc_f={_dstat['acc_fake']:.2f})")
+                if vq is not None:
+                    # 阶段3-CE 监控: 逐步 CE / top-1（逐步平权; recon 恒 = 平均 CE）
+                    rec["tok_ce"] = round(float(out["tok_ce"]), 5)
+                    rec["tok_acc"] = round(float(out["tok_acc"]), 5)
+                    rec["tok_ce_steps"] = [round(float(v), 5)
+                                           for v in out["tok_ce_per_step"]]
+                    rec["tok_acc_steps"] = [round(float(v), 5)
+                                            for v in out["tok_acc_per_step"]]
+                    _rfid_txt += (f" ce={float(out['tok_ce']):.4f}"
+                                  f" acc={float(out['tok_acc']):.4f}")
+                _p(f"[{el/60:7.2f}m] step {step}/{total_steps} ep{epoch} "
+                      f"loss={loss_avg:.4f} recon={rec_avg:.4f} "
+                      f"lr={lr:.2e} gn={float(gn):.2f} skip={n_skipped} {ips:.0f}img/s "
+                      f"vram={rec['vram_gb']:.1f}G eta={eta_h:.2f}h" + _rfid_txt, flush=True)
+                log_jsonl(log_path, rec)
+                write_status(status_path, {**rec, "best_psnr": best_psnr,
+                                           "running": True})
+
+            if (_IS_MAIN and vq is None and args.sample_interval
+                    and step % args.sample_interval == 0):
+                # ⚠️ 用 raw_model: DDP 包装后的 forward 含 buffer 广播集合通信,
+                #    只有 rank0 调用会 hang 住另一个 rank。
+                with torch.no_grad():
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(args.amp)):
+                        o = raw_model(x[:8])
+                    g_in = denorm01(o["target_pix"].float(), args.img_size, args.patch)
+                    g_rec = denorm01(o["F_hat"].float(), args.img_size, args.patch)
+                    save_pair_grid(g_in, g_rec,
+                                   os.path.join(args.output_dir, "samples",
+                                                f"step{step:07d}.png"))
+
+            if args.time_budget_h > 0 and (time.time() - t0) / 3600 >= args.time_budget_h:
+                _p(f"[stop] 达到时间预算 {args.time_budget_h}h", flush=True)
+                stop = True
+                break
+
+        # ── epoch 末验证 + 存档 ──
+        # ★2026-11-27 修 MUSA 崩溃: val 原先只在 rank0 跑, 其余 rank 在
+        #   `dist.barrier()` 上干等（T=16 的 5,000 张 val 约 3-5 min）⇒ 阻塞中的
+        #   MCCL barrier kernel 被 MUSA 驱动看门狗判成 "the launch timed out and
+        #   was terminated"(MUSA_ERROR_LAUNCH_TIMEOUT)。11-27 的 4 次崩溃**全部**
+        #   落在 epoch 末这一行, 且 s1(T=1, val 仅 ~10s)45 个 epoch 从未触发。
+        #   现在改成**4 卡同步都跑同一份 val**（冗余但对称, wall 时间与单卡相同）,
+        #   仍只由 rank0 打日志/落盘/选 best ⇒ 指标口径与数值逐位不变。
+        do_val = (args.val_batches > 0 and (step > start_step or epoch > 1))
+        if ddp:
+            dist.barrier()
+        if do_val:
+            if vq is not None:
+                # ── 阶段3-CE: val 指标 = token CE / top-1（与像素口径 PSNR 不可比）──
+                vr = evaluate_token(raw_model, va_loader, vq, mean01, std01,
+                                    bool(args.amp), args.val_batches * accum * world)
+                vr.update({"step": step, "epoch": epoch, "split": "val"})
+                if _IS_MAIN:
+                    _p(f"[val] ep{epoch} step{step} tok_ce={vr['tok_ce']:.4f} "
+                          f"tok_acc={vr['tok_acc']:.4f} "
+                          f"(阶段3-CE 臂: 像素头不参与, 与 PSNR 口径不可比)", flush=True)
+                    cur = -vr["tok_ce"]          # 与 best_psnr 同向（越大越好）
+            else:
+                vr = evaluate(raw_model, va_loader, args.patch, args.img_size,
+                              bool(args.amp), args.val_batches * accum * world,
+                              save_grid=(os.path.join(
+                                  args.output_dir, "samples",
+                                  f"epoch{epoch:03d}_val.png") if _IS_MAIN else ""),
+                              render_fn=val_render_fn)
+                vr.update({"step": step, "epoch": epoch, "split": "val"})
+                if _IS_MAIN:
+                    if val_render_fn is not None:
+                        vr["render"] = "sdvae"
+                    _p(f"[val] ep{epoch} step{step} l1={vr['l1_norm']:.4f} "
+                          f"psnr={vr['psnr']:.2f}dB ssim={vr['ssim']:.4f} "
+                          f"(mean基线 {vr['psnr_mean_image_baseline']:.2f}dB, "
+                          f"patchDC基线 {vr['psnr_patch_dc_baseline']:.2f}dB)"
+                          + val_render_tag, flush=True)
+                    cur = vr["psnr"]
+            if _IS_MAIN:
+                log_jsonl(log_path, vr)
+                with open(os.path.join(args.output_dir, "eval_val.json"), "w") as f:
+                    json.dump(vr, f, ensure_ascii=False, indent=1)
+                if cur > best_psnr:
+                    best_psnr = cur
+                    save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"),
+                              step, epoch, best_psnr, "best")
+                if vq is not None:
+                    write_status(status_path, {"step": step, "epoch": epoch,
+                                               "val_tok_ce": vr["tok_ce"],
+                                               "val_tok_acc": vr["tok_acc"],
+                                               "best_psnr": best_psnr,
+                                               "elapsed_min": round((time.time() - t0) / 60, 2),
+                                               "running": not stop})
+                else:
+                    write_status(status_path, {"step": step, "epoch": epoch,
+                                               "val_psnr": vr["psnr"], "val_l1": vr["l1_norm"],
+                                               "best_psnr": best_psnr,
+                                               "elapsed_min": round((time.time() - t0) / 60, 2),
+                                               "running": not stop})
+        if ddp:
+            dist.barrier()      # 全 rank 都做过 val, 这里只对齐 + 等 rank0 落盘
+        if _IS_MAIN and args.save_every_epochs and epoch % args.save_every_epochs == 0:
+            save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"),
+                      step, epoch, best_psnr, "last")
+            if getattr(args, "save_epoch_ckpts", 0):
+                save_ckpt(os.path.join(args.output_dir, f"ckpt_ep{epoch:03d}.pt"),
+                          step, epoch, best_psnr, f"ep{epoch}")
+
+    # 收尾: 只 rank0 落盘/打日志; 其它 rank 先 barrier 等落盘完再退出。
+    if ddp:
+        dist.barrier()
+    if _IS_MAIN:
+        save_ckpt(os.path.join(args.output_dir, "ckpt_last.pt"), step, epoch,
+                  best_psnr, "last")
+        if best_psnr < -1e8 and args.val_batches == 0:
+            save_ckpt(os.path.join(args.output_dir, "ckpt_best.pt"), step, epoch,
+                      best_psnr, "notvalidated")
+        dt = (time.time() - t0) / 60
+        _bm = (f"best_val_tok_ce={-best_psnr:.4f}（token 模式, 越小越好）"
+               if vq is not None else f"best_val_psnr={best_psnr:.2f}")
+        _p(f"[done] steps={step} epochs={epoch} {_bm} wall={dt:.1f}min", flush=True)
+        write_status(status_path, {"step": step, "epoch": epoch,
+                                   "best_psnr": best_psnr,
+                                   "best_tok_ce": (round(-best_psnr, 4)
+                                                   if vq is not None else None),
+                                   "elapsed_min": round(dt, 2), "running": False,
+                                   "done": True})
+    if ddp:
+        dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

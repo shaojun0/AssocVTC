@@ -1,0 +1,8 @@
+{
+ "n_per_half": 2500,
+ "images_used": 5000,
+ "split": "val items even/odd (class-balanced 25/class x100)",
+ "d_features": 2048,
+ "fid_gt_vs_gt": 22.423068922842617,
+ "note": "n=2500>d=2048 (\u534f\u65b9\u5dee\u6ee1\u79e9) \u7684\u540c\u534f\u8bae\u566a\u58f0\u5e95; \u5bf9\u6bd4 n=2000 \u65f6 (n<d \u5947\u5f02) \u4e3a 26.53"
+}

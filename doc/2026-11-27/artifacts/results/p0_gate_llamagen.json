@@ -1,0 +1,21 @@
+{
+ "n": 2000,
+ "img_size": 224,
+ "tokenizer": "LlamaGen-VQ-16",
+ "checkpoint": "/root/autodl-tmp/vq/llamagen_vq16_c2i.pt",
+ "rfid": 15.066669329174204,
+ "psnr": 20.38667041015625,
+ "l1_255": 17.776609810888765,
+ "wall_sec": 1018.7736039161682,
+ "grid": [
+  14,
+  14
+ ],
+ "n_embed": 16384,
+ "ids_per_image": 196,
+ "codebook_dim": 8,
+ "val_per_class": 50,
+ "subset": "deterministic val split, first n=2000 items (class-ordered prefix, no shuffle)",
+ "device": "cpu",
+ "rfid_protocol": "FID-InceptionV3 pool3 2048d, resize299, [0,1]->[-1,1], uint8-quantized in-memory (pytorch-fid equivalent)"
+}
